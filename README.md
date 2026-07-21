@@ -2,9 +2,9 @@
 
 ## Overview
 
-Ultrashort laser systems are susceptible to distortions that require careful monitoring. One such distortion is *spatial chirp*, a correlation between optical frequency and transverse position across the laser beam.
+Ultrashort laser systems are susceptible to distortions that require careful monitoring. One such distortion is ***spatial chirp***, a correlation between optical frequency and transverse position across the laser beam.
 
-As part of a summer research project in the *Laser Plasma Accelerator Group (LPAG)* at the University of Oxford, an imaging spectrometer was designed and built to detect and quantify spatial chirp in the group's Ti:sapphire laser system.
+As part of a summer research project in the ***Laser Plasma Accelerator Group (LPAG)*** at the University of Oxford, an imaging spectrometer was designed and built to detect and quantify spatial chirp in the group's Ti:sapphire laser system.
 
 This repository contains the Python application developed for the instrument. The software acquires images from a camera, preprocesses and analyses the data to estimate spatial dispersion, and presents the results in real time through a graphical user interface.
 
