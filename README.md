@@ -67,6 +67,48 @@ Imaging-Spectrometer-Pipeline/
 
 ---
 
+## Installation
+
+Clone the repository
+
+```bash
+git clone https://github.com/RonEllenbogen/Imaging-Spectrometer-Pipeline.git
+```
+
+Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Usage
+
+Implementation in progress.
+
+---
+
+## Roadmap
+
+- [ ] **Hardware bring-up** — camera connectivity verified via pylon Viewer; minimal single-frame grab script
+- [ ] **Acquisition** (`src/pipeline/acquisition/`) — threaded Basler/pypylon interface for live frame grabbing
+- [ ] **Preprocessing** (`src/pipeline/preprocessing/`) — dark-frame subtraction, ROI cropping, wavelength calibration
+- [ ] **Analysis** (`src/pipeline/analysis/`) — per-column centroid + uncertainty, weighted linear fit for spatial chirp ζ
+- [ ] **Validation** (`tests/`) — synthetic-data checks (injected-ζ recovery, null case) and validation against real calibration data (`data/raw` → `data/processed`)
+- [ ] **Headless integration** (`scripts/`) — capture-and-analyze CLI, no GUI
+- [ ] **GUI** (`src/pipeline/gui/`) — live camera display with threaded acquisition
+- [ ] **Full integration** (`src/pipeline/main.py`) — GUI wired to acquisition + analysis pipeline
+- [ ] **Documentation & polish** (`docs/`) — architecture write-up, edge-case handling, results export
+
+---
+
+## License
+
+MIT License
+
+---
+
 ## Acknowledgements
 
 This project was developed as part of a summer research project in the Laser Plasma Accelerator Group (LPAG) at the University of Oxford.
