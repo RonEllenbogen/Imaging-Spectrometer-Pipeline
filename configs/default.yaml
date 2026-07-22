@@ -1,0 +1,6 @@
+# This file contains all of the project's default configurations.
+
+# Camera details and settings
+camera:
+  serial_number: "41948281"
+  timeout: 5000 #ms. Time we give camera to acquire an image before raising an error.
