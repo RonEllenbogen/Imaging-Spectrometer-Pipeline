@@ -5,7 +5,7 @@ This class re-exports. It gives the rest of the codebase (outside of the acquisi
 from .camera import CameraStream
 from .frame import FrameData
 from .backends import CameraBackend, PylonBackend, SyntheticBackend
-from .exceptions import CameraError, CameraConnectionError, CameraTimeoutError
+from .exceptions import CameraError, CameraConnectionError, CameraTimeoutError, CameraConfigurationError
 
 # Constants
 
