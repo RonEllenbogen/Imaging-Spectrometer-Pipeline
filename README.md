@@ -21,7 +21,7 @@ This repository contains the Python application developed for the instrument. Th
 
 ## Current Status
 
-The repository structure has been initialised and the `README.md` is being written.
+Working on image acquisition scripts
 
 ---
 
