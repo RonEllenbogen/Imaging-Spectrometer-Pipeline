@@ -3,4 +3,7 @@
 # Camera details and settings
 camera:
   serial_number: "41948281"
-  timeout: 5000 #ms. Time we give camera to acquire an image before raising an error.
+  auto_exposure: True
+  auto_timeout: 100000 #ms. Time we give camera to acquire an image before raising an error. Set long enough to give auto_exposure time to converge.
+  exposure_time: 10000000 # (microseconds). Only utilised if auto_exposure == False
+  timeout: 100000 #ms. Time we give camera to acquire an image before raising an error. Set it equal to 10 times the exposure_time by default.
