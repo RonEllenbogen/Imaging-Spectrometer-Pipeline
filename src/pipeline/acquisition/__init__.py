@@ -2,7 +2,7 @@
 This file re-exports. It gives the rest of the codebase (outside of the acquisition package) one stable import path
 '''
 # Imports
-from .camera import CameraStream
+from .camera import CameraStream, DEFAULT_MAX_CONSECUTIVE_TIMEOUTS
 from .frame import FrameData, CANONICAL_DTYPE, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
 from .backends import CameraBackend, PylonBackend, SyntheticBackend
 from .exceptions import CameraError, CameraConnectionError, CameraTimeoutError, CameraConfigurationError
