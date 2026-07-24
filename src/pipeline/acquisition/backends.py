@@ -4,8 +4,9 @@ This file defines the swappable backends that either connect (for real data), or
 # Imports
 from typing import Protocol
 import numpy as np
+from pypylon import pylon, genicam
 
-from .exceptions import CameraConfigurationError, CameraTimeoutError
+from .exceptions import CameraError, CameraConnectionError, CameraConfigurationError, CameraTimeoutError
 from .pixel_formats import PIXEL_FORMAT_INFO, max_value_for_pixel_format, dtype_for_pixel_format
 
 # Constants
@@ -67,14 +68,252 @@ class CameraBackend(Protocol):
 class PylonBackend:
 
     '''
-    Real backend, wrapping pypylon calls. Only place in the codebase that talks to the actual SDK
+    Real hardware backend, wrapping pypylon/pylon SDK calls for the Basler
+    ace 2 a2A1920-51gmBAS. Satisfies CameraBackend structurally -- see the
+    earlier discussion on why Protocol was chosen over inheritance.
+
+    auto_exposure and auto_timeout are deliberately NOT part of the shared
+    CameraBackend contract -- SyntheticBackend has no equivalent concept,
+    so these live here as PylonBackend-specific constructor arguments only.
     '''
 
-    def __init__(self): ...
-    def connect(self) -> None: ...
-    def configure(self, exposure_us, gain_db, pixel_format) -> None: ...
-    def grab_one(self, timeout_ms) -> np.ndarray: ...
-    def close(self) -> None: ...
+    def __init__(self, serial_number: str, auto_exposure: bool = False, auto_timeout: int = 5000):
+
+        '''
+        Stores configuration and initializes internal state. Does NOT
+        connect to hardware -- that happens in connect(), matching the
+        same "construction never touches hardware" principle as
+        CameraStream and SyntheticBackend.
+
+        Parameters
+        ----------
+        serial_number
+            The serial number of the specific camera to connect to.
+            Required, since multiple Basler devices may be present on
+            the network.
+        auto_exposure
+            If True, configure() runs a one-time auto-exposure convergence
+            (ExposureAuto="Once") instead of setting exposure_us directly.
+        auto_timeout
+            Timeout, in milliseconds, for each RetrieveResult() call made
+            while waiting for auto-exposure to converge. Only relevant if
+            auto_exposure is True.
+        '''
+
+        self.serial_number = serial_number
+        self.auto_exposure = auto_exposure
+        self.auto_timeout = auto_timeout
+        self._camera: pylon.InstantCamera | None = None
+        self._configured = False
+
+    def connect(self) -> None:
+
+        '''
+        Finds the device matching serial_number among all enumerated
+        devices, and opens it. Does NOT configure or start grabbing --
+        that is configure()'s job.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        CameraConnectionError
+            If no device with a matching serial number is found, or if
+            opening the device fails.
+        '''
+
+        tl_factory = pylon.TlFactory.GetInstance()
+        devices = tl_factory.EnumerateDevices()
+
+        matching_device = next(
+            (d for d in devices if d.GetSerialNumber() == self.serial_number), None
+        )
+        if matching_device is None:
+            raise CameraConnectionError(
+                f"no device found with serial number {self.serial_number!r}"
+            )
+
+        try:
+            self._camera = pylon.InstantCamera(tl_factory.CreateDevice(matching_device))
+            self._camera.Open()
+        except genicam.GenericException as e:
+            raise CameraConnectionError(
+                f"failed to open device with serial number {self.serial_number!r}: {e}"
+            ) from e
+
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> None:
+
+        '''
+        Applies pixel format and gain unconditionally, then either runs a
+        one-time auto-exposure convergence or sets exposure_us directly,
+        depending on self.auto_exposure. Ends with grabbing already
+        started (GrabStrategy_LatestImageOnly) -- grab_one() assumes this
+        is already true by the time it's called.
+
+        Parameters
+        ----------
+        exposure_us
+            Exposure time in microseconds. Ignored if self.auto_exposure
+            is True -- the converged value is used instead.
+        gain_db
+            Sensor gain in decibels.
+        pixel_format
+            PixelFormat string, e.g. "Mono8". Validated against
+            PIXEL_FORMAT_INFO before being sent to the camera.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        CameraConfigurationError
+            If pixel_format is not recognized, if the camera rejects
+            pixel_format/gain_db/exposure_us, or if auto-exposure fails
+            to converge within auto_timeout.
+        RuntimeError
+        If called before connect().
+        '''
+
+        if self._camera is None:
+            raise RuntimeError("configure() called before connect()")
+        camera = self._camera   # narrowed local -- Pylance now treats this as never None
+
+        if pixel_format not in PIXEL_FORMAT_INFO:
+            raise CameraConfigurationError(
+                "pixel_format", pixel_format, f"must be one of {list(PIXEL_FORMAT_INFO)}"
+            )
+
+        try:
+            self._camera.PixelFormat.SetValue(pixel_format)
+            self._camera.Gain.SetValue(gain_db)
+        except genicam.GenericException as e:
+            raise CameraConfigurationError(
+                "pixel_format/gain_db", (pixel_format, gain_db), str(e)
+            ) from e
+
+        if self.auto_exposure:
+            self._converge_auto_exposure(self._camera)
+        else:
+            try:
+                self._camera.ExposureAuto.SetValue("Off")
+                self._camera.ExposureTime.SetValue(exposure_us)
+            except genicam.GenericException as e:
+                raise CameraConfigurationError("exposure_us", exposure_us, str(e)) from e
+            self._camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+
+    def _converge_auto_exposure(self, camera: pylon.InstantCamera) -> None:
+
+        '''
+        Runs ExposureAuto="Once" to convergence, matching the working
+        bring-up script's approach. Starts grabbing to feed the
+        auto-exposure algorithm and deliberately leaves grabbing running
+        afterward -- unlike a one-shot script, this needs to feed
+        straight into a continuous grab_one() loop, not stop and restart.
+
+        Private to PylonBackend -- not part of the shared CameraBackend
+        contract, since SyntheticBackend has no equivalent concept.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        CameraConfigurationError
+            If convergence does not complete within auto_timeout, or if
+            the camera rejects the ExposureAuto setting itself.
+        '''
+
+        try:
+            camera.ExposureAuto.SetValue("Once")
+            camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            while camera.ExposureAuto.GetValue() != "Off":
+                warm_up_grab = camera.RetrieveResult(
+                    self.auto_timeout, pylon.TimeoutHandling_ThrowException
+                )
+                warm_up_grab.Release()
+        except genicam.TimeoutException as e:
+            raise CameraConfigurationError(
+                "auto_exposure", True, f"did not converge within {self.auto_timeout}ms"
+            ) from e
+        except genicam.GenericException as e:
+            raise CameraConfigurationError("auto_exposure", True, str(e)) from e
+
+    def grab_one(self, timeout_ms: int) -> np.ndarray:
+
+        '''
+        Retrieves the next frame from the already-running grab engine
+        (started by configure()) and returns it as a numpy array.
+
+        Parameters
+        ----------
+        timeout_ms
+            Maximum time to wait for a frame, in milliseconds.
+
+        Returns
+        -------
+        np.ndarray
+            A copy of the grabbed frame -- never a view into a pylon
+            buffer, which is reclaimed the moment Release() is called
+            below.
+
+        Raises
+        ------
+        CameraTimeoutError
+            If no frame arrives within timeout_ms.
+        CameraError
+            If the grab completes without timing out but still fails
+            (e.g. dropped packets, sensor fault).
+        RuntimeError
+            If called before connect() and configure(), or after close().
+        '''
+
+        if self._camera is None or not self._configured:
+            raise RuntimeError("grab_one() called before connect()/configure()")
+        camera = self._camera
+
+        try:
+            grab_result = self._camera.RetrieveResult(
+                timeout_ms, pylon.TimeoutHandling_ThrowException
+            )
+        except genicam.TimeoutException as e:
+            raise CameraTimeoutError(timeout_ms) from e
+
+        if not grab_result.GrabSucceeded():
+            error_description = grab_result.ErrorDescription
+            grab_result.Release()
+            raise CameraError(f"grab failed: {error_description}")
+
+        frame = grab_result.Array.copy()
+        grab_result.Release()
+        return frame
+
+    def close(self) -> None:
+
+        '''
+        Stops grabbing (if active) and closes the device (if open). Safe
+        to call in any state, including if connect() was never called or
+        failed partway through -- matching the guarantee CameraStream's
+        cleanup logic relies on. Also resets internal state, so a grab_one() call after close()
+        correctly raises RuntimeError via the same guard used for "never
+        connected", rather than attempting to use a closed device.
+
+        Returns
+        -------
+        None
+        '''
+
+        if self._camera is not None:
+            if self._camera.IsGrabbing():
+                self._camera.StopGrabbing()
+            if self._camera.IsOpen():
+                self._camera.Close()
+
+        self._camera = None
+        self._configured = False
 
 class SyntheticBackend:
 

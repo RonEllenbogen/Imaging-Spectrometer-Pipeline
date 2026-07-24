@@ -5,12 +5,14 @@ This file is a test suite for CameraBackend implementations (SyntheticBackend, P
 import os
 import numpy as np
 import pytest
+import time
 
 from pipeline.acquisition import (
-    SyntheticBackend, PylonBackend, FrameData,
-    CameraConfigurationError, CameraTimeoutError,
+    SyntheticBackend, PylonBackend, FrameData, CameraStream,
+    CameraConfigurationError, CameraTimeoutError, CameraConnectionError,
     CANONICAL_SHAPE, CANONICAL_DTYPE,
 )
+from pipeline.utils.helpers import load_config
 
 # Constants and Functions (ordering is important for pytest parametrize)
 
@@ -62,6 +64,24 @@ PIXEL_FORMAT_TRUE_MAX = {
 # --- test_successive_grabs_are_not_identical ---
 SUCCESSIVE_GRABS_SEED = 11
 
+# --- TestPylonBackendOnly ---
+# Loaded once at collection time -- harmless if HARDWARE_AVAILABLE is False,
+# since it's just reading a value nothing then uses.
+SERIAL_NUMBER = load_config("configs/default.yaml")["camera"]["serial_number"]
+
+INVALID_SERIAL_NUMBER = "00000000"  # placeholder, should not match any real device
+EXPECTED_MODEL_NAME_SUBSTRING = "a2A1920"
+
+AUTO_EXPOSURE_TEST_TIMEOUT_MS = 10000  # generous -- convergence speed depends on lighting
+
+# Both unverified guesses -- tighten once you've seen real GetValue() readback
+# against these settings; the camera may quantize to its nearest achievable step.
+GAIN_TOLERANCE_DB = 0.5
+EXPOSURE_TOLERANCE_REL = 0.05  # 5% relative tolerance
+
+SUSTAINED_GRAB_DURATION_S = 3.0
+MIN_ACCEPTABLE_FPS = 5.0  # deliberately loose -- a sanity floor, not a performance target
+
 def _make_synthetic():
 
     '''
@@ -87,7 +107,7 @@ def _make_pylon():
         A Pylon backend.
     '''
 
-    return PylonBackend()
+    return PylonBackend(serial_number=SERIAL_NUMBER)
 
 HARDWARE_AVAILABLE = os.environ.get(HARDWARE_ENV_VAR) == "1"
 # If I want to run tests on PylonBackend with camera connected and powered on, must run export SPECTROMETER_HARDWARE_TESTS=1
@@ -513,11 +533,177 @@ class TestSyntheticBackendOnly:
 
 class TestPylonBackendOnly:
     """
-    Real-hardware-specific checks. Empty for now -- add only when
-    something is genuinely pylon-specific rather than covered above.
+    Real-hardware-specific checks: device discovery, whether SDK calls
+    actually take effect on the physical camera, and the
+    close()-then-reconnect guarantee that matters specifically because a
+    GigE device only accepts one connection at a time.
     """
 
     pytestmark = pytest.mark.skipif(not HARDWARE_AVAILABLE, reason="camera not connected")
+
+    def test_connect_with_wrong_serial_number_raises(self):
+
+        '''
+        Checks that connect() raises CameraConnectionError, with the
+        offending serial number in the message, when no device matches.
+        '''
+
+        backend = PylonBackend(serial_number=INVALID_SERIAL_NUMBER)
+        with pytest.raises(CameraConnectionError) as exc_info:
+            backend.connect()
+        assert INVALID_SERIAL_NUMBER in str(exc_info.value)
+
+    def test_connect_with_correct_serial_number_succeeds(self):
+
+        '''
+        Checks that connect() succeeds against the real configured
+        camera, and that the connected device is genuinely the expected
+        model -- not just any device that happened to match.
+        '''
+
+        backend = PylonBackend(serial_number=SERIAL_NUMBER)
+        backend.connect()
+        assert backend._camera is not None
+        camera = backend._camera
+        try:
+            model_name = camera.GetDeviceInfo().GetModelName()
+            assert EXPECTED_MODEL_NAME_SUBSTRING in model_name
+        finally:
+            backend.close()
+
+    def test_pixel_format_actually_applied_on_device(self):
+
+        '''
+        Checks that configure() genuinely sets PixelFormat on the real
+        camera, not just that PylonBackend believes it did.
+        '''
+
+        backend = PylonBackend(serial_number=SERIAL_NUMBER)
+        backend.connect()
+        try:
+            backend.configure(
+                exposure_us=FIXTURE_EXPOSURE_US,
+                gain_db=FIXTURE_GAIN_DB,
+                pixel_format=FIXTURE_PIXEL_FORMAT,
+            )
+            assert backend._camera is not None
+            assert backend._camera.PixelFormat.GetValue() == FIXTURE_PIXEL_FORMAT
+        finally:
+            backend.close()
+
+    def test_gain_actually_applied_on_device(self):
+
+        '''
+        Checks that configure() genuinely sets Gain on the real camera.
+        '''
+
+        backend = PylonBackend(serial_number=SERIAL_NUMBER)
+        backend.connect()
+        try:
+            backend.configure(
+                exposure_us=FIXTURE_EXPOSURE_US,
+                gain_db=FIXTURE_GAIN_DB,
+                pixel_format=FIXTURE_PIXEL_FORMAT,
+            )
+            assert backend._camera is not None
+            actual_gain = backend._camera.Gain.GetValue()
+            assert actual_gain == pytest.approx(FIXTURE_GAIN_DB, abs=GAIN_TOLERANCE_DB)
+        finally:
+            backend.close()
+
+    def test_manual_exposure_actually_applied_on_device(self):
+
+        '''
+        Checks that configure() with auto_exposure=False genuinely sets
+        ExposureTime on the real camera, allowing for the camera
+        quantizing to its nearest achievable value.
+        '''
+
+        backend = PylonBackend(serial_number=SERIAL_NUMBER, auto_exposure=False)
+        backend.connect()
+        try:
+            backend.configure(
+                exposure_us=FIXTURE_EXPOSURE_US,
+                gain_db=FIXTURE_GAIN_DB,
+                pixel_format=FIXTURE_PIXEL_FORMAT,
+            )
+            assert backend._camera is not None
+            actual_exposure = backend._camera.ExposureTime.GetValue()
+            assert actual_exposure == pytest.approx(FIXTURE_EXPOSURE_US, rel=EXPOSURE_TOLERANCE_REL)
+        finally:
+            backend.close()
+
+    def test_auto_exposure_converges(self):
+
+        '''
+        Checks that configure() with auto_exposure=True runs convergence
+        to completion -- ExposureAuto settles back to "Off" and
+        ExposureTime ends up at some genuine positive value, rather than
+        configure() returning early or hanging.
+        '''
+
+        backend = PylonBackend(
+            serial_number=SERIAL_NUMBER, auto_exposure=True, auto_timeout=AUTO_EXPOSURE_TEST_TIMEOUT_MS
+        )
+        backend.connect()
+        try:
+            backend.configure(
+                exposure_us=FIXTURE_EXPOSURE_US,  # ignored when auto_exposure=True
+                gain_db=FIXTURE_GAIN_DB,
+                pixel_format=FIXTURE_PIXEL_FORMAT,
+            )
+            assert backend._camera is not None
+            assert backend._camera.ExposureAuto.GetValue() == "Off"
+            assert backend._camera.ExposureTime.GetValue() > 0
+        finally:
+            backend.close()
+
+    def test_close_releases_connection_for_reuse(self):
+
+        '''
+        Regression test for the "camera left open, refuses to reconnect
+        until power-cycled" failure mode flagged during hardware bring-up.
+        Opens, closes, then opens again with a completely separate
+        PylonBackend instance -- the second connect() only succeeds if
+        the first close() genuinely released the device back to the
+        network, not just to this one Python object.
+        '''
+
+        first = PylonBackend(serial_number=SERIAL_NUMBER)
+        first.connect()
+        first.close()
+
+        second = PylonBackend(serial_number=SERIAL_NUMBER)
+        try:
+            second.connect()  # must not raise
+        finally:
+            second.close()
+
+    def test_sustained_grab_achieves_reasonable_frame_rate(self):
+
+        '''
+        Runs a real CameraStream (not just a single grab_one() call) for
+        a few seconds and checks the achieved fps clears a loose sanity
+        floor -- a genuine hardware acceptance check that a single frame
+        grab can't reveal, since it says nothing about sustained
+        throughput over the network.
+        '''
+
+        stream = CameraStream(
+            exposure_us=FIXTURE_EXPOSURE_US,
+            gain_db=FIXTURE_GAIN_DB,
+            pixel_format=FIXTURE_PIXEL_FORMAT,
+            timeout_ms=TEST_GRAB_TIMEOUT_MS,
+            backend=PylonBackend(serial_number=SERIAL_NUMBER),
+        )
+        stream.start()
+        try:
+            time.sleep(SUSTAINED_GRAB_DURATION_S)
+            measured_fps = stream.fps
+            print(f"measured fps: {measured_fps:.2f}")
+            assert measured_fps > MIN_ACCEPTABLE_FPS
+        finally:
+            stream.stop()
 
 
 #if __name__ == "__main__":

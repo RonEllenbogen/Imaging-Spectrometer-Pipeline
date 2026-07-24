@@ -39,6 +39,7 @@ class CameraStream:
         pixel_format: str,
         timeout_ms: int,
         backend: CameraBackend | None = None,
+        serial_number: str | None = None,
         max_consecutive_timeouts: int = DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
     ):
 
@@ -66,8 +67,13 @@ class CameraStream:
         self.pixel_format = pixel_format
         self.timeout_ms = timeout_ms
         self.max_consecutive_timeouts = max_consecutive_timeouts
+        self.serial_number = serial_number
 
-        self._backend = backend if backend is not None else PylonBackend()
+        if backend is None:
+            if serial_number is None:
+                raise ValueError("serial_number is required when backend is not provided")
+            backend = PylonBackend(serial_number=serial_number)
+        self._backend = backend
 
         # Threading machinery -- no thread exists until start() creates one
         self._thread: threading.Thread | None = None
