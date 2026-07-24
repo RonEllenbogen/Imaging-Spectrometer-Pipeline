@@ -25,7 +25,7 @@ class CameraTimeoutError(CameraError):
     '''
     Error raised when a grab_one() call times out waiting for a frame
     '''
-    def __innit__(self, timeout_ms: int):
+    def __init__(self, timeout_ms: int):
         super().__init__(f"grab_one() timed out after {timeout_ms} ms")
         self.timeout_ms = timeout_ms
 

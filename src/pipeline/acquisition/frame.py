@@ -14,6 +14,9 @@ from .pixel_formats import dtype_for_pixel_format
 config = load_config("configs/default.yaml")
 CANONICAL_DTYPE = dtype_for_pixel_format(config["camera"]["pixel_format"]).type
 CANONICAL_NDIM = 2
+CANONICAL_SHAPE = tuple(config["camera"]["canonical_shape"])   # (spatial axis, spectral axis)
+SPATIAL_AXIS = 0
+SPECTRAL_AXIS = 1
 
 
 # Classes
@@ -43,6 +46,11 @@ class FrameData:
             raise ValueError(
                 f"FrameData.image must be dtype {CANONICAL_DTYPE}, got {self.image.dtype}"
             )
+        if self.image.shape != CANONICAL_SHAPE:
+            raise ValueError(
+                f"FrameData.image must have shape {CANONICAL_SHAPE} "
+                f"(spatial, spectral), got {self.image.shape}"
+            )
         if self.frame_id < 0:
             raise ValueError(f"frame_id must be non-negative, got {self.frame_id}")
         # frozen=True only stops reassigning `self.image` itself -- it does NOT
@@ -58,7 +66,7 @@ class FrameData:
 
         return time.monotonic() - self.timestamp
     
-__all__ = ["FrameData", "CANONICAL_DTYPE", "CANONICAL_NDIM"]
+__all__ = ["CANONICAL_DTYPE", "CANONICAL_NDIM", "CANONICAL_SHAPE", "FrameData"]
 
 # Functions
 

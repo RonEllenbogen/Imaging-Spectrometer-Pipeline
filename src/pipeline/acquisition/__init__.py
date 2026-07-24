@@ -3,10 +3,10 @@ This file re-exports. It gives the rest of the codebase (outside of the acquisit
 '''
 # Imports
 from .camera import CameraStream
-from .frame import FrameData
+from .frame import FrameData, CANONICAL_DTYPE, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
 from .backends import CameraBackend, PylonBackend, SyntheticBackend
 from .exceptions import CameraError, CameraConnectionError, CameraTimeoutError, CameraConfigurationError
-from .pixel_formats import PIXEL_FORMAT_DTYPES, dtype_for_pixel_format
+from .pixel_formats import PIXEL_FORMAT_INFO, dtype_for_pixel_format
 
 # Constants
 

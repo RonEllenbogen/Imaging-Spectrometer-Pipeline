@@ -8,4 +8,5 @@ camera:
   exposure_time: 10000000 # (microseconds). Only utilised if auto_exposure == False
   timeout: 100000 #ms. Time we give camera to acquire an image before raising an error. Set it equal to 10 times the exposure_time by default.
   pixel_format: "Mono8" # The bit depth of frames captured by the sensor. Sensor in theory supports 8, 10, and 12-bit output.
+  canonical_shape: [1200, 1920] # (spatial axis, spectral). The shape of frames captured by the sensor.
   
