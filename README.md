@@ -21,7 +21,7 @@ This repository contains the Python application developed for the instrument. Th
 
 ## Current Status
 
-Working on image acquisition scripts
+Finished and verified image acquisition scripts
 
 ---
 
@@ -92,7 +92,7 @@ Implementation in progress.
 ## Roadmap
 
 - [x] **Hardware bring-up** — camera connectivity verified via pylon Viewer; minimal single-frame grab script
-- [ ] **Acquisition** (`src/pipeline/acquisition/`) — threaded Basler/pypylon interface for live frame grabbing
+- [x] **Acquisition** (`src/pipeline/acquisition/`) — threaded Basler/pypylon interface for live frame grabbing
 - [ ] **Preprocessing** (`src/pipeline/preprocessing/`) — dark-frame subtraction, ROI cropping, wavelength calibration
 - [ ] **Analysis** (`src/pipeline/analysis/`) — per-column centroid + uncertainty, weighted linear fit for spatial chirp ζ
 - [ ] **Validation** (`tests/`) — synthetic-data checks (injected-ζ recovery, null case) and validation against real calibration data (`data/raw` → `data/processed`)

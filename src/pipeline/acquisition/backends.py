@@ -5,6 +5,7 @@ This file defines the swappable backends that either connect (for real data), or
 from typing import Protocol
 import numpy as np
 from pypylon import pylon, genicam
+import time
 
 from .exceptions import CameraError, CameraConnectionError, CameraConfigurationError, CameraTimeoutError
 from .pixel_formats import PIXEL_FORMAT_INFO, max_value_for_pixel_format, dtype_for_pixel_format
@@ -125,14 +126,20 @@ class PylonBackend:
         '''
 
         tl_factory = pylon.TlFactory.GetInstance()
-        devices = tl_factory.EnumerateDevices()
 
-        matching_device = next(
-            (d for d in devices if d.GetSerialNumber() == self.serial_number), None
-        )
+        matching_device = None
+        for attempt in range(3):
+            devices = tl_factory.EnumerateDevices()
+            matching_device = next(
+                (d for d in devices if d.GetSerialNumber() == self.serial_number), None
+            )
+            if matching_device is not None:
+                break
+            time.sleep(0.5)
+
         if matching_device is None:
             raise CameraConnectionError(
-                f"no device found with serial number {self.serial_number!r}"
+                f"no device found with serial number {self.serial_number!r} after 3 attempts"
             )
 
         try:
@@ -203,6 +210,8 @@ class PylonBackend:
             except genicam.GenericException as e:
                 raise CameraConfigurationError("exposure_us", exposure_us, str(e)) from e
             self._camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+
+        self._configured = True
 
     def _converge_auto_exposure(self, camera: pylon.InstantCamera) -> None:
 
