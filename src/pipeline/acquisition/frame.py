@@ -8,12 +8,13 @@ import numpy as np
 import time
 
 from ..utils.helpers import load_config
-from .pixel_formats import dtype_for_pixel_format
+from .pixel_formats import dtype_for_pixel_format, max_value_for_pixel_format
 
 # Constants
 config = load_config("configs/default.yaml")
 CANONICAL_DTYPE = dtype_for_pixel_format(config["camera"]["pixel_format"]).type
 CANONICAL_NDIM = 2
+CANONICAL_MAX_VALUE = max_value_for_pixel_format(config["camera"]["pixel_format"])
 CANONICAL_SHAPE = tuple(config["camera"]["canonical_shape"])   # (spatial axis, spectral axis)
 SPATIAL_AXIS = 0
 SPECTRAL_AXIS = 1
@@ -72,7 +73,7 @@ class FrameData:
 
         return time.monotonic() - self.timestamp
     
-__all__ = ["CANONICAL_DTYPE", "CANONICAL_NDIM", "CANONICAL_SHAPE", "FrameData"]
+__all__ = ["CANONICAL_DTYPE", "CANONICAL_NDIM", "CANONICAL_SHAPE", "CANONICAL_MAX_VALUE", "FrameData"]
 
 # Functions
 

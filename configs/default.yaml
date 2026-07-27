@@ -10,3 +10,8 @@ camera:
   pixel_format: "Mono8" # The bit depth of frames captured by the sensor. Sensor in theory supports 8, 10, and 12-bit output.
   canonical_shape: [1200, 1920] # (spatial axis, spectral). The shape of frames captured by the sensor.
   
+preprocessing:
+  # Define interval on spatial axis beyond which values are set to 0. Important for reducing bias on centroids, however likely not critical
+  # Leave as entire spatial axis for now, once I have taken some real images can refine these bounds
+  roi_row_min: 0
+  roi_row_max: 1200
