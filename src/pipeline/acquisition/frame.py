@@ -8,12 +8,13 @@ import numpy as np
 import time
 
 from ..utils.helpers import load_config
-from .pixel_formats import dtype_for_pixel_format
+from .pixel_formats import dtype_for_pixel_format, max_value_for_pixel_format
 
 # Constants
 config = load_config("configs/default.yaml")
 CANONICAL_DTYPE = dtype_for_pixel_format(config["camera"]["pixel_format"]).type
 CANONICAL_NDIM = 2
+CANONICAL_MAX_VALUE = max_value_for_pixel_format(config["camera"]["pixel_format"])
 CANONICAL_SHAPE = tuple(config["camera"]["canonical_shape"])   # (spatial axis, spectral axis)
 SPATIAL_AXIS = 0
 SPECTRAL_AXIS = 1
@@ -31,6 +32,8 @@ class FrameData:
     image: np.ndarray # Actual frame data
     timestamp: float # Timestamp when frame is recieved
     frame_id: int # Lets caller know whether two frames are copies of eachother or just similar
+    exposure_us: float # Exposure time used in frame capture
+    gain_db: float # Gain used in frame capture
 
     def __post_init__(self) -> None:
 
@@ -53,6 +56,10 @@ class FrameData:
             )
         if self.frame_id < 0:
             raise ValueError(f"frame_id must be non-negative, got {self.frame_id}")
+        if self.exposure_us <= 0:
+            raise ValueError(f"exposure_us must be positive, got {self.exposure_us}")
+        if not np.isfinite(self.gain_db):
+            raise ValueError(f"gain_db must be finite, got {self.gain_db}")
         # frozen=True only stops reassigning `self.image` itself -- it does NOT
         # stop someone mutating the array's contents in place. Lock it explicitly.
         self.image.flags.writeable = False
@@ -66,7 +73,7 @@ class FrameData:
 
         return time.monotonic() - self.timestamp
     
-__all__ = ["CANONICAL_DTYPE", "CANONICAL_NDIM", "CANONICAL_SHAPE", "FrameData"]
+__all__ = ["CANONICAL_DTYPE", "CANONICAL_NDIM", "CANONICAL_SHAPE", "CANONICAL_MAX_VALUE", "FrameData"]
 
 # Functions
 

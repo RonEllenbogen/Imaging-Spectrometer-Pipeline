@@ -284,7 +284,7 @@ class CameraStream:
             consecutive_timeouts = 0   # reset only after a successful grab
 
             frame_data = FrameData(
-                image=raw_frame, timestamp=time.monotonic(), frame_id=self._frame_counter
+                image=raw_frame, timestamp=time.monotonic(), frame_id=self._frame_counter, exposure_us=self.exposure_us, gain_db=self.gain_db,
             )
             self._frame_counter += 1
 
