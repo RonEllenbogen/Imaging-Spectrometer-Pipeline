@@ -31,6 +31,8 @@ class FrameData:
     image: np.ndarray # Actual frame data
     timestamp: float # Timestamp when frame is recieved
     frame_id: int # Lets caller know whether two frames are copies of eachother or just similar
+    exposure_us: float # Exposure time used in frame capture
+    gain_db: float # Gain used in frame capture
 
     def __post_init__(self) -> None:
 
@@ -53,6 +55,10 @@ class FrameData:
             )
         if self.frame_id < 0:
             raise ValueError(f"frame_id must be non-negative, got {self.frame_id}")
+        if self.exposure_us <= 0:
+            raise ValueError(f"exposure_us must be positive, got {self.exposure_us}")
+        if not np.isfinite(self.gain_db):
+            raise ValueError(f"gain_db must be finite, got {self.gain_db}")
         # frozen=True only stops reassigning `self.image` itself -- it does NOT
         # stop someone mutating the array's contents in place. Lock it explicitly.
         self.image.flags.writeable = False

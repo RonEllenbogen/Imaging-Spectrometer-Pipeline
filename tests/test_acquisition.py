@@ -251,7 +251,7 @@ class TestBackendContract:
 
         # FrameData's own __post_init__ validates shape and dtype; must not raise
         # for a frame produced by a genuinely conforming backend
-        fd = FrameData(image=frame, timestamp=0.0, frame_id=0)
+        fd = FrameData(image=frame, timestamp=0.0, frame_id=0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,)
 
         # Double check the resulting FrameData carries the canonical dtype
         assert fd.image.dtype == CANONICAL_DTYPE
