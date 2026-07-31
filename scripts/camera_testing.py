@@ -108,7 +108,7 @@ def minimal_grab_script():
     grab.Release()
     '''
     # Save image
-    output_path = Path(__file__).parent.parent / "data" / "raw" / "test_image.tiff"
+    output_path = Path(__file__).parent.parent / "data" / "raw" / "test.tiff"
     iio.imwrite(output_path, image)
 
 
