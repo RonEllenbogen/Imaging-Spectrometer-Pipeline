@@ -28,9 +28,9 @@ from .metadata import CalibrationRecord
 # Constants
 
 # Unverified starting point -- tune once real flat-field data exists.
-# 5 MAD is a fairly conservative bar, chosen to avoid flagging ordinary
-# statistical variation as a defect.
-MAD_THRESHOLD = 5.0
+# 5 standard deviations is a fairly conservative bar, chosen to avoid
+# flagging ordinary statistical variation as a defect.
+SIGMA_THRESHOLD = 5.0
 
 # Classes
 
@@ -41,9 +41,9 @@ def build_bad_pixel_map(flat_field: np.ndarray, flat_field_record: CalibrationRe
 
     '''
     Flags pixels whose normalized flat-field value is more than
-    MAD_THRESHOLD median-absolute-deviations from the population median
-    -- catching both dead (near-zero) and hot (anomalously high) pixels
-    in one pass.
+    SIGMA_THRESHOLD standard deviations from the population mean --
+    catching both dead (near-zero) and hot (anomalously high) pixels in
+    one pass.
 
     Parameters
     ----------
@@ -64,16 +64,14 @@ def build_bad_pixel_map(flat_field: np.ndarray, flat_field_record: CalibrationRe
         flat field.
     '''
 
-    median = np.median(flat_field)
-    mad = np.median(np.abs(flat_field - median))
+    mean = flat_field.mean()
+    std = flat_field.std()
 
-    # Guard against a degenerate all-identical flat field, where mad=0
-    # would make every nonzero deviation look infinitely significant.
-    if mad == 0:
+    if std == 0:
         mask = np.zeros_like(flat_field, dtype=bool)
     else:
-        deviation_in_mads = np.abs(flat_field - median) / mad
-        mask = deviation_in_mads > MAD_THRESHOLD
+        deviation_in_sigma = np.abs(flat_field - mean) / std
+        mask = deviation_in_sigma > SIGMA_THRESHOLD
 
     record = CalibrationRecord(
         exposure_us=flat_field_record.exposure_us,
@@ -119,4 +117,4 @@ def apply_bad_pixel_map(frame: ProcessedFrame, mask: np.ndarray) -> ProcessedFra
     )
 
 
-__all__ = ["build_bad_pixel_map", "apply_bad_pixel_map", "MAD_THRESHOLD"]
+__all__ = ["build_bad_pixel_map", "apply_bad_pixel_map", "SIGMA_THRESHOLD"]

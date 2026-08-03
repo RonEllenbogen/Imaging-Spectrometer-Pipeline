@@ -53,4 +53,4 @@ def plot_image(filename: str):
 
 
 if __name__ == "__main__":
-    plot_image("test_image.tiff")
+    plot_image("red_laser_spectrometer_w_0um.tiff")
