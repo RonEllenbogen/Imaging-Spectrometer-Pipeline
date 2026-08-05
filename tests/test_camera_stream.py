@@ -6,6 +6,8 @@ CameraStream itself never touches pypylon directly.
 
 import time
 
+import pytest
+
 from pipeline.acquisition import (
     CameraStream,
     DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
@@ -300,3 +302,72 @@ class TestCameraStreamErrorHandling:
 
         stream.stop()
         assert tracking_backend.close_called is True
+
+
+class TestCollectNFrames:
+    """collect_n_frames() -- polling get_latest_frame() for distinct frames."""
+
+    def test_returns_n_frames(self):
+        stream = _make_stream()
+        stream.start()
+        try:
+            frames = stream.collect_n_frames(5)
+            assert len(frames) == 5
+            assert all(isinstance(f, FrameData) for f in frames)
+        finally:
+            stream.stop()
+
+    def test_returns_distinct_increasing_frame_ids(self):
+        stream = _make_stream()
+        stream.start()
+        try:
+            frames = stream.collect_n_frames(5)
+            frame_ids = [f.frame_id for f in frames]
+            assert frame_ids == sorted(set(frame_ids)), "frame_ids must be distinct and increasing"
+        finally:
+            stream.stop()
+
+    def test_includes_already_latest_frame_as_first(self):
+        '''
+        A frame already sitting in get_latest_frame() when
+        collect_n_frames() is called is still a valid sample at this
+        stream's (fixed, never-changing) exposure/gain -- no need to
+        wait for a fresh grab before starting to count.
+        '''
+        stream = _make_stream()
+        stream.start()
+        try:
+            already_latest = _wait_for_frame(stream)
+            frames = stream.collect_n_frames(1)
+            assert frames[0].frame_id == already_latest.frame_id
+        finally:
+            stream.stop()
+
+    @pytest.mark.parametrize("bad_n", [0, -1])
+    def test_rejects_non_positive_n(self, bad_n):
+        stream = _make_stream()
+        stream.start()
+        try:
+            with pytest.raises(ValueError):
+                stream.collect_n_frames(bad_n)
+        finally:
+            stream.stop()
+
+    def test_raises_if_not_running(self):
+        stream = _make_stream()
+        with pytest.raises(RuntimeError):
+            stream.collect_n_frames(3)
+
+    def test_raises_last_error_if_stream_dies_while_waiting(self):
+        backend = SyntheticBackend(seed=STREAM_SEED, timeout_probability=1.0)
+        stream = _make_stream(
+            backend=backend,
+            timeout_ms=FAST_FAIL_TIMEOUT_MS,
+            max_consecutive_timeouts=FAST_FAIL_MAX_CONSECUTIVE_TIMEOUTS,
+        )
+        stream.start()
+        try:
+            with pytest.raises(CameraTimeoutError):
+                stream.collect_n_frames(3)
+        finally:
+            stream.stop()

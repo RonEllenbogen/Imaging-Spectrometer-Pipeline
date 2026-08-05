@@ -1,8 +1,11 @@
 """
-Builds and applies the flat field: a normalized
-map of each pixel's relative gain, dividing out PRNU -- a fixed,
-multiplicative per-pixel gain pattern that doesn't average away and
-isn't corrected by anything else in this pipeline.
+Builds the flat field: a normalized map of each pixel's relative gain,
+dividing out PRNU -- a fixed, multiplicative per-pixel gain pattern that
+doesn't average away and isn't corrected by anything else in this
+pipeline. Applying it to a science frame (divide, floor at
+MIN_FLAT_FIELD_VALUE) is preprocessing/'s job
+(preprocessing/steps/flat_field.py), not this module's -- this module
+only builds the artifact.
 
 Built infrequently (project start, after realignment) from frames of
 uniform illumination captured directly on the sensor -- not through the
@@ -11,23 +14,22 @@ spectrometer's dispersing optics.
 
 # Imports
 
+import logging
 import time
+from pathlib import Path
 
 import numpy as np
 
 from pipeline.acquisition import FrameData
-from ..processed_frame import ProcessedFrame
 from ..exceptions import InvalidFlatFieldError
-from ..steps.saturation import check_saturation
+from ..shared.io import save_artifact, load_artifact
+from .saturation import check_saturation
 from .baseline import build_baseline
 from .metadata import CalibrationRecord
 
 # Constants
 
-# Floor applied before division, guaranteeing apply_flat_field() can
-# never produce inf/nan -- independent of whether bad_pixel_map.py has
-# run yet. Defense in depth, not a substitute for proper bad-pixel handling.
-MIN_FLAT_FIELD_VALUE = 0.01
+logger = logging.getLogger(__name__)
 
 # Classes
 
@@ -102,44 +104,56 @@ def build_flat_field(
     return flat_field, record
 
 
-def apply_flat_field(frame: ProcessedFrame, flat_field: np.ndarray, record: CalibrationRecord) -> ProcessedFrame:
+def save_flat_field(path: str | Path, flat_field: np.ndarray, record: CalibrationRecord) -> None:
 
     '''
-    Divides frame by flat_field, correcting PRNU. Deliberately does NOT
-    check frame's settings against record's;
-    PRNU is treated as exposure/gain-independent within the linear regime.
+    Saves a flat-field artifact to path, so it can be reused in a later
+    session without recapturing illuminated/dark frames. Overwrites
+    whatever was already at path -- a flat field is current instrument
+    state, not a history to keep.
 
     Parameters
     ----------
-    frame
-        The (already baseline-subtracted) frame to correct.
+    path
+        Destination file. A ".npz" suffix is added if not already
+        present.
     flat_field
-        The normalized flat field, from build_flat_field().
+        The array returned by build_flat_field().
     record
-        Retained for logging/provenance only -- not used to gate this call.
+        The CalibrationRecord returned alongside it.
 
     Returns
     -------
-    ProcessedFrame
+    None
+    '''
+
+    save_artifact(path, flat_field, record)
+
+
+def load_flat_field(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
+
+    '''
+    Loads a flat field previously saved via save_flat_field().
+
+    Parameters
+    ----------
+    path
+        The file to load. A ".npz" suffix is added if not already
+        present.
+
+    Returns
+    -------
+    tuple[np.ndarray, CalibrationRecord]
 
     Raises
     ------
-    ValueError
-        If flat_field's shape doesn't match frame.image's.
+    FileNotFoundError
+        If path doesn't exist.
     '''
 
-    if flat_field.shape != frame.image.shape:
-        raise ValueError(
-            f"flat_field shape {flat_field.shape} does not match frame shape {frame.image.shape}"
-        )
-
-    safe_flat_field = np.clip(flat_field, MIN_FLAT_FIELD_VALUE, None)
-    corrected = frame.image / safe_flat_field
-
-    return ProcessedFrame(
-        image=corrected, frame_id=frame.frame_id, timestamp=frame.timestamp,
-        exposure_us=frame.exposure_us, gain_db=frame.gain_db,
-    )
+    flat_field, record = load_artifact(path, CalibrationRecord)
+    logger.info("loaded flat field from %s (age %.1fs)", path, record.age_seconds)
+    return flat_field, record
 
 
-__all__ = ["build_flat_field", "apply_flat_field", "MIN_FLAT_FIELD_VALUE"]
+__all__ = ["build_flat_field", "save_flat_field", "load_flat_field"]

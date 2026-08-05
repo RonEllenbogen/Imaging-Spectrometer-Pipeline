@@ -285,11 +285,16 @@ now is.
   starting point, reusing existing single-shot code with zero new
   combination logic). This decision belongs to whatever orchestrates
   `analysis/`, not to `preprocessing/` itself.
-- **Batch/live dual capture**: `CameraStream.collect_n_frames(n)` was
-  designed (uses `frame_id` to detect genuinely new frames while polling)
-  but not yet implemented as actual code — motivated by GigE's one-connection
-  limit meaning live view and batch capture must share one `CameraStream`,
-  not open separate connections.
+- ~~**Batch/live dual capture**: `CameraStream.collect_n_frames(n)`~~ **Done.**
+  Implemented in `acquisition/camera.py` as designed — polls
+  `get_latest_frame()`, keeping only frames whose `frame_id` hasn't been
+  seen yet, so live view and batch/calibration capture can share one
+  running `CameraStream` (GigE's one-connection-per-camera limit) without
+  double-counting a slow-arriving frame. Raises `RuntimeError` if called
+  before `start()` or if the stream stops without a recorded error while
+  waiting, and re-raises `last_error` if the background thread dies from a
+  genuine `CameraError` mid-collection. Tested in
+  `tests/test_camera_stream.py::TestCollectNFrames` (synthetic only).
 - **`analysis/`**: not started. Will need centroid extraction (intensity-
   weighted, per spectral column) with Thompson-Larson-Webb-style uncertainty,
   and a weighted linear fit for ζ = dx0/dω with proper λ→ω chain-rule

@@ -4,6 +4,15 @@ division changes the numeric domain and decouples pixel values from the
 original ADC ceiling -- checking for genuine ADC clipping, which no
 downstream correction can recover.
 
+Lives in calibration/sensor/ rather than preprocessing/, despite being
+consumed from both: build_flat_field() (this package) rejects a
+saturated calibration source outright, and preprocessing/'s
+run_preprocessing() runs it per science frame and returns the result for
+the caller to act on. Depends only on pipeline.acquisition, so placing it
+here (calibration depends on acquisition, preprocessing depends on
+calibration) avoids preprocessing/ and calibration/ depending on each
+other in both directions.
+
 Returns a result the caller acts on rather than raising: whether to
 discard a saturated frame, log it and continue, or escalate to a hard
 failure is a decision that depends on context this module doesn't have

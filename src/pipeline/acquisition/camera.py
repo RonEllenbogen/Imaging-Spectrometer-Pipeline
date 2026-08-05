@@ -23,6 +23,12 @@ FPS_WINDOW_SIZE = 30
 # stream as genuinely broken rather than experiencing a transient hiccup.
 DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 5
 
+# How long collect_n_frames() sleeps between polls of get_latest_frame().
+# Small relative to any realistic frame interval (this camera tops out
+# around 51fps, ~20ms/frame), so it adds negligible latency, but not so
+# small it busy-spins the polling thread.
+COLLECT_POLL_INTERVAL_S = 0.005
+
 # Classes
 
 class CameraStream:
@@ -155,6 +161,77 @@ class CameraStream:
 
         with self._frame_lock:
             return self._latest_frame
+
+    def collect_n_frames(self, n: int) -> list[FrameData]:
+
+        '''
+        Collects n distinct frames from this already-running stream, by
+        polling get_latest_frame() and keeping only frames whose frame_id
+        hasn't been seen yet. Does NOT perform any grabs of its own --
+        deliberately reuses whatever background thread is already
+        running, since GigE's one-connection-per-camera limit means live
+        view and batch/calibration capture can't hold separate
+        connections open at the same time; this is how they share one.
+
+        A plain repeated call to get_latest_frame() would risk counting
+        the same FrameData twice, since it returns the same object on
+        every call until _run() writes a new one -- comparing frame_id
+        is what makes the polling loop only count genuinely new frames.
+
+        Parameters
+        ----------
+        n
+            Number of distinct frames to collect. Must be positive.
+
+        Returns
+        -------
+        list[FrameData]
+            Exactly n frames, in the order the camera produced them
+            (increasing frame_id).
+
+        Raises
+        ------
+        ValueError
+            If n is not positive.
+        RuntimeError
+            If the stream isn't running when this is called, or stops
+            running -- without last_error being set, e.g. a concurrent
+            stop() -- while this call is still waiting.
+        CameraError
+            Re-raised from last_error if the background thread terminates
+            from a fatal camera error while this call is still waiting.
+        '''
+
+        if n <= 0:
+            raise ValueError(f"n must be positive, got {n}")
+
+        if not self.is_running:
+            if self._last_error is not None:
+                raise self._last_error
+            raise RuntimeError("collect_n_frames() requires an already-running CameraStream")
+
+        collected: list[FrameData] = []
+        last_seen_frame_id: int | None = None
+
+        while len(collected) < n:
+            frame = self.get_latest_frame()
+
+            if frame is not None and frame.frame_id != last_seen_frame_id:
+                collected.append(frame)
+                last_seen_frame_id = frame.frame_id
+                continue
+
+            if not self.is_running:
+                if self._last_error is not None:
+                    raise self._last_error
+                raise RuntimeError(
+                    "stream stopped running before collect_n_frames() collected all "
+                    f"{n} requested frames ({len(collected)} collected)"
+                )
+
+            time.sleep(COLLECT_POLL_INTERVAL_S)
+
+        return collected
 
     @property
     def is_running(self) -> bool:

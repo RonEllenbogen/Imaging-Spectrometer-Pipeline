@@ -5,6 +5,12 @@ no camera or real calibration data involved -- following the same
 "prove against known ground truth first" principle used throughout
 acquisition/'s test suite.
 
+Covers apply_*() (per-frame correction) and the end-to-end pipeline;
+build_*() (calibration-artifact construction) moved to
+tests/test_calibration.py alongside calibration/sensor/, which this file
+still uses (via build_*()) to set up realistic fixtures for the
+end-to-end test.
+
 Kept as a single file per the explicit request, despite covering many
 source files -- a deviation from the one-test-file-per-module convention
 used elsewhere. Worth splitting into per-module files (test_baseline.py,
@@ -22,17 +28,12 @@ from pipeline.acquisition import FrameData, CANONICAL_SHAPE, CANONICAL_DTYPE, CA
 
 from pipeline.preprocessing import (
     run_preprocessing, CalibrationSet, ProcessedFrame,
-    PreprocessingError, SettingsMismatchError, SaturationError,
-    InvalidFlatFieldError, NoSignalError,
+    PreprocessingError, SettingsMismatchError, SaturationError, NoSignalError,
 )
 from pipeline.preprocessing.validation import check_frame_sanity
-from pipeline.preprocessing.steps import apply_roi, check_saturation, SaturationCheckResult
-from pipeline.preprocessing.sensor_calibration import (
-    build_baseline, apply_baseline,
-    build_flat_field, apply_flat_field, MIN_FLAT_FIELD_VALUE,
-    build_bad_pixel_map, apply_bad_pixel_map, SIGMA_THRESHOLD,
-    CalibrationRecord, check_settings_match,
-    EXPOSURE_MATCH_TOLERANCE_REL, GAIN_MATCH_TOLERANCE_ABS,
+from pipeline.preprocessing.steps import apply_roi, apply_baseline, apply_flat_field, MIN_FLAT_FIELD_VALUE, apply_bad_pixel_map
+from pipeline.calibration.sensor import (
+    build_baseline, build_flat_field, build_bad_pixel_map, CalibrationRecord,
 )
 
 # Constants
@@ -117,96 +118,6 @@ class TestFrameSanity:
 
 
 # ---------------------------------------------------------------------------
-# sensor_calibration/metadata.py
-# ---------------------------------------------------------------------------
-
-class TestCalibrationRecord:
-
-    def test_rejects_non_positive_exposure(self):
-        with pytest.raises(ValueError):
-            CalibrationRecord(exposure_us=0.0, gain_db=0.0, timestamp=time.time(), source_frame_count=1)
-
-    def test_rejects_nan_gain(self):
-        with pytest.raises(ValueError):
-            CalibrationRecord(exposure_us=2000.0, gain_db=float("nan"), timestamp=time.time(), source_frame_count=1)
-
-    def test_rejects_invalid_frame_count(self):
-        with pytest.raises(ValueError):
-            CalibrationRecord(exposure_us=2000.0, gain_db=0.0, timestamp=time.time(), source_frame_count=0)
-
-    def test_age_seconds_is_small_and_non_negative_just_after_construction(self):
-        record = _record()
-        assert 0 <= record.age_seconds < 1.0
-
-
-class TestCheckSettingsMatch:
-
-    def test_passes_on_exact_match(self):
-        record = _record(exposure_us=2000.0, gain_db=0.0)
-        frame = _frame(_uniform(10), exposure_us=2000.0, gain_db=0.0)
-        check_settings_match(frame, record)   # must not raise
-
-    def test_passes_within_tolerance(self):
-        record = _record(exposure_us=2000.0, gain_db=0.0)
-        # just inside 1% relative exposure tolerance and 0.05dB gain tolerance
-        frame = _frame(_uniform(10), exposure_us=2019.0, gain_db=0.04)
-        check_settings_match(frame, record)   # must not raise
-
-    def test_raises_on_exposure_mismatch(self):
-        record = _record(exposure_us=2000.0, gain_db=0.0)
-        frame = _frame(_uniform(10), exposure_us=3000.0, gain_db=0.0)
-        with pytest.raises(SettingsMismatchError):
-            check_settings_match(frame, record)
-
-    def test_raises_on_gain_mismatch(self):
-        record = _record(exposure_us=2000.0, gain_db=0.0)
-        frame = _frame(_uniform(10), exposure_us=2000.0, gain_db=5.0)
-        with pytest.raises(SettingsMismatchError):
-            check_settings_match(frame, record)
-
-
-# ---------------------------------------------------------------------------
-# steps/saturation.py
-# ---------------------------------------------------------------------------
-
-class TestSaturation:
-
-    def test_no_saturation(self):
-        frame = _frame(_uniform(100))
-        result = check_saturation(frame)
-        assert result.is_saturated is False
-        assert result.peak_value == 100
-        assert result.n_saturated_pixels == 0
-
-    def test_saturation_detected(self):
-        image = _uniform(50)
-        image[10, 10] = CANONICAL_MAX_VALUE
-        image[10, 11] = CANONICAL_MAX_VALUE
-        frame = _frame(image)
-        result = check_saturation(frame)
-        assert result.is_saturated is True
-        assert result.peak_value == CANONICAL_MAX_VALUE
-        assert result.n_saturated_pixels == 2
-
-    def test_bad_pixel_mask_excludes_known_defect(self):
-        image = _uniform(50)
-        image[10, 10] = CANONICAL_MAX_VALUE   # the ONLY saturated pixel
-        frame = _frame(image)
-
-        mask = np.zeros(CANONICAL_SHAPE, dtype=bool)
-        mask[10, 10] = True
-
-        result = check_saturation(frame, bad_pixel_mask=mask)
-        assert result.is_saturated is False
-
-    def test_mismatched_mask_shape_raises(self):
-        frame = _frame(_uniform(50))
-        bad_mask = np.zeros((10, 10), dtype=bool)
-        with pytest.raises(ValueError):
-            check_saturation(frame, bad_pixel_mask=bad_mask)
-
-
-# ---------------------------------------------------------------------------
 # steps/roi.py
 # ---------------------------------------------------------------------------
 
@@ -247,26 +158,10 @@ class TestRoi:
 
 
 # ---------------------------------------------------------------------------
-# sensor_calibration/baseline.py
+# steps/baseline.py
 # ---------------------------------------------------------------------------
 
-class TestBaseline:
-
-    def test_build_baseline_averages_frames(self):
-        frames = [_frame(_uniform(10)), _frame(_uniform(12)), _frame(_uniform(14))]
-        baseline, record = build_baseline(frames)
-        assert np.allclose(baseline, 12.0)
-        assert record.source_frame_count == 3
-        assert record.exposure_us == FIXTURE_EXPOSURE_US
-
-    def test_build_baseline_rejects_empty_list(self):
-        with pytest.raises(ValueError):
-            build_baseline([])
-
-    def test_build_baseline_rejects_mismatched_settings(self):
-        frames = [_frame(_uniform(10), exposure_us=2000.0), _frame(_uniform(10), exposure_us=3000.0)]
-        with pytest.raises(ValueError):
-            build_baseline(frames)
+class TestApplyBaseline:
 
     def test_apply_baseline_subtracts(self):
         frame = _frame(_uniform(50))
@@ -298,23 +193,10 @@ class TestBaseline:
 
 
 # ---------------------------------------------------------------------------
-# sensor_calibration/flat_field.py
+# steps/flat_field.py
 # ---------------------------------------------------------------------------
 
-class TestFlatField:
-
-    def test_build_flat_field_normalizes_uniform_response_to_one(self):
-        illuminated = [_frame(_uniform(150)) for _ in range(3)]
-        dark = [_frame(_uniform(10)) for _ in range(3)]
-        flat_field, record = build_flat_field(illuminated, dark)
-        assert np.allclose(flat_field, 1.0)
-        assert record.source_frame_count == 3
-
-    def test_build_flat_field_rejects_saturated_source(self):
-        illuminated = [_frame(_uniform(CANONICAL_MAX_VALUE))]
-        dark = [_frame(_uniform(10))]
-        with pytest.raises(InvalidFlatFieldError):
-            build_flat_field(illuminated, dark)
+class TestApplyFlatField:
 
     def test_apply_flat_field_removes_known_gain_pattern(self):
         # A true uniform scene T=100, observed through a sensor with a
@@ -356,38 +238,10 @@ class TestFlatField:
 
 
 # ---------------------------------------------------------------------------
-# sensor_calibration/bad_pixel_map.py
+# steps/bad_pixel_map.py
 # ---------------------------------------------------------------------------
 
-class TestBadPixelMap:
-
-    def test_flags_injected_outlier(self):
-        flat_field = np.ones(CANONICAL_SHAPE, dtype=np.float64)
-        flat_field[300, 400] = 0.0    # dead
-        flat_field[300, 401] = 5.0    # hot
-        record = _record()
-
-        mask, _ = build_bad_pixel_map(flat_field, record)
-
-        assert mask[300, 400] == True
-        assert mask[300, 401] == True
-        assert mask[0, 0] == False
-        assert mask.sum() == 2
-
-    def test_uniform_flat_field_flags_nothing(self):
-        # mad == 0 guard: no deviation to measure against.
-        flat_field = np.ones(CANONICAL_SHAPE, dtype=np.float64)
-        record = _record()
-        mask, _ = build_bad_pixel_map(flat_field, record)
-        assert not np.any(mask)
-
-    def test_record_carries_forward_flat_field_settings(self):
-        flat_field = np.ones(CANONICAL_SHAPE, dtype=np.float64)
-        flat_field_record = _record(exposure_us=3333.0, gain_db=2.0, source_frame_count=7)
-        _, bad_pixel_record = build_bad_pixel_map(flat_field, flat_field_record)
-        assert bad_pixel_record.exposure_us == 3333.0
-        assert bad_pixel_record.gain_db == 2.0
-        assert bad_pixel_record.source_frame_count == 7
+class TestApplyBadPixelMap:
 
     def test_apply_bad_pixel_map_zeroes_flagged_pixels(self):
         image = np.full(CANONICAL_SHAPE, 42.0)

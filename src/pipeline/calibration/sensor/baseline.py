@@ -1,21 +1,27 @@
 """
-Builds and applies the per-session background baseline: average several beam-blocked frames into one low-noise estimate,
-then subtract it from each science frame -- the first real correction
-step, and the direct fix for the background-clipping bias demonstrated
-earlier in this project.
+Builds the per-session background baseline: average several beam-blocked
+frames into one low-noise estimate -- the direct fix for the
+background-clipping bias demonstrated earlier in this project. Applying
+it to a science frame (subtract, clip at zero) is preprocessing/'s job
+(preprocessing/steps/baseline.py), not this module's -- this module only
+builds the artifact.
 """
 
 # Imports
 
+import logging
 import time
+from pathlib import Path
 
 import numpy as np
 
 from pipeline.acquisition import FrameData
-from ..processed_frame import ProcessedFrame
-from .metadata import CalibrationRecord, check_settings_match
+from ..shared.io import save_artifact, load_artifact
+from .metadata import CalibrationRecord
 
 # Constants
+
+logger = logging.getLogger(__name__)
 
 # Classes
 
@@ -78,53 +84,56 @@ def build_baseline(frames: list[FrameData]) -> tuple[np.ndarray, CalibrationReco
     return averaged, record
 
 
-def apply_baseline(frame: FrameData, baseline: np.ndarray, record: CalibrationRecord) -> ProcessedFrame:
+def save_baseline(path: str | Path, baseline: np.ndarray, record: CalibrationRecord) -> None:
 
     '''
-    Subtracts a baseline from a science frame, clipping negative results
-    at zero (a pixel count can't be physically negative).
+    Saves a baseline artifact to path, so it can be reused in a later
+    session without recapturing background frames. Overwrites whatever
+    was already at path -- a baseline is current instrument state, not a
+    history to keep.
 
     Parameters
     ----------
-    frame
-        The raw science frame to correct.
+    path
+        Destination file. A ".npz" suffix is added if not already
+        present.
     baseline
-        The averaged background, from build_baseline().
+        The array returned by build_baseline().
     record
-        The CalibrationRecord the baseline was tagged with -- checked
-        against frame's actual settings before subtracting.
+        The CalibrationRecord returned alongside it.
 
     Returns
     -------
-    ProcessedFrame
-        frame_id, timestamp, exposure_us, and gain_db are preserved from
-        the input frame.
+    None
+    '''
+
+    save_artifact(path, baseline, record)
+
+
+def load_baseline(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
+
+    '''
+    Loads a baseline previously saved via save_baseline().
+
+    Parameters
+    ----------
+    path
+        The file to load. A ".npz" suffix is added if not already
+        present.
+
+    Returns
+    -------
+    tuple[np.ndarray, CalibrationRecord]
 
     Raises
     ------
-    SettingsMismatchError
-        If frame's exposure_us/gain_db don't match record's, within
-        tolerance.
-    ValueError
-        If baseline's shape doesn't match frame.image's.
+    FileNotFoundError
+        If path doesn't exist.
     '''
 
-    check_settings_match(frame, record)
-
-    if baseline.shape != frame.image.shape:
-        raise ValueError(
-            f"baseline shape {baseline.shape} does not match frame shape {frame.image.shape}"
-        )
-
-    subtracted = np.clip(frame.image.astype(np.float64) - baseline, 0, None)
-
-    return ProcessedFrame(
-        image=subtracted,
-        frame_id=frame.frame_id,
-        timestamp=frame.timestamp,
-        exposure_us=frame.exposure_us,
-        gain_db=frame.gain_db,
-    )
+    baseline, record = load_artifact(path, CalibrationRecord)
+    logger.info("loaded baseline from %s (age %.1fs)", path, record.age_seconds)
+    return baseline, record
 
 
-__all__ = ["build_baseline", "apply_baseline"]
+__all__ = ["build_baseline", "save_baseline", "load_baseline"]

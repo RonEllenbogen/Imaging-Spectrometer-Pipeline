@@ -1,8 +1,10 @@
 """
-Derives and applies a bad-pixel map: pixels with a
-fixed, structural defect (dead -- no response to light, or hot --
-anomalously elevated regardless of illumination), as distinct from
-steps/saturation.py's job, which catches dynamic over-exposure.
+Derives a bad-pixel map: pixels with a fixed, structural defect (dead --
+no response to light, or hot -- anomalously elevated regardless of
+illumination), as distinct from sensor/saturation.py's job, which catches
+dynamic over-exposure. Applying it to a science frame (zeroing flagged
+pixels) is preprocessing/'s job (preprocessing/steps/bad_pixel_map.py),
+not this module's -- this module only builds the artifact.
 
 Derived directly from the flat field's own normalized values, rather
 than a separate capture pass -- a pixel far from the population's
@@ -18,14 +20,18 @@ beam's edge.
 
 # Imports
 
+import logging
 import time
+from pathlib import Path
 
 import numpy as np
 
-from ..processed_frame import ProcessedFrame
+from ..shared.io import save_artifact, load_artifact
 from .metadata import CalibrationRecord
 
 # Constants
+
+logger = logging.getLogger(__name__)
 
 # Unverified starting point -- tune once real flat-field data exists.
 # 5 standard deviations is a fairly conservative bar, chosen to avoid
@@ -82,39 +88,56 @@ def build_bad_pixel_map(flat_field: np.ndarray, flat_field_record: CalibrationRe
     return mask, record
 
 
-def apply_bad_pixel_map(frame: ProcessedFrame, mask: np.ndarray) -> ProcessedFrame:
+def save_bad_pixel_map(path: str | Path, mask: np.ndarray, record: CalibrationRecord) -> None:
 
     '''
-    Zeroes every pixel flagged in mask.
+    Saves a bad-pixel-map artifact to path, so it can be reused in a
+    later session without rebuilding it from a flat field. Overwrites
+    whatever was already at path -- a bad-pixel map is current instrument
+    state, not a history to keep.
 
     Parameters
     ----------
-    frame
-        The frame to correct -- expected to already be baseline-subtracted
-        and flat-field-divided, per the §6 processing order.
+    path
+        Destination file. A ".npz" suffix is added if not already
+        present.
     mask
-        Boolean array from build_bad_pixel_map(), True = defective.
+        The boolean array returned by build_bad_pixel_map().
+    record
+        The CalibrationRecord returned alongside it.
 
     Returns
     -------
-    ProcessedFrame
+    None
+    '''
+
+    save_artifact(path, mask, record)
+
+
+def load_bad_pixel_map(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
+
+    '''
+    Loads a bad-pixel map previously saved via save_bad_pixel_map().
+
+    Parameters
+    ----------
+    path
+        The file to load. A ".npz" suffix is added if not already
+        present.
+
+    Returns
+    -------
+    tuple[np.ndarray, CalibrationRecord]
 
     Raises
     ------
-    ValueError
-        If mask's shape doesn't match frame.image's.
+    FileNotFoundError
+        If path doesn't exist.
     '''
 
-    if mask.shape != frame.image.shape:
-        raise ValueError(f"mask shape {mask.shape} does not match frame shape {frame.image.shape}")
-
-    masked_image = frame.image.copy()
-    masked_image[mask] = 0
-
-    return ProcessedFrame(
-        image=masked_image, frame_id=frame.frame_id, timestamp=frame.timestamp,
-        exposure_us=frame.exposure_us, gain_db=frame.gain_db,
-    )
+    mask, record = load_artifact(path, CalibrationRecord)
+    logger.info("loaded bad-pixel map from %s (age %.1fs)", path, record.age_seconds)
+    return mask, record
 
 
-__all__ = ["build_bad_pixel_map", "apply_bad_pixel_map", "SIGMA_THRESHOLD"]
+__all__ = ["build_bad_pixel_map", "SIGMA_THRESHOLD", "save_bad_pixel_map", "load_bad_pixel_map"]

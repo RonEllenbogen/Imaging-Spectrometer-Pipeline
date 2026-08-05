@@ -17,8 +17,8 @@ what's next.
 |---|---|
 | `acquisition/` | Complete, tested (synthetic + real hardware) |
 | `preprocessing/` | Complete, tested (synthetic only) |
+| `calibration/sensor/` | Complete, tested (synthetic only) — moved out of `preprocessing/sensor_calibration/`, see §3 |
 | `calibration/spectral/`, `calibration/spatial/` | Designed, not built |
-| `calibration/sensor/` | Planned, not yet created — see refactor in §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
 | `gui/`, `main.py` | Not started |
 
@@ -219,20 +219,29 @@ reversible, none locks in an architecture that would be costly to undo:
 
 ## 3. To-do list
 
-- **Split `sensor_calibration` out of `preprocessing/`.** Move
+- ~~**Split `sensor_calibration` out of `preprocessing/`.**~~ **Done.**
   `build_baseline`, `build_flat_field`, `build_bad_pixel_map`, plus
-  `CalibrationRecord`/`check_settings_match()`, into a new
-  `calibration/sensor/` subpackage (sibling to `calibration/spectral/` and
-  `calibration/spatial/`) — building calibration artifacts is conceptually
-  a `calibration/` concern, not a `preprocessing/` one (this is already the
-  stated principle behind `run_preprocessing()`, just not reflected in the
-  current file layout). `apply_baseline`, `apply_flat_field`,
-  `apply_bad_pixel_map`, `CalibrationSet`, and `run_preprocessing` stay in
-  `preprocessing/`, importing the artifact/record types from `calibration/`
-  — a one-directional dependency (preprocessing depends on calibration,
-  never the reverse). Touches 43 currently-passing tests; imports and
-  probably `tests/test_preprocessing.py` will need updating/splitting.
-  Not yet started.
+  `metadata.py` (`CalibrationRecord`/`check_settings_match()`), moved into
+  `calibration/sensor/`. `apply_baseline`, `apply_flat_field`,
+  `apply_bad_pixel_map`, `CalibrationSet`, and `run_preprocessing` stayed in
+  `preprocessing/` (now in `preprocessing/steps/`, one file per artifact
+  type, mirroring `calibration/sensor/`'s layout) — a one-directional
+  dependency, preprocessing depends on calibration, never the reverse.
+  One consequence not anticipated when this item was written:
+  `check_saturation`/`SaturationCheckResult` (previously
+  `preprocessing/steps/saturation.py`) also moved to
+  `calibration/sensor/saturation.py`, since `build_flat_field()` needs it
+  to reject a saturated calibration source, and it depends only on
+  `pipeline.acquisition` — leaving it in `preprocessing/` would have made
+  `calibration/` depend on `preprocessing/`, violating the one-directional
+  rule. `SettingsMismatchError`/`InvalidFlatFieldError` moved to a new
+  `calibration/exceptions.py` (`CalibrationError` base) for the same
+  reason; `preprocessing/` re-exports `SettingsMismatchError` for caller
+  convenience. `tests/test_preprocessing.py` split: `build_*()`/
+  `check_saturation()`/`CalibrationRecord`/`check_settings_match()`
+  coverage moved to new `tests/test_calibration.py`; `apply_*()` and the
+  end-to-end `run_preprocessing()` test stayed. Full suite still at 102
+  passed, 17 skipped, now split across the two files.
 - **Conversion gain measurement (e⁻/ADU)**, via a photon transfer curve
   (pixel variance vs. mean across a range of illumination levels). Needed
   so TLW's `N` term is in true photon-equivalent units rather than raw ADU.

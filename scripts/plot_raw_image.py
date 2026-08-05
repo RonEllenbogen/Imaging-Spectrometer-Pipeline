@@ -26,7 +26,7 @@ def plot_image(filename: str):
 
     # Get image from file path
     repo_root = Path(__file__).resolve().parents[1]
-    image_path = repo_root / "data" / "raw" / filename
+    image_path = repo_root / "data" / "raw" / "spectrometer_red_90deg_flip_hor_slit" / filename
 
     image = iio.imread(image_path)
 
@@ -53,4 +53,4 @@ def plot_image(filename: str):
 
 
 if __name__ == "__main__":
-    plot_image("red_laser_spectrometer_w_0um.tiff")
+    plot_image("width_5.tiff")

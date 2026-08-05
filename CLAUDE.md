@@ -15,8 +15,10 @@ Accelerator Group (LPAG) at the University of Oxford. It acquires frames from a 
 present results live through a GUI.
 
 Build order (see `docs/notes.md` for the full roadmap): acquisition → preprocessing → analysis →
-validation → headless CLI integration → GUI → full integration. `acquisition/` and `preprocessing/`
-are built and tested; `analysis/`, `gui/app.py`, and `main.py` are still empty stubs.
+validation → headless CLI integration → GUI → full integration. `acquisition/`, `preprocessing/`,
+`calibration/sensor/`, and `analysis/` are built and tested (synthetic data only, beyond
+`acquisition/`); `calibration/spectral/`, `calibration/spatial/`, `gui/app.py`, and `main.py` are
+still empty stubs or not yet started.
 
 ## Commands
 
@@ -76,32 +78,58 @@ is deliberately left uncaught so it surfaces as a traceback instead of vanishing
 Hardware-only tests are gated behind `SPECTROMETER_HARDWARE_TESTS=1` (see `HARDWARE_AVAILABLE` in
 `tests/test_acquisition.py`) rather than always requiring a connected camera.
 
+### Calibration (`src/pipeline/calibration/`)
+
+Owns *building* calibration artifacts; `preprocessing/` owns *applying* them. This is a
+one-directional dependency (`preprocessing/` imports from `calibration/`, never the reverse) —
+enforced in practice by `calibration/sensor/saturation.py` depending only on `pipeline.acquisition`,
+never on `preprocessing/`, even though both `calibration/sensor/flat_field.py` and
+`preprocessing/`'s per-frame pipeline need a saturation check.
+
+- `shared/io.py` — `save_artifact()`/`load_artifact()`: generic one-array-plus-one-record persistence
+  to a single `.npz` file, `np.savez` only (never pickle, so loading an artifact never executes
+  arbitrary code). Every subpackage's per-type `save_*()`/`load_*()` are thin wrappers around this.
+- `sensor/` — each artifact type owns its own `build_*()`/`save_*()`/`load_*()`: `baseline.py`
+  (per-session background average), `flat_field.py` (PRNU correction from uniform-illumination frames,
+  dark-subtracted first so DSNU isn't baked in; rejects a saturated source outright via
+  `saturation.py`), `bad_pixel_map.py` (dead/hot pixels flagged from flat-field outliers beyond
+  `SIGMA_THRESHOLD`). `metadata.py`'s `CalibrationRecord` tags every artifact with the exposure/gain
+  it was built under; `check_settings_match()` enforces that a science frame's actual settings match
+  (relative tolerance for exposure, absolute for gain) before an artifact is applied. `saturation.py`'s
+  `check_saturation()` checks the *raw* frame against `CANONICAL_MAX_VALUE` before flat-field division
+  changes the numeric domain, and returns a result rather than raising (the caller decides whether to
+  discard/log/escalate). `workflow.py` is the "press start" layer gluing `acquisition/`'s
+  `CameraStream.collect_n_frames()` to `build_*()`/`save_*()`: `run_baseline_calibration()` does
+  acquire→build→save in one call (baseline is single-phase); flat-field calibration needs its physical
+  setup changed mid-capture (dark, then uniformly illuminated), so it's split across
+  `capture_dark_frames()`/`capture_illuminated_frames()`/`finish_flat_field_calibration()` instead of
+  one blocking call — the caller (eventually `gui/`) sequences them at its own pace.
+- `spectral/`, `spatial/` — designed, not yet built (pixel→wavelength and pixel→physical-position
+  calibration respectively; see `docs/project_handover.md` §5).
+- Exceptions derive from `CalibrationError` (see `exceptions.py`): `SettingsMismatchError`,
+  `InvalidFlatFieldError`. `pipeline.preprocessing` re-exports `SettingsMismatchError` for caller
+  convenience, since `preprocessing/`'s `apply_baseline()` can raise it too — but it is a
+  `CalibrationError`, not a `PreprocessingError`; catch both explicitly if a caller needs to handle
+  anything either package can raise.
+
 ### Preprocessing (`src/pipeline/preprocessing/`)
 
 `run_preprocessing()` in `preprocessing_pipeline.py` is the single public entry point and *encodes the
 correction order in code, not documentation*: frame sanity check → saturation check → baseline
 subtraction → flat-field division → bad-pixel masking → optional ROI masking. Callers pass a
 pre-built `CalibrationSet` (baseline, flat field, bad-pixel mask + records); building those artifacts
-is not this function's job.
+is `calibration/`'s job, not this function's.
 
-- `sensor_calibration/` — each artifact type owns its own `build_*()`/`apply_*()` pair:
-  `baseline.py` (per-session background average, subtracted with clipping at zero),
-  `flat_field.py` (PRNU correction from uniform-illumination frames, dark-subtracted first so DSNU
-  isn't baked in), `bad_pixel_map.py` (dead/hot pixels flagged from flat-field outliers beyond
-  `SIGMA_THRESHOLD`, zeroed rather than interpolated — exact for a weighted centroid, no bias risk
-  near sharp gradients). `metadata.py`'s `CalibrationRecord` tags every artifact with the
-  exposure/gain it was built under; `check_settings_match()` enforces that a science frame's actual
-  settings match (relative tolerance for exposure, absolute for gain) before an artifact is applied.
-- `steps/` — `saturation.py` checks the *raw* frame against `CANONICAL_MAX_VALUE` before flat-field
-  division changes the numeric domain, and returns a result rather than raising (the caller decides
-  whether to discard/log/escalate). `roi.py` zeroes rows outside the spatial ROI rather than cropping,
-  keeping `CANONICAL_SHAPE` intact.
+- `steps/` — each artifact type's `apply_*()` counterpart to its `calibration/sensor/` `build_*()`:
+  `baseline.py` (subtracted with clipping at zero), `flat_field.py` (divided, floored at
+  `MIN_FLAT_FIELD_VALUE` so division can never produce inf/nan), `bad_pixel_map.py` (zeroed rather
+  than interpolated — exact for a weighted centroid, no bias risk near sharp gradients). `roi.py`
+  zeroes rows outside the spatial ROI rather than cropping, keeping `CANONICAL_SHAPE` intact.
 - `validation/frame_checks.py` — `check_frame_sanity()` only checks whether a raw frame has *any*
   signal (rejects all-zero frames); structural validity is already guaranteed by `FrameData`'s own
   constructor.
-- Exceptions all derive from `PreprocessingError` (see `exceptions.py`); catch that broadly, or a
-  specific subclass (`SettingsMismatchError`, `SaturationError`, `InvalidFlatFieldError`,
-  `NoSignalError`) to act differently per failure.
+- Exceptions derive from `PreprocessingError` (see `exceptions.py`): `SaturationError`,
+  `NoSignalError`. (`SettingsMismatchError`/`InvalidFlatFieldError` are `calibration/`'s — see above.)
 
 ### Config
 

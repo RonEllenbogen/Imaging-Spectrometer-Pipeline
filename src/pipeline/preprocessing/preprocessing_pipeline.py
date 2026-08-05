@@ -6,7 +6,7 @@ flat-field division -> bad-pixel masking -> optional ROI masking.
 
 Building calibration artifacts (baseline, flat field, bad-pixel map) is
 NOT this function's job -- that happens once, infrequently, via each
-artifact's own build_*() function in sensor_calibration/. This function
+artifact's own build_*() function in calibration/sensor/. This function
 only applies already-built artifacts to one science frame at a time.
 """
 
@@ -15,11 +15,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from pipeline.acquisition import FrameData
+from pipeline.calibration.sensor import check_saturation, SaturationCheckResult, CalibrationRecord
 
 from .processed_frame import ProcessedFrame
 from .validation import check_frame_sanity
-from .steps import apply_roi, check_saturation, SaturationCheckResult
-from .sensor_calibration import apply_baseline, apply_flat_field, apply_bad_pixel_map, CalibrationRecord
+from .steps import apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map
 
 
 @dataclass(frozen=True, slots=True)
