@@ -33,7 +33,7 @@ src/pipeline/analysis/
 ├── exceptions.py          AnalysisError, InsufficientDataError
 ├── noise_model.py          SensorNoiseModel (+ placeholder gain/b constants)
 ├── centroiding.py           CentroidEstimator protocol, IntensityWeightedMoment, extract_centroids()
-├── interfaces.py            FrequencyAxis, PositionCalibration protocols (calibration/ boundary contracts)
+├── interfaces.py            WavelengthAxis, PositionCalibration protocols (calibration/ boundary contracts)
 ├── dispersion_fitting.py    SpatialDispersionFitter protocol, TotalLeastSquaresFit
 ├── combination.py           combine_shots()
 ├── results.py                CentroidResult, SpatialDispersionFitResult, ShotAnalysisResult, CombinedSpatialDispersionResult
@@ -79,21 +79,24 @@ once against real data to confirm TLW's error bars are trustworthy for
 this instrument's actual beam profile, and derive an empirical correction
 factor for the live TLW estimate if a systematic discrepancy shows up.
 
-**Frequency convention**: angular frequency ω, always — never ordinary
-frequency ν. ζ = dx0/dω throughout.
+**Wavelength convention**: wavelength λ, in nanometres, always — never
+angular frequency ω. ζ = dx0/dλ throughout (units: px/nm). (This
+supersedes an earlier ω-based convention; see the addendum note at the
+top of `docs/project_handover.md` for the historical design.)
 
-**Dispersion interface**: analysis accepts an injected dispersion object
-(array / callable / polynomial) that exposes ω(pixel) and σ_ω(pixel)
-*directly* — analysis contains no λ, no physical constants, no unit-
-conversion logic at all. The λ→ω conversion (physically, pixel→λ is
+**Dispersion interface**: analysis accepts an injected `WavelengthAxis`
+object that exposes `wavelength_nm(pixel)` and `sigma_wavelength_nm(pixel)`
+*directly* — analysis contains no physical constants, no unit-conversion
+logic at all. `calibration/spectral/calibrate.py`'s pixel→λ fit (physically
 expected to be close to linear, or whatever low-order polynomial
-`calibration/shared/fitting.py`'s generic weighted-polynomial-fit produces;
-converting that fit and its uncertainty into ω via dω/dλ = 2πc/λ²) happens
-once, at calibration-build time, inside the future
-`calibration/spectral/calibrate.py` — not per-frame inside `analysis/`.
+`calibration/shared/fitting.py`'s generic weighted-polynomial-fit produces)
+is used as-is, with no further conversion step — since the fit variable
+(λ) and the analysis variable (λ) are now the same quantity, there's no
+chain-rule uncertainty propagation to do at calibration-build time the way
+the old ω convention required (`dω/dλ = 2πc/λ²`).
 
 **Fit method for ζ**: true total least squares / orthogonal distance
-regression (e.g. `scipy.odr`), which accounts for uncertainty in both ω
+regression (e.g. `scipy.odr`), which accounts for uncertainty in both λ
 and x0 simultaneously, behind a `SpatialDispersionFitter` `typing.Protocol`
 (default: `TotalLeastSquaresFit`) so ordinary weighted least squares or the
 effective-variance iterative method could be substituted later without
@@ -112,15 +115,15 @@ otherwise.
 **Goodness-of-fit**: no minimum-valid-column gate. Reduced χ² is always
 computed (via ODR's residual variance, or equivalent) as the primary
 goodness-of-fit signal, alongside residuals and normalized residuals
-(`x0_observed − x0_fit(ω)`, normalized by the effective combined sigma
-`√(σ_x0² + ζ²σ_ω²)`) for plotting. `SpatialDispersionFitter.fit()` takes a
+(`x0_observed − x0_fit(λ)`, normalized by the effective combined sigma
+`√(σ_x0² + ζ²σ_λ²)`) for plotting. `SpatialDispersionFitter.fit()` takes a
 `degree` parameter (1/2/3) — same total-least-squares machinery fits a
-linear/quadratic/cubic polynomial in ω, each with its own reduced χ² and
+linear/quadratic/cubic polynomial in λ, each with its own reduced χ² and
 residuals, letting degree be compared directly as a check on whether a
-linear chirp model is adequate. ζ generalizes to a `zeta(omega)` method
-(the fitted polynomial's derivative, evaluated at any ω) rather than a
-single constant once degree > 1; it collapses to the familiar constant
-for the linear case.
+linear chirp model is adequate. ζ generalizes to a `zeta(wavelength_nm)`
+method (the fitted polynomial's derivative, evaluated at any λ) rather
+than a single constant once degree > 1; it collapses to the familiar
+constant for the linear case.
 
 **N per measurement**: no minimum enforced. `analysis/`'s own inverse-
 variance combination function is agnostic to N — it just combines
@@ -148,7 +151,7 @@ double-counting by quadrature-summing both.
 
 **Position units**: pixels by default throughout `analysis/`, since
 spatial calibration doesn't exist yet. Handled the same way as the
-dispersion/ω interface — an optional injectable position-calibration
+dispersion/λ interface — an optional injectable position-calibration
 object (scale factor or callable, pixel→physical position, with its own
 uncertainty) converts to physical units only if supplied; until
 `calibration/spatial/` exists, it never is.
@@ -158,7 +161,7 @@ uncertainty) converts to physical units only if supplied; until
   `x0` (pixels), `sigma_x0` (TLW).
 - `SpatialDispersionFitResult` (per shot, per requested degree) — `degree`,
   `coefficients`, `coefficient_sigma`, `reduced_chi_squared`, `residuals`,
-  `normalized_residuals`, `zeta(omega)` method.
+  `normalized_residuals`, `zeta(wavelength_nm)` method.
 - `ShotAnalysisResult` (per shot) — bundles a `CentroidResult` with a
   `dict[int, SpatialDispersionFitResult]` keyed by degree, so linear/
   quadratic/cubic fits sit side by side for the same shot.
@@ -197,11 +200,11 @@ reversible, none locks in an architecture that would be costly to undo:
   per-column Python loop itself remains; whether that's ever worth
   removing depends on N_default (below) and the real laser rep rate,
   neither pinned down yet.
-- `TotalLeastSquaresFit` requires `sigma_omega`/`sigma_x0` strictly
+- `TotalLeastSquaresFit` requires `sigma_wavelength_nm`/`sigma_x0` strictly
   positive (scipy.odr weights by their inverse) and does not clip/guard
   against zero -- whatever eventually supplies a placeholder
-  `FrequencyAxis` (before `calibration/spectral/` exists) must return a
-  small positive `sigma_omega`, not exactly zero.
+  `WavelengthAxis` (before `calibration/spectral/` exists) must return a
+  small positive `sigma_wavelength_nm`, not exactly zero.
 - `analyze_shot()` applies an optional `PositionCalibration` conversion
   immediately after centroid extraction, so every downstream step (fit,
   residuals) operates in one consistent unit -- an alternative would be

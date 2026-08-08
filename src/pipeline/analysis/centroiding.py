@@ -12,11 +12,11 @@ exist. This deliberately does NOT guard against an all-zero column
 preprocessing's responsibility, not this module's (docs/project_state.md
 #8).
 
-Bin width is one pixel column, no grouping (docs/project_state.md
-#5/#6) -- sub-resolution spectral blur convolves a locally-linear x0(omega)
-with a roughly symmetric kernel, which shouldn't bias the linear
-spatial-dispersion fit, only add scatter that the multi-shot combination
-in combination.py is trusted to average out.
+Bin width is one pixel column, no grouping (see "Spectral binning" in
+docs/project_state.md) -- sub-resolution spectral blur convolves a
+locally-linear x0(wavelength_nm) with a roughly symmetric kernel, which
+shouldn't bias the linear spatial-dispersion fit, only add scatter that
+the multi-shot combination in combination.py is trusted to average out.
 
 Centroid uncertainty is the full 3-term Thompson-Larson-Webb (2002)
 formula, working entirely in pixel-index units throughout (matching the

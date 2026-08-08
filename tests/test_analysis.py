@@ -76,19 +76,19 @@ def _noise_model(gain=1.0, background_sigma=0.0) -> SensorNoiseModel:
     return SensorNoiseModel(gain_e_per_adu=gain, background_sigma=background_sigma)
 
 
-class _LinearFrequencyAxis:
-    '''Minimal FrequencyAxis stub: omega = omega0 + domega_dpixel * pixel.'''
+class _LinearWavelengthAxis:
+    '''Minimal WavelengthAxis stub: wavelength_nm = wavelength0_nm + dwavelength_nm_dpixel * pixel.'''
 
-    def __init__(self, omega0: float, domega_dpixel: float, sigma_omega_value: float):
-        self.omega0 = omega0
-        self.domega_dpixel = domega_dpixel
-        self.sigma_omega_value = sigma_omega_value
+    def __init__(self, wavelength0_nm: float, dwavelength_nm_dpixel: float, sigma_wavelength_nm_value: float):
+        self.wavelength0_nm = wavelength0_nm
+        self.dwavelength_nm_dpixel = dwavelength_nm_dpixel
+        self.sigma_wavelength_nm_value = sigma_wavelength_nm_value
 
-    def omega(self, pixel: np.ndarray) -> np.ndarray:
-        return self.omega0 + self.domega_dpixel * pixel.astype(np.float64)
+    def wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
+        return self.wavelength0_nm + self.dwavelength_nm_dpixel * pixel.astype(np.float64)
 
-    def sigma_omega(self, pixel: np.ndarray) -> np.ndarray:
-        return np.full(pixel.shape, self.sigma_omega_value, dtype=np.float64)
+    def sigma_wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
+        return np.full(pixel.shape, self.sigma_wavelength_nm_value, dtype=np.float64)
 
 
 # Classes
@@ -213,11 +213,12 @@ class TestSpatialDispersionFitResult:
             residuals=np.zeros(3),
             normalized_residuals=np.zeros(3),
         )
-        omega = np.array([0.0, 10.0, 100.0])
-        assert np.allclose(result.zeta(omega), 0.5)
+        wavelength_nm = np.array([0.0, 10.0, 100.0])
+        assert np.allclose(result.zeta(wavelength_nm), 0.5)
 
-    def test_quadratic_zeta_varies_with_omega(self):
-        # x0 = 10 + 0.5*omega + 2*omega^2 -> dx0/domega = 0.5 + 4*omega
+    def test_quadratic_zeta_varies_with_wavelength(self):
+        # x0 = 10 + 0.5*wavelength_nm + 2*wavelength_nm^2
+        # -> dx0/dwavelength_nm = 0.5 + 4*wavelength_nm
         result = SpatialDispersionFitResult(
             degree=2,
             coefficients=np.array([10.0, 0.5, 2.0]),
@@ -226,8 +227,8 @@ class TestSpatialDispersionFitResult:
             residuals=np.zeros(3),
             normalized_residuals=np.zeros(3),
         )
-        omega = np.array([0.0, 1.0, 2.0])
-        assert np.allclose(result.zeta(omega), 0.5 + 4.0 * omega)
+        wavelength_nm = np.array([0.0, 1.0, 2.0])
+        assert np.allclose(result.zeta(wavelength_nm), 0.5 + 4.0 * wavelength_nm)
 
     def test_degree_coefficient_length_mismatch_raises(self):
         with pytest.raises(ValueError):
@@ -276,37 +277,37 @@ class TestTotalLeastSquaresFit:
         rng = np.random.default_rng(1)
         n = 200
         true_intercept, true_slope = 500.0, 2.0
-        omega = np.linspace(10.0, 20.0, n)
-        sigma_omega = np.full(n, 0.01)
+        wavelength_nm = np.linspace(10.0, 20.0, n)
+        sigma_wavelength_nm = np.full(n, 0.01)
         sigma_x0 = np.full(n, 0.05)
         x0 = (
-            true_intercept + true_slope * omega
+            true_intercept + true_slope * wavelength_nm
             + rng.normal(0.0, sigma_x0)
-            + rng.normal(0.0, sigma_omega) * true_slope
+            + rng.normal(0.0, sigma_wavelength_nm) * true_slope
         )
 
-        result = TotalLeastSquaresFit().fit(omega, x0, sigma_omega, sigma_x0, degree=1)
+        result = TotalLeastSquaresFit().fit(wavelength_nm, x0, sigma_wavelength_nm, sigma_x0, degree=1)
 
         assert isinstance(result, SpatialDispersionFitResult)
         assert result.coefficients[1] == pytest.approx(true_slope, abs=5 * result.coefficient_sigma[1])
         assert result.reduced_chi_squared < 3.0   # generous -- single noisy realization
 
     def test_insufficient_data_raises(self):
-        omega = np.array([1.0])
+        wavelength_nm = np.array([1.0])
         x0 = np.array([1.0])
         sigma = np.array([0.1])
         with pytest.raises(InsufficientDataError):
-            TotalLeastSquaresFit().fit(omega, x0, sigma, sigma, degree=1)
+            TotalLeastSquaresFit().fit(wavelength_nm, x0, sigma, sigma, degree=1)
 
     def test_residuals_shape_matches_input(self):
-        omega = np.linspace(0.0, 10.0, 20)
-        x0 = 5.0 + 0.3 * omega
+        wavelength_nm = np.linspace(0.0, 10.0, 20)
+        x0 = 5.0 + 0.3 * wavelength_nm
         sigma = np.full(20, 0.1)
 
-        result = TotalLeastSquaresFit().fit(omega, x0, sigma, sigma, degree=1)
+        result = TotalLeastSquaresFit().fit(wavelength_nm, x0, sigma, sigma, degree=1)
 
-        assert result.residuals.shape == omega.shape
-        assert result.normalized_residuals.shape == omega.shape
+        assert result.residuals.shape == wavelength_nm.shape
+        assert result.normalized_residuals.shape == wavelength_nm.shape
 
 
 # ---------------------------------------------------------------------------
@@ -361,18 +362,18 @@ class TestAnalyzeShot:
 
     def test_end_to_end_recovers_known_spatial_dispersion(self):
         slope_px_per_col = 0.03
-        domega_dpixel = 2.0
-        expected_zeta = slope_px_per_col / domega_dpixel
+        dwavelength_nm_dpixel = 2.0
+        expected_zeta = slope_px_per_col / dwavelength_nm_dpixel
 
         frame = _synthetic_frame(
             centroid0_px=600.0, slope_px_per_col=slope_px_per_col,
             noise_std=1.0, seed=42,
         )
-        frequency_axis = _LinearFrequencyAxis(
-            omega0=100.0, domega_dpixel=domega_dpixel, sigma_omega_value=0.01,
+        wavelength_axis = _LinearWavelengthAxis(
+            wavelength0_nm=100.0, dwavelength_nm_dpixel=dwavelength_nm_dpixel, sigma_wavelength_nm_value=0.01,
         )
 
-        result = analyze_shot(frame, frequency_axis, degrees=(1,))
+        result = analyze_shot(frame, wavelength_axis, degrees=(1,))
 
         assert isinstance(result, ShotAnalysisResult)
         assert result.frame_id == frame.frame_id
@@ -389,9 +390,9 @@ class TestAnalyzeShot:
 
     def test_multiple_degrees_all_present(self):
         frame = _synthetic_frame(centroid0_px=600.0, slope_px_per_col=0.02, noise_std=0.5, seed=7)
-        frequency_axis = _LinearFrequencyAxis(omega0=50.0, domega_dpixel=1.0, sigma_omega_value=0.01)
+        wavelength_axis = _LinearWavelengthAxis(wavelength0_nm=50.0, dwavelength_nm_dpixel=1.0, sigma_wavelength_nm_value=0.01)
 
-        result = analyze_shot(frame, frequency_axis, degrees=(1, 2, 3))
+        result = analyze_shot(frame, wavelength_axis, degrees=(1, 2, 3))
 
         assert set(result.fits.keys()) == {1, 2, 3}
         for degree, fit in result.fits.items():

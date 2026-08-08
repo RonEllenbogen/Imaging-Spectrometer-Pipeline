@@ -60,8 +60,9 @@ class CentroidResult:
 class SpatialDispersionFitResult:
 
     '''
-    Result of fitting x0 = c0 + c1*omega + c2*omega^2 + ... to one shot's
-    centroid data, at one polynomial degree (docs/project_state.md #18).
+    Result of fitting x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...
+    to one shot's centroid data, at one polynomial degree (see "Result
+    object shapes" in docs/project_state.md).
 
     Parameters
     ----------
@@ -77,10 +78,10 @@ class SpatialDispersionFitResult:
         generalization of reduced chi-squared; ~1 indicates a fit
         consistent with the input uncertainties.
     residuals
-        x0_observed - x0_fit(omega), per column.
+        x0_observed - x0_fit(wavelength_nm), per column.
     normalized_residuals
         residuals divided by the effective combined sigma
-        sqrt(sigma_x0^2 + zeta^2 * sigma_omega^2), per column.
+        sqrt(sigma_x0^2 + zeta^2 * sigma_wavelength_nm^2), per column.
     '''
 
     degree: int
@@ -114,17 +115,17 @@ class SpatialDispersionFitResult:
         ):
             array.flags.writeable = False
 
-    def zeta(self, omega: np.ndarray) -> np.ndarray:
+    def zeta(self, wavelength_nm: np.ndarray) -> np.ndarray:
 
         '''
-        Local spatial dispersion dx0/domega, evaluated at omega -- the
-        fitted polynomial's derivative. Collapses to the familiar single
-        constant (coefficients[1]) whenever degree == 1
-        (docs/project_state.md #18).
+        Local spatial dispersion dx0/dwavelength_nm (px/nm), evaluated at
+        wavelength_nm -- the fitted polynomial's derivative. Collapses to
+        the familiar single constant (coefficients[1]) whenever
+        degree == 1 (see "Result object shapes" in docs/project_state.md).
         '''
 
         derivative_coefficients = np.polynomial.polynomial.polyder(self.coefficients)
-        return np.polynomial.polynomial.polyval(omega, derivative_coefficients)
+        return np.polynomial.polynomial.polyval(wavelength_nm, derivative_coefficients)
 
 
 @dataclass(frozen=True, slots=True)

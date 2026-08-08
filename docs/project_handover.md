@@ -1,5 +1,9 @@
 # Project Handover — Imaging Spectrometer Pipeline
 
+> **Note (2026-08-08):** the ω/angular-frequency convention described
+> below was later superseded by a direct wavelength (λ) convention. See
+> `docs/project_state.md` for the current design.
+
 Detailed companion to `CLAUDE.md`. Written to bring a fresh Claude Code
 session up to speed on everything already decided, built, tested, found, and
 deliberately cut — so none of it needs re-deriving or accidentally reversing.

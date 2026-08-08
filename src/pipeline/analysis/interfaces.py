@@ -17,29 +17,27 @@ import numpy as np
 
 # Classes
 
-class FrequencyAxis(Protocol):
+class WavelengthAxis(Protocol):
 
     '''
-    Supplies angular frequency (never ordinary frequency -- see
-    docs/project_state.md #14) for a given set of pixel-column indices,
-    plus its uncertainty. Implemented, eventually, by
-    calibration/spectral/ -- analysis never performs any lambda->omega
-    unit conversion itself; that conversion happens once, at
-    calibration-build time, on whatever pixel->lambda dispersion relation
-    calibration fits (docs/project_state.md #13/#15).
+    Supplies wavelength, in nanometres (see "Wavelength convention" in
+    docs/project_state.md), for a given set of pixel-column indices, plus
+    its uncertainty. Implemented, eventually, by calibration/spectral/,
+    whose pixel->wavelength(nm) polynomial fit is used directly --
+    analysis performs no further unit conversion of its own.
     '''
 
-    def omega(self, pixel: np.ndarray) -> np.ndarray:
+    def wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
 
-        '''Angular frequency at each given pixel-column index.'''
+        '''Wavelength, in nm, at each given pixel-column index.'''
 
         ...
 
-    def sigma_omega(self, pixel: np.ndarray) -> np.ndarray:
+    def sigma_wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
 
         '''
-        1-sigma uncertainty on omega() at each given pixel-column index.
-        Must be strictly positive everywhere -- TotalLeastSquaresFit
+        1-sigma uncertainty on wavelength_nm() at each given pixel-column
+        index. Must be strictly positive everywhere -- TotalLeastSquaresFit
         (dispersion_fitting.py) is backed by scipy.odr, which requires
         positive input standard deviations on both axes.
         '''
@@ -68,4 +66,4 @@ class PositionCalibration(Protocol):
 # Functions
 
 
-__all__ = ["FrequencyAxis", "PositionCalibration"]
+__all__ = ["WavelengthAxis", "PositionCalibration"]
