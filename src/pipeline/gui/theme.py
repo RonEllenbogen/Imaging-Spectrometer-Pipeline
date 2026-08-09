@@ -5,16 +5,20 @@ MARGIN_DEFAULT and call load_bundled_font() from here rather than
 hardcoding its own colors or fonts, so the whole GUI reads as one visual
 system instead of a patchwork of screens styled independently.
 
-PLACEHOLDER STATUS: this module did not exist yet when gui/calibration_screen.py
-was built (neither did a bundled font asset under assets/, nor a GUI design
-section in docs/project_state.md) -- both were expected prior art per this
-module's originating task brief but were absent from the repo at build time.
-This is a minimal, deliberately conservative implementation added to unblock
-that work: a reasonable dark palette plus a load_bundled_font() that degrades
-gracefully to a system sans-serif since no bundled .ttf exists under assets/
-yet. Treat every constant here as provisional -- safe to retune once a real
-design pass (and an actual bundled font file) happens, but keep the *names*
-stable, since gui/ widget modules import them by name.
+Names and palette values here match what gui/calibration_screen.py and
+gui/calibration_dialogs.py already import (built, screenshotted, and
+reviewed before this module's font-loading logic was corrected below) --
+kept stable deliberately, since changing them would mean re-touching
+already-verified widget code for no visual benefit. COLOR_PLOT_* additions
+are new, for gui/main_window.py's live-updating plot, which has no
+precedent in this repo to match.
+
+The bundled font is Latin Modern Roman (OFL-licensed, freely
+redistributable -- see assets/fonts/README.md), not "Inter" -- corrected
+from a first-draft placeholder that referenced a font file that was never
+actually present. load_bundled_font() degrades gracefully to a generic
+serif if the files are ever missing, so gui/ stays importable and runnable
+regardless.
 """
 
 # Imports
@@ -40,9 +44,9 @@ COLOR_TEXT_DISABLED = "#5c5c66"
 # Accents. COLOR_ACCENT marks the primary "acquire from camera" action
 # color, shared by baseline/flat-field/conversion-gain (all camera-driven).
 # COLOR_ACCENT_ALT is reserved for spatial calibration specifically, since
-# it has no camera interaction at all and the task brief calls for
-# visually distinguishing it from the other four flows rather than
-# forcing it into the same acquire -> build -> save visual language.
+# it has no camera interaction at all and is visually distinguished from
+# the other four flows rather than forced into the same acquire -> build
+# -> save visual language.
 COLOR_ACCENT = "#5b8cff"
 COLOR_ACCENT_ALT = "#c084fc"
 
@@ -50,6 +54,13 @@ COLOR_ACCENT_ALT = "#c084fc"
 COLOR_SUCCESS = "#4ade80"
 COLOR_WARNING = "#fbbf24"
 COLOR_ERROR = "#f87171"
+
+# Plot-specific colors, for gui/main_window.py's live-updating scatter/
+# heatmap/strip-chart -- no equivalent need existed in calibration_screen.py,
+# which has no plots.
+COLOR_PLOT_GRID = "#3a3a44"
+COLOR_PLOT_DATA = "#5b8cff"
+COLOR_PLOT_FIT = "#ff9d5c"
 
 # -- Spacing (px) -----------------------------------------------------------
 SPACING_XS = 4
@@ -60,11 +71,15 @@ SPACING_XL = 32
 
 MARGIN_DEFAULT = 16
 
-# Font family requested from the bundled font file, if/when one exists
-# under assets/fonts/. Falls back to a system sans-serif via Qt's normal
-# family-substitution behavior when no such file is found.
-_BUNDLED_FONT_FAMILY = "Inter"
-_ASSETS_FONT_DIR = Path(__file__).resolve().parents[3] / "assets" / "fonts"
+# -- Font --
+# Bundled rather than assumed-installed, so rendering doesn't depend on
+# whatever happens to be on the host machine.
+FONT_FAMILY_NAME = "Latin Modern Roman"
+_ASSETS_FONT_DIR = Path(__file__).parent / "assets" / "fonts"
+_FONT_FILES = [
+    _ASSETS_FONT_DIR / "LatinModernRoman-Regular.otf",
+    _ASSETS_FONT_DIR / "LatinModernRoman-Bold.otf",
+]
 
 # Classes
 
@@ -74,35 +89,32 @@ _ASSETS_FONT_DIR = Path(__file__).resolve().parents[3] / "assets" / "fonts"
 def load_bundled_font(point_size: int = 10, *, bold: bool = False) -> QFont:
 
     '''
-    Load the GUI's bundled font, registering it with Qt's font database on
-    first use so every widget constructing a QFont("Inter", ...) resolves
-    to the same bundled typeface rather than an arbitrary system default.
-
-    No .ttf currently exists under assets/fonts/ (see module docstring) --
-    until one is added, this degrades to requesting the "Inter" family by
-    name anyway, which Qt silently substitutes with a platform sans-serif
-    if unavailable. Callers don't need to change once a real font file is
-    added; only this function does.
+    Loads the bundled Latin Modern Roman font (registering it with Qt's
+    font database on first use) and returns a QFont set to it, for plot
+    axes/labels and data displays throughout gui/.
 
     Parameters
     ----------
     point_size
-        Font size in points.
+        Font point size to apply.
     bold
         Whether to request the bold weight.
 
     Returns
     -------
     QFont
-        Configured font, ready to hand to a widget's setFont() or a
-        QApplication as the default application font.
+        Set to FONT_FAMILY_NAME if the bundled font file(s) loaded
+        successfully, otherwise a generic serif -- never raises just
+        because the font file is missing.
     '''
 
-    if _ASSETS_FONT_DIR.is_dir():
-        for font_file in sorted(_ASSETS_FONT_DIR.glob("*.ttf")):
-            QFontDatabase.addApplicationFont(str(font_file))
+    loaded_any = False
+    for font_file in _FONT_FILES:
+        if font_file.exists() and QFontDatabase.addApplicationFont(str(font_file)) != -1:
+            loaded_any = True
 
-    font = QFont(_BUNDLED_FONT_FAMILY, point_size)
+    family = FONT_FAMILY_NAME if loaded_any else "Serif"
+    font = QFont(family, point_size)
     font.setBold(bold)
     return font
 
@@ -112,7 +124,8 @@ __all__ = [
     "COLOR_TEXT_PRIMARY", "COLOR_TEXT_SECONDARY", "COLOR_TEXT_DISABLED",
     "COLOR_ACCENT", "COLOR_ACCENT_ALT",
     "COLOR_SUCCESS", "COLOR_WARNING", "COLOR_ERROR",
+    "COLOR_PLOT_GRID", "COLOR_PLOT_DATA", "COLOR_PLOT_FIT",
     "SPACING_XS", "SPACING_SMALL", "SPACING_MEDIUM", "SPACING_LARGE", "SPACING_XL",
     "MARGIN_DEFAULT",
-    "load_bundled_font",
+    "FONT_FAMILY_NAME", "load_bundled_font",
 ]
