@@ -16,7 +16,6 @@ fake) numbers, but does not trigger any real refit.
 
 # Imports
 
-import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -308,7 +307,6 @@ class LiveViewWidget(QWidget):
         self._placeholder_fits = self._build_placeholder_fits()
 
         rng = np.random.default_rng(seed=0)
-        scale = self._position_calibration.scale_factor
 
         n_rows, n_cols = 1200, 1920
         # A single fake "true" beam-centroid trend (in raw spatial pixels,
