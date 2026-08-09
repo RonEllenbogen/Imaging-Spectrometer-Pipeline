@@ -16,12 +16,14 @@ what's next.
 | Package | Status |
 |---|---|
 | `acquisition/` | Complete, tested (synthetic + real hardware) |
-| `preprocessing/` | Complete, tested (synthetic only) |
-| `calibration/sensor/` | Complete, tested (synthetic only) — moved out of `preprocessing/sensor_calibration/`, see §4 |
+| `preprocessing/` | Complete, tested (synthetic only) — now includes mandatory signal-threshold masking, see §6 |
+| `calibration/sensor/` | Complete, tested (synthetic only) — moved out of `preprocessing/sensor_calibration/`, see §6 |
 | `calibration/shared/`, `calibration/spatial/` | Complete, tested (synthetic only) — see §3 |
 | `calibration/spectral/` | Complete except `line_matching.py`, blocked on reference-lamp selection — see §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
-| `gui/`, `main.py` | Not started |
+| `cli/` | Calibration subcommands complete, import/argparse-tested — real hardware paths unverified — see §4 |
+| `gui/` | Designed in detail, not built — see §5 |
+| `main.py` | Not started |
 
 ---
 
@@ -368,7 +370,146 @@ tested against synthetic already-matched (pixel, wavelength_nm) data:
 
 ---
 
-## 4. To-do list
+## 4. `cli/` — headless calibration CLI
+
+Built as `src/pipeline/cli/calibration.py` (+ minimal `__init__.py`), a `python -m pipeline.cli.calibration
+<subcommand>` entry point wiring `calibration/sensor/`'s existing workflow functions to a real
+`CameraStream`. Subcommands: `baseline`, `flat-field` (interactively prompts the user between its two
+physical-setup phases — block the beam, then set up uniform illumination — mirroring why
+`sensor/workflow.py`'s flat-field functions are split the way they are), `bad-pixel-map` (loads a
+flat-field artifact and derives the mask; no camera involved, matching `build_bad_pixel_map()` itself),
+`conversion-gain` (`--exposure-min-us`/`--exposure-max-us`/`--n-levels` are required CLI arguments with
+no defaults, matching the caller-supplied-not-auto-probed decision in §6), and a bonus `noise-model`
+subcommand that loads a saved baseline + conversion-gain artifact and prints the `SensorNoiseModel` they'd
+produce together.
+
+Camera settings come from `configs/default.yaml` via `load_config()`, except `gain_db` — not present in
+the YAML config at all, so it's a required flag on every camera-touching subcommand. Artifacts default to
+a `calibration_artifacts/` directory (added to `.gitignore` — captured instrument data, not source),
+overridable per-subcommand via `--path`/`--output-dir`.
+
+Built from a self-contained written spec (no access to the design conversation, repo access only), then
+independently reviewed against the real APIs it calls rather than trusting the initial report: full test
+suite re-run, every subcommand's `--help` re-exercised, `load_config()`'s actual signature cross-checked.
+Four minor issues found (docstring quote-style convention, a missing blank line before docstrings, a dead
+`--path` argument on `noise-model` — which produces no output artifact, so the flag did nothing but was
+still listed — and `resolve_artifact_path()` silently dropping a relative path's subdirectory when
+combined with `--output-dir`) — all fixed in a follow-up pass and re-verified independently the same way.
+
+No hardware-connected code path has actually been exercised against a real camera yet — everything above
+was verified via imports, argparse `--help`, and the existing synthetic-only test suite.
+
+---
+
+## 5. `gui/` — designed in detail, not built
+
+Nothing in code yet. Extensively designed in discussion first, the same way `calibration/spectral/` and
+`spatial/` were before being built — recorded here in full so a future implementation pass (or session)
+has the actual decisions, not just the fact that a GUI is planned.
+
+**Overall structure.** On launch: choose between loading existing calibration artifacts, or creating new
+ones (per-type — the user picks which one, not an all-or-nothing choice). Calibration and live view are
+mutually exclusive phases, never simultaneous, which happens to line up exactly with the one-camera-
+connection-at-a-time hardware constraint without needing to special-case it.
+
+**The calibration screen is not uniform across the five types:**
+- **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
+  override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
+- **Spectral** is still blocked (`line_matching.py`, §3) and must be shown as unavailable, not offered as
+  if it works.
+- **Bad-pixel-map has no manual "create" option at all** — it runs automatically immediately after every
+  flat-field capture (`build_bad_pixel_map()` + `save_bad_pixel_map()` chained onto
+  `finish_flat_field_calibration()`), since it's derived purely from the flat field with no camera
+  involvement of its own.
+- **Flat-field's two-phase capture needs an explicit UI pause** between "block the beam" and "set up
+  uniform illumination", mirroring `cli/`'s `input()` prompts (§4).
+- **Conversion-gain's exposure range is user-entered, not auto-probed** — a deliberate decision (see §6),
+  not a placeholder gap; its thresholds can't be tuned without real hardware to test against.
+
+**Main live-view interface:**
+- A scatter plot: x = wavelength, y = physical position along the slit, one point per valid spectral
+  column, with error bars on both axes (`sigma_x0` always; `sigma_wavelength_nm` only once real wavelength
+  calibration exists — a pixel-column index has no meaningful "uncertainty" of its own, so an x-error-bar
+  isn't a well-defined thing to draw against the interim pixel-column axis below).
+- **x-axis fallback until spectral calibration exists: pixel column, clearly labeled as such, not
+  wavelength.** Chosen specifically so the graph is buildable and testable now, with a small, contained
+  change later (supplying a real `WavelengthAxis`) rather than a rebuild once the lamp is chosen.
+- The fitted curve (linear/quadratic/cubic, user-selectable) drawn over the scatter — exact, no
+  approximation needed, since the fit already operates directly in whatever the x-axis's units are.
+- **Raw image displayed underneath as a heatmap, sharing the same axis** — deliberately NOT resampled/
+  warped to true wavelength spacing (real per-pixel interpolation, every frame, at the target refresh
+  rate, for a live-monitoring tool that doesn't need publication-grade precision). Instead: `pyqtgraph`'s
+  `ImageItem.setRect()` stretches the image's displayed extent linearly between `wavelength_nm(first
+  column)` and `wavelength_nm(last column)` — a one-time-per-frame axis transform, not a per-pixel one.
+  This means the heatmap is only an approximation of true column-to-wavelength positioning whenever the
+  real dispersion relationship is non-linear; the scatter points and fit curve above it remain exact
+  regardless. Severity of the approximation is unknown until real spectral calibration data exists to
+  check against; true per-column resampling is a documented, deferred upgrade path if it turns out to
+  matter.
+- **Target refresh rate: 5Hz, or the fastest achievable if not.** Computationally very achievable —
+  `analyze_shot()` profiles at ~11.7ms/call (~85fps ceiling, §2), and the camera itself tops out around
+  51fps — so the plotting library's redraw overhead, not the science pipeline, is the actual constraint.
+  This is the deciding factor behind the framework choice below.
+- **Skip-frame handling**: a live frame without enough valid columns to fit the selected degree
+  (`InsufficientDataError`) is skipped, not shown as an error. After ~10 consecutive skips (an unverified
+  starting constant, same treatment as `SNR_THRESHOLD`/`SIGMA_THRESHOLD` elsewhere — see §6), the display
+  switches to an explicit "insufficient signal" state rather than silently freezing on the last good
+  frame.
+- **Side info panel**: reduced χ² and per-coefficient values + uncertainties are already fully available
+  at any degree today (`SpatialDispersionFitResult.coefficients`/`coefficient_sigma`/
+  `reduced_chi_squared`, §2) — no new `analysis/` work needed for these. For degree 1, ζ is a single
+  number with a direct uncertainty (`coefficients[1]`/`coefficient_sigma[1]`). For degree > 1, the panel
+  shows ζ evaluated at the central wavelength of the currently-valid columns — but see the uncertainty gap
+  below.
+- **A rolling strip chart** (ζ vs. time, last N seconds) alongside the current-frame numbers — added
+  because a single number overwritten 5 times a second doesn't show the trend the live view's whole
+  stated purpose depends on (watching how upstream laser adjustments affect dispersion in real time).
+
+**The degree > 1 uncertainty gap** (real, currently-missing statistics, not a UI question). ζ(λ) is an
+exactly linear function of the fit coefficients, so a *proper* uncertainty on it needs the coefficients'
+full covariance matrix, not just their marginal `coefficient_sigma` (the diagonal). `scipy.odr`'s result
+already exposes this (`cov_beta`, combined with `res_var` = `reduced_chi_squared`) but
+`TotalLeastSquaresFit` currently discards it. The real fix belongs in `analysis/dispersion_fitting.py` +
+`analysis/results.py` (`SpatialDispersionFitResult` gaining a stored covariance matrix and a
+`sigma_zeta(wavelength_nm)` method) — NOT `calibration/shared/`'s structurally-separate copy of the same
+machinery (§3), since the GUI's live/extended-measurement path runs through `analyze_shot()` →
+`analysis/`, not calibration's. Scoped as its own follow-on task (see §6), not required before the GUI's
+first version.
+
+**Interim decision for degree > 1, until that's built**: report only the *external* (empirical,
+cross-shot-scatter) uncertainty for extended measurements at degree > 1, with an explicit caveat note
+displayed next to it in the GUI stating it only accounts for external uncertainty — rather than
+fabricating an internal number that isn't statistically sound yet.
+
+**Extended measurement:**
+- User picks a number of frames, optionally overriding exposure/other camera parameters — which forces
+  the same stop/reconfigure/restart cycle as conversion-gain calibration (§6), visibly freezing live view
+  for the duration; an accepted, expected interruption, not a bug.
+- Degree selection (linear/quadratic/cubic) applies here too, which runs into an existing, deliberate
+  design boundary: `analysis/combination.py`'s `combine_shots()` only combines the linear ζ across shots
+  by design (§2 already documents this — quadratic/cubic fits were explicitly kept per-shot-only, not
+  aggregated, when `analysis/` was designed). For degree 1, `combine_shots()` covers this exactly as
+  built. For the central-value combination at degree > 1: evaluating each shot's own
+  `zeta(wavelength_ref)` first (a well-defined scalar regardless of degree, using each shot's already-
+  computed fit) and then combining *those scalars* the same way `combine_shots()` already combines linear
+  ζ is mathematically sound for the point estimate — averaging coefficients first and evaluating
+  afterward gives an identical answer by linearity, as long as it's inverse-variance-weighted, not naive.
+  The internal-uncertainty half of that combination hits the same covariance gap described above.
+- **Static graph**: NOT a re-fit of per-column-averaged centroid positions — that's exactly the
+  alternative combination methodology considered and rejected when `analysis/`'s N-shot combination was
+  originally designed (§2: "not per-column combination... reusing existing single-shot code"), and would
+  risk the drawn line's slope visually disagreeing with the reported ζ_combined number sitting right next
+  to it. Instead: plot the full scatter (or column averages as a lighter reference layer) and draw the
+  line from the actually-reported combined result (slope = ζ_combined, anchored through the data), so the
+  picture and the number can never visually contradict each other.
+
+**Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
+genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw
+overhead becomes the practical bottleneck and Tkinter has no comparable live-plotting story.
+
+---
+
+## 6. To-do list
 
 - ~~**Split `sensor_calibration` out of `preprocessing/`.**~~ **Done.**
   `build_baseline`, `build_flat_field`, `build_bad_pixel_map`, plus
@@ -478,10 +619,43 @@ tested against synthetic already-matched (pixel, wavelength_nm) data:
 - **Preprocessing: spatial ROI cropping.** Currently a simple min/max row
   mask; may need more sophisticated cropping logic in the future. Low
   priority, no current evidence it's needed.
-- **Preprocessing: minimum-signal / spectral-axis-cropping threshold.** No
-  mechanism yet to filter spectral columns with negligible signal near the
-  beam's edges before they reach `analysis/` (a near-zero-intensity column
-  breaks the centroid's weighted-moment division and would bias the linear
-  ζ fit if left in uncaught). Deferred back to `preprocessing/`.
+- ~~**Preprocessing: minimum-signal / spectral-axis-cropping threshold.**~~
+  **Done.** New `preprocessing/steps/signal_threshold.py`: `apply_signal_threshold()`
+  flags a spectral column as valid only if its total spatial-axis intensity clears
+  `SNR_THRESHOLD = 2.0` (an unverified starting point, per the codebase's usual
+  treatment of such thresholds) against the noise floor `sqrt(n_spatial_pixels) *
+  background_sigma` — i.e. roughly "2x the noise floor counts as part of the beam,"
+  the physical criterion this was designed around. Validity is carried as a new
+  `ProcessedFrame.valid_columns: np.ndarray | None = None` field (`None` = every
+  column valid, keeping every pre-existing `preprocessing/steps/*.py` function's
+  `ProcessedFrame(...)` construction unchanged) and consumed by
+  `analysis/centroiding.py`'s `extract_centroids()`, which now skips invalid columns
+  entirely (not even calling `estimator.estimate()` on them) rather than guarding
+  against the near-zero-`total_intensity` division centroiding.py's own docstring
+  flags as deliberately left to preprocessing/ — `CentroidResult`'s `columns`/`x0`/
+  `sigma_x0` arrays shrink to the valid subset rather than carrying NaN placeholders,
+  since nothing downstream (`TotalLeastSquaresFit` in particular) guards against NaN.
+  `CalibrationSet` gained a required `background_sigma: float` field (no default) to
+  drive this, mandatory in `run_preprocessing()`'s correction order (not optional
+  like ROI) — inserted after bad-pixel masking but *before* ROI masking specifically,
+  since ROI zeroing rows first would make the noise-floor calculation's
+  `n_spatial_pixels` an overestimate of how many real noisy pixels remain in a
+  column, silently biasing the SNR calculation. `run_preprocessing()` stashes
+  `valid_columns` before calling `apply_roi()` (unmodified) and reattaches it
+  afterward, rather than modifying `roi.py` itself — a spatial (row) mask can't
+  invalidate a spectral (column) classification, so this is safe. Full suite at 159
+  passed, 17 skipped after this change. Built in a dispatched pass, reviewed and
+  independently re-verified (diffs read in full, suite re-run) rather than trusting
+  the initial report.
+- **Build the GUI** per the design recorded in §5. Nothing started in code yet.
+- **`analysis/`: proper internal uncertainty on ζ for degree > 1.** Currently only
+  `coefficient_sigma` (marginal, per-coefficient) is stored; a statistically sound
+  uncertainty on `zeta(wavelength_nm)` needs the fit's full coefficient covariance
+  matrix (`scipy.odr`'s `cov_beta` × `res_var`, not currently kept) propagated through
+  ζ's derivative formula. Surfaced while designing the GUI's live/extended-measurement
+  degree > 1 display (§5); belongs in `analysis/dispersion_fitting.py` +
+  `analysis/results.py`, not `calibration/shared/`'s separate copy of the same fitting
+  machinery. Not required before a first GUI version — external (empirical)
+  uncertainty alone is the agreed interim for degree > 1 until this is built.
 - **Monte Carlo / bootstrap uncertainty validation** for `analysis/`
   (optional, time permitting) — see centroid uncertainty note in §2.
