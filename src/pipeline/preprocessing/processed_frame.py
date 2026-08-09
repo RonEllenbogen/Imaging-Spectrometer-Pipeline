@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pipeline.acquisition import CANONICAL_SHAPE
+from pipeline.acquisition import CANONICAL_SHAPE, SPECTRAL_AXIS
 
 # Constants
 
@@ -42,6 +42,15 @@ class ProcessedFrame:
         Preserved from the originating FrameData.
     gain_db
         Preserved from the originating FrameData.
+    valid_columns
+        Boolean array, shape (image.shape[SPECTRAL_AXIS],), True where a
+        spectral column carries signal statistically distinguishable from
+        background noise -- populated by
+        preprocessing.steps.signal_threshold.apply_signal_threshold().
+        None means "every column valid": the default for every correction
+        step that runs before signal-threshold masking (and for any
+        ProcessedFrame built outside the full pipeline), so existing
+        construction sites don't need to change.
     '''
 
     image: np.ndarray
@@ -49,6 +58,7 @@ class ProcessedFrame:
     timestamp: float
     exposure_us: float
     gain_db: float
+    valid_columns: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.image.shape != CANONICAL_SHAPE:
@@ -68,6 +78,18 @@ class ProcessedFrame:
         # Same immutability guarantee as FrameData -- frozen=True alone
         # doesn't stop in-place mutation of the array's contents.
         self.image.flags.writeable = False
+        if self.valid_columns is not None:
+            expected_shape = (self.image.shape[SPECTRAL_AXIS],)
+            if self.valid_columns.shape != expected_shape:
+                raise ValueError(
+                    f"ProcessedFrame.valid_columns must have shape {expected_shape}, "
+                    f"got {self.valid_columns.shape}"
+                )
+            if self.valid_columns.dtype != np.bool_:
+                raise ValueError(
+                    f"ProcessedFrame.valid_columns must be dtype bool, got {self.valid_columns.dtype}"
+                )
+            self.valid_columns.flags.writeable = False
 
     @property
     def age_seconds(self) -> float:

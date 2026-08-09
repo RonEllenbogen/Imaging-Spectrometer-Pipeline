@@ -31,7 +31,10 @@ from pipeline.preprocessing import (
     PreprocessingError, SettingsMismatchError, SaturationError, NoSignalError,
 )
 from pipeline.preprocessing.validation import check_frame_sanity
-from pipeline.preprocessing.steps import apply_roi, apply_baseline, apply_flat_field, MIN_FLAT_FIELD_VALUE, apply_bad_pixel_map
+from pipeline.preprocessing.steps import (
+    apply_roi, apply_baseline, apply_flat_field, MIN_FLAT_FIELD_VALUE,
+    apply_bad_pixel_map, apply_signal_threshold,
+)
 from pipeline.calibration.sensor import (
     build_baseline, build_flat_field, build_bad_pixel_map, CalibrationRecord,
 )
@@ -80,11 +83,18 @@ def _record(exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
     )
 
 
-def _make_clean_calibration_set(baseline_value=10.0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB) -> CalibrationSet:
+def _make_clean_calibration_set(baseline_value=10.0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+                                 background_sigma=1.0) -> CalibrationSet:
     '''
     A calibration set with a uniform baseline, a flat (no correction
     needed) flat field, and an empty bad-pixel mask -- for pipeline tests
     that aren't specifically exercising calibration-artifact behavior.
+
+    background_sigma defaults to a small value (1.0) so that every
+    column of the uniform test signals used across this file's
+    pipeline-wiring tests (well above 1200 * background_sigma once
+    summed over the spatial axis) clears SNR_THRESHOLD and isn't
+    unexpectedly excluded by apply_signal_threshold().
     '''
     baseline = np.full(CANONICAL_SHAPE, baseline_value, dtype=np.float64)
     baseline_record = _record(exposure_us=exposure_us, gain_db=gain_db)
@@ -94,7 +104,7 @@ def _make_clean_calibration_set(baseline_value=10.0, exposure_us=FIXTURE_EXPOSUR
     return CalibrationSet(
         baseline=baseline, baseline_record=baseline_record,
         flat_field=flat_field, flat_field_record=flat_field_record,
-        bad_pixel_mask=bad_pixel_mask,
+        bad_pixel_mask=bad_pixel_mask, background_sigma=background_sigma,
     )
 
 # Classes
@@ -262,6 +272,54 @@ class TestApplyBadPixelMap:
 
 
 # ---------------------------------------------------------------------------
+# steps/signal_threshold.py
+# ---------------------------------------------------------------------------
+
+class TestApplySignalThreshold:
+
+    def test_column_above_threshold_is_valid(self):
+        image = np.zeros(CANONICAL_SHAPE)
+        image[:, 100] = 50.0   # total_intensity = 50 * n_rows, well above the noise floor
+        frame = _processed(image)
+
+        result = apply_signal_threshold(frame, background_sigma=1.0)
+
+        assert result.valid_columns[100] == True   # noqa: E712
+
+    def test_column_below_threshold_is_excluded(self):
+        image = np.zeros(CANONICAL_SHAPE)
+        image[:, 100] = 50.0   # a strong column, so the frame overall isn't all-zero
+        # column 200 is left all-zero -- total_intensity = 0, clearly below any
+        # positive noise floor.
+        frame = _processed(image)
+
+        result = apply_signal_threshold(frame, background_sigma=1.0)
+
+        assert result.valid_columns[200] == False   # noqa: E712
+
+    def test_does_not_modify_image(self):
+        image = np.full(CANONICAL_SHAPE, 7.0)
+        frame = _processed(image)
+
+        result = apply_signal_threshold(frame, background_sigma=1.0)
+
+        assert np.array_equal(result.image, image)
+
+    def test_valid_columns_shape_and_dtype(self):
+        frame = _processed(np.full(CANONICAL_SHAPE, 7.0))
+        result = apply_signal_threshold(frame, background_sigma=1.0)
+
+        assert result.valid_columns.shape == (CANONICAL_SHAPE[1],)
+        assert result.valid_columns.dtype == bool
+
+    @pytest.mark.parametrize("background_sigma", [0.0, -1.0])
+    def test_non_positive_background_sigma_raises(self, background_sigma):
+        frame = _processed(np.full(CANONICAL_SHAPE, 7.0))
+        with pytest.raises(ValueError):
+            apply_signal_threshold(frame, background_sigma=background_sigma)
+
+
+# ---------------------------------------------------------------------------
 # preprocessing_pipeline.py -- end-to-end wiring
 # ---------------------------------------------------------------------------
 
@@ -288,10 +346,17 @@ class TestPreprocessingPipeline:
 
         bad_pixel_mask, _ = build_bad_pixel_map(flat_field, flat_field_record)
 
+        # Small relative to the injected 80-count band summed over the
+        # spatial axis (80 * 100 rows = 8000 total_intensity per column,
+        # vs. a noise floor of sqrt(1200) * 1.0 =~ 34.6 -- SNR ~231,
+        # far above SNR_THRESHOLD) -- every column's real signal clears
+        # the threshold cleanly, so no column is wrongly excluded.
+        background_sigma = 1.0
+
         calibration = CalibrationSet(
             baseline=baseline, baseline_record=baseline_record,
             flat_field=flat_field, flat_field_record=flat_field_record,
-            bad_pixel_mask=bad_pixel_mask,
+            bad_pixel_mask=bad_pixel_mask, background_sigma=background_sigma,
         )
 
         raw_image = np.clip(true_signal + offset, 0, CANONICAL_MAX_VALUE)
@@ -302,6 +367,10 @@ class TestPreprocessingPipeline:
         assert np.allclose(processed.image, true_signal, atol=1.0)
         assert saturation_result.is_saturated is False
         assert processed.frame_id == 7
+        # Every column carries the same 80-count band, so every column
+        # should clear SNR_THRESHOLD and none should be excluded.
+        assert processed.valid_columns is not None
+        assert np.all(processed.valid_columns)
 
     def test_no_signal_raises(self):
         calibration = _make_clean_calibration_set()

@@ -797,6 +797,7 @@ def _sensor_calibration_set() -> CalibrationSet:
         flat_field=np.ones(CANONICAL_SHAPE, dtype=np.float64),
         flat_field_record=record,
         bad_pixel_mask=np.zeros(CANONICAL_SHAPE, dtype=bool),
+        background_sigma=1.0,
     )
 
 
