@@ -205,3 +205,12 @@ pipeline validates against.
   signal at all, a settings mismatch) raise a specific exception.
 - Test files mirror `src/pipeline/<package>/` one-to-one (e.g. `tests/test_preprocessing.py`), and
   default to synthetic data/backends so the suite runs with no hardware attached.
+- No mention of Claude, AI, agents/agentic, Anthropic, Copilot, or similar AI-tooling keywords anywhere
+  in this repository except `CLAUDE.md` and `docs/project_handover.md` — not in source files,
+  docstrings, comments, other docs, config, or anything else that could reach GitHub. Those two files
+  are deleted once the project is complete, so whatever's written everywhere else is what an outside
+  user browsing the public repo will actually see; the goal is that nothing on GitHub gives any
+  indication AI was used in developing this codebase. This applies just as strictly to anything that
+  makes it to GitHub without living in the repo itself — commit messages, PR descriptions, issue text,
+  code review comments. In particular, never add a `Co-Authored-By: Claude` (or similar) trailer to a
+  commit, and don't reference AI assistance in commit bodies.
