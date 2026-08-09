@@ -2,7 +2,8 @@
 Single public entry point for preprocessing. Enforces the correction
 order as a property of the code, not documentation the caller has to
 remember: frame validation -> saturation check -> baseline subtraction ->
-flat-field division -> bad-pixel masking -> optional ROI masking.
+flat-field division -> bad-pixel masking -> signal-threshold masking ->
+optional ROI masking.
 
 Building calibration artifacts (baseline, flat field, bad-pixel map) is
 NOT this function's job -- that happens once, infrequently, via each
@@ -20,7 +21,7 @@ from pipeline.calibration.shared import CalibrationRecord
 
 from .processed_frame import ProcessedFrame
 from .validation import check_frame_sanity
-from .steps import apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map
+from .steps import apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map, apply_signal_threshold
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,10 @@ class CalibrationSet:
     mask itself, so there's no consumer for it here. baseline_record and
     flat_field_record ARE both consumed (settings-check and
     logging/provenance respectively), so both stay.
+
+    background_sigma is required (no default): every call to
+    run_preprocessing() now runs signal-threshold masking, which cannot
+    compute a noise floor without it -- see steps/signal_threshold.py.
     '''
 
     baseline: np.ndarray
@@ -42,6 +47,7 @@ class CalibrationSet:
     flat_field: np.ndarray
     flat_field_record: CalibrationRecord
     bad_pixel_mask: np.ndarray
+    background_sigma: float
 
 
 def run_preprocessing(
@@ -61,7 +67,8 @@ def run_preprocessing(
         directly, since near-zero signal is expected and correct there,
         not something check_frame_sanity() should reject.
     calibration
-        The pre-built baseline, flat field, and bad-pixel map to apply.
+        The pre-built baseline, flat field, bad-pixel map, and
+        background_sigma to apply.
     roi_bounds
         (row_min, row_max) to mask outside of, or None to skip ROI
         entirely. Still pending an empirical check (a real background
@@ -95,10 +102,21 @@ def run_preprocessing(
     processed = apply_baseline(frame, calibration.baseline, calibration.baseline_record)
     processed = apply_flat_field(processed, calibration.flat_field, calibration.flat_field_record)
     processed = apply_bad_pixel_map(processed, calibration.bad_pixel_mask)
+    processed = apply_signal_threshold(processed, calibration.background_sigma)
+    valid_columns = processed.valid_columns
 
     if roi_bounds is not None:
         row_min, row_max = roi_bounds
         processed = apply_roi(processed, row_min, row_max)
+        # apply_roi() (unchanged -- see steps/roi.py) rebuilds ProcessedFrame
+        # without carrying valid_columns forward, so it's reattached here
+        # rather than lost; ROI only zeroes spatial rows and doesn't change
+        # which spectral columns are signal-bearing.
+        processed = ProcessedFrame(
+            image=processed.image, frame_id=processed.frame_id, timestamp=processed.timestamp,
+            exposure_us=processed.exposure_us, gain_db=processed.gain_db,
+            valid_columns=valid_columns,
+        )
 
     return processed, saturation_result
 

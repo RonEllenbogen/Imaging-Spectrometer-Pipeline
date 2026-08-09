@@ -190,6 +190,38 @@ class TestExtractCentroids:
         with pytest.raises(ValueError):
             result.x0[0] = 0.0
 
+    def test_valid_columns_none_is_unchanged_behavior(self):
+        # Regression test: a frame with valid_columns=None (its default)
+        # must behave exactly as before this gate was added -- every
+        # column processed, none skipped.
+        frame = _synthetic_frame(centroid0_px=600.0, slope_px_per_col=0.0)
+        assert frame.valid_columns is None
+
+        result = extract_centroids(frame, IntensityWeightedMoment(), _noise_model())
+
+        assert result.columns.shape == (CANONICAL_SHAPE[1],)
+        assert np.array_equal(result.columns, np.arange(CANONICAL_SHAPE[1]))
+        assert np.allclose(result.x0, 600.0, atol=0.05)
+
+    def test_valid_columns_mask_shrinks_result_to_valid_subset(self):
+        frame = _synthetic_frame(centroid0_px=600.0, slope_px_per_col=0.0)
+
+        n_columns = CANONICAL_SHAPE[1]
+        valid_columns = np.zeros(n_columns, dtype=bool)
+        valid_columns[100:200] = True   # only columns [100, 200) are valid
+        masked_frame = ProcessedFrame(
+            image=frame.image, frame_id=frame.frame_id, timestamp=frame.timestamp,
+            exposure_us=frame.exposure_us, gain_db=frame.gain_db, valid_columns=valid_columns,
+        )
+
+        result = extract_centroids(masked_frame, IntensityWeightedMoment(), _noise_model())
+
+        assert result.columns.shape == (100,)
+        assert np.array_equal(result.columns, np.arange(100, 200))
+        assert result.x0.shape == (100,)
+        assert result.sigma_x0.shape == (100,)
+        assert np.allclose(result.x0, 600.0, atol=0.05)
+
 
 # ---------------------------------------------------------------------------
 # results.py

@@ -177,8 +177,21 @@ def extract_centroids(
 ) -> CentroidResult:
 
     '''
-    Applies estimator to every spectral column of frame, one pixel column
-    per bin (docs/project_state.md #5/#6), over the full spatial axis.
+    Applies estimator to every valid spectral column of frame, one pixel
+    column per bin (docs/project_state.md #5/#6), over the full spatial
+    axis.
+
+    frame.valid_columns (see preprocessing.ProcessedFrame and
+    preprocessing.steps.signal_threshold.apply_signal_threshold()) gates
+    which columns are actually run through estimator: a column whose
+    total intensity is statistically indistinguishable from background
+    noise is exactly the near-zero-total_intensity case this module's
+    docstring says it does NOT guard against, so such columns are
+    skipped here rather than fed to estimator.estimate() at all.
+    frame.valid_columns is None (every column valid) for any frame built
+    before signal-threshold masking existed, or constructed by hand --
+    behavior is then identical to running over every column, unchanged
+    from before this gate was added.
 
     Two things are hoisted out of the per-column loop rather than
     recomputed on every iteration (profiled as measurable overhead at
@@ -207,22 +220,27 @@ def extract_centroids(
     Returns
     -------
     CentroidResult
-        Arrays of length frame.image.shape[SPECTRAL_AXIS] (the number of
-        spectral columns), one entry per column.
+        columns/x0/sigma_x0 cover only the valid columns (all of them,
+        in ascending order, if frame.valid_columns is None) -- shrunk to
+        the valid subset rather than the full
+        frame.image.shape[SPECTRAL_AXIS], with excluded columns simply
+        absent rather than present as NaN placeholders.
     '''
 
     n_columns = frame.image.shape[SPECTRAL_AXIS]
     positions = np.arange(frame.image.shape[SPATIAL_AXIS], dtype=np.float64)
     image_by_column = np.ascontiguousarray(np.moveaxis(frame.image, SPECTRAL_AXIS, 0))
 
-    x0 = np.empty(n_columns, dtype=np.float64)
-    sigma_x0 = np.empty(n_columns, dtype=np.float64)
+    columns = np.arange(n_columns) if frame.valid_columns is None else np.flatnonzero(frame.valid_columns)
 
-    for column in range(n_columns):
+    x0 = np.empty(columns.shape[0], dtype=np.float64)
+    sigma_x0 = np.empty(columns.shape[0], dtype=np.float64)
+
+    for i, column in enumerate(columns):
         column_intensities = image_by_column[column]
-        x0[column], sigma_x0[column] = estimator.estimate(column_intensities, positions, noise_model)
+        x0[i], sigma_x0[i] = estimator.estimate(column_intensities, positions, noise_model)
 
-    return CentroidResult(columns=np.arange(n_columns), x0=x0, sigma_x0=sigma_x0)
+    return CentroidResult(columns=columns, x0=x0, sigma_x0=sigma_x0)
 
 
 __all__ = ["CentroidEstimator", "IntensityWeightedMoment", "extract_centroids", "PIXEL_SIZE"]
