@@ -2,14 +2,23 @@
 Sensor noise parameters needed by the Thompson-Larson-Webb centroid
 uncertainty formula (see centroiding.py). Both fields are currently
 unverified placeholders -- see docs/project_state.md's to-do list --
-pending two real calibration measurements that don't exist yet:
+pending two real calibration measurements:
 
   - gain_e_per_adu: a photon transfer curve (pixel variance vs. mean
     across a range of illumination levels), needed to put TLW's total
-    signal term in true photon-equivalent units rather than raw ADU.
-  - background_sigma: the per-pixel background noise standard deviation,
-    likely obtainable by extending build_baseline() (or a sibling
-    function) to record variance, not just mean, across baseline frames.
+    signal term in true photon-equivalent units rather than raw ADU. Now
+    measured for real by calibration/sensor/conversion_gain.py's
+    build_conversion_gain() (ConversionGainResult.gain_e_per_adu) and
+    persisted via save_conversion_gain()/load_conversion_gain() -- nothing
+    yet constructs a SensorNoiseModel from a loaded result, same as
+    background_sigma below.
+  - background_sigma: the per-pixel background noise standard deviation.
+    Now measured for real by calibration/sensor/baseline.py's
+    build_baseline() (BaselineResult.background_sigma, the median
+    per-pixel sample standard deviation across the source frames) and
+    persisted alongside the baseline itself -- nothing yet constructs a
+    SensorNoiseModel from a loaded baseline, since that's the future
+    orchestration/GUI layer's job, not this module's.
 
 Bundled into one object, rather than two bare module constants, so the
 whole noise model can be swapped out (e.g. loaded from a future
@@ -27,10 +36,17 @@ from dataclasses import dataclass
 # downstream in the spatial-dispersion fit even though it doesn't get the
 # absolute uncertainty scale right -- good enough to build and test the
 # rest of the module against, wrong to trust for a final reported sigma.
+# A real measurement now exists (calibration/sensor/conversion_gain.py's
+# ConversionGainResult.gain_e_per_adu) -- this constant remains
+# analyze_shot()'s default only for callers that don't supply a real
+# SensorNoiseModel.
 PLACEHOLDER_GAIN_E_PER_ADU = 1.0
 
 # Placeholder background noise -- assumes preprocessing's baseline
 # subtraction has already suppressed background to negligible levels.
+# A real measurement now exists (calibration/sensor/baseline.py's
+# BaselineResult.background_sigma) -- this constant remains analyze_shot()'s
+# default only for callers that don't supply a real SensorNoiseModel.
 PLACEHOLDER_BACKGROUND_SIGMA = 0.0
 
 # Classes

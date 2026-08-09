@@ -16,9 +16,10 @@ present results live through a GUI.
 
 Build order (see `docs/notes.md` for the full roadmap): acquisition → preprocessing → analysis →
 validation → headless CLI integration → GUI → full integration. `acquisition/`, `preprocessing/`,
-`calibration/sensor/`, and `analysis/` are built and tested (synthetic data only, beyond
-`acquisition/`); `calibration/spectral/`, `calibration/spatial/`, `gui/app.py`, and `main.py` are
-still empty stubs or not yet started.
+`calibration/sensor/`, `calibration/shared/`, `calibration/spatial/`, and `analysis/` are built and
+tested (synthetic data only, beyond `acquisition/`). `calibration/spectral/` is built except for
+`line_matching.py`, which is blocked on reference-lamp selection (see its own module docstring).
+`gui/app.py` and `main.py` are still empty stubs or not yet started.
 
 ## Commands
 
@@ -86,31 +87,77 @@ enforced in practice by `calibration/sensor/saturation.py` depending only on `pi
 never on `preprocessing/`, even though both `calibration/sensor/flat_field.py` and
 `preprocessing/`'s per-frame pipeline need a saturation check.
 
-- `shared/io.py` — `save_artifact()`/`load_artifact()`: generic one-array-plus-one-record persistence
-  to a single `.npz` file, `np.savez` only (never pickle, so loading an artifact never executes
-  arbitrary code). Every subpackage's per-type `save_*()`/`load_*()` are thin wrappers around this.
+- `shared/io.py` — `save_artifact()`/`load_artifact()`: generic persistence of one or more named
+  arrays plus one record to a single `.npz` file, `np.savez` only (never pickle, so loading an artifact
+  never executes arbitrary code). Every subpackage's per-type `save_*()`/`load_*()` are thin wrappers
+  around this. `shared/metadata.py`'s `CalibrationRecord` tags a frame-built artifact with the
+  exposure/gain/timestamp/frame-count it was built under (`check_settings_match()` enforces a science
+  frame's actual settings match one, within tolerance, before it's applied) — lives in `shared/`, not
+  `sensor/`, since both `sensor/` and `spectral/` artifacts are frame-built and need it; `spatial/`'s
+  scale factor is not frame-built and uses its own lighter `ScaleFactorRecord` instead (see below).
+  `shared/fitting.py`'s `PolynomialFitter` protocol (default `TotalLeastSquaresFit`, via `scipy.odr`)
+  and `shared/result.py`'s `PolynomialFitResult` generalize `analysis/dispersion_fitting.py`'s
+  total-least-squares machinery to generic x/y, for `spectral/calibrate.py` to reuse — kept as a
+  structurally separate implementation rather than importing `analysis/`'s, since `calibration/` and
+  `analysis/` must not depend on each other in either direction (see `analysis/interfaces.py`).
 - `sensor/` — each artifact type owns its own `build_*()`/`save_*()`/`load_*()`: `baseline.py`
-  (per-session background average), `flat_field.py` (PRNU correction from uniform-illumination frames,
+  (per-session background average, returned as a `BaselineResult` bundling the averaged `baseline`
+  with `background_sigma` — the median per-pixel sample standard deviation across the source frames,
+  "b" in `analysis/noise_model.py`'s Thompson-Larson-Webb formula, measured for free from the same
+  stacked frames the mean is built from; requires at least 2 frames, since a sample standard deviation
+  is undefined at n=1), `flat_field.py` (PRNU correction from uniform-illumination frames,
   dark-subtracted first so DSNU isn't baked in; rejects a saturated source outright via
   `saturation.py`), `bad_pixel_map.py` (dead/hot pixels flagged from flat-field outliers beyond
-  `SIGMA_THRESHOLD`). `metadata.py`'s `CalibrationRecord` tags every artifact with the exposure/gain
-  it was built under; `check_settings_match()` enforces that a science frame's actual settings match
-  (relative tolerance for exposure, absolute for gain) before an artifact is applied. `saturation.py`'s
-  `check_saturation()` checks the *raw* frame against `CANONICAL_MAX_VALUE` before flat-field division
-  changes the numeric domain, and returns a result rather than raising (the caller decides whether to
-  discard/log/escalate). `workflow.py` is the "press start" layer gluing `acquisition/`'s
-  `CameraStream.collect_n_frames()` to `build_*()`/`save_*()`: `run_baseline_calibration()` does
-  acquire→build→save in one call (baseline is single-phase); flat-field calibration needs its physical
-  setup changed mid-capture (dark, then uniformly illuminated), so it's split across
+  `SIGMA_THRESHOLD`), `conversion_gain.py` (`gain_e_per_adu`, the other `SensorNoiseModel` quantity —
+  a photon transfer curve: uniform illumination at *fixed brightness*, swept across *exposure times*;
+  variance at each level is computed temporally, across repeat frames, not spatially across pixels in
+  one frame, so PRNU doesn't bias the gain low; `1/slope` of a `shared/fitting.py` linear fit of
+  variance against mean, wrapped in `ConversionGainResult` alongside the full fit for diagnostics).
+  `saturation.py`'s `check_saturation()` checks the *raw* frame against `CANONICAL_MAX_VALUE` before
+  flat-field division changes the numeric domain, and returns a result rather than raising (the caller
+  decides whether to discard/log/escalate). `workflow.py` is the "press start" layer gluing
+  `acquisition/`'s `CameraStream.collect_n_frames()` to `build_*()`/`save_*()`: `run_baseline_calibration()`
+  does acquire→build→save in one call (baseline is single-phase); flat-field calibration needs its
+  physical setup changed mid-capture (dark, then uniformly illuminated), so it's split across
   `capture_dark_frames()`/`capture_illuminated_frames()`/`finish_flat_field_calibration()` instead of
   one blocking call — the caller (eventually `gui/`) sequences them at its own pace.
-- `spectral/`, `spatial/` — designed, not yet built (pixel→wavelength and pixel→physical-position
-  calibration respectively; see `docs/project_handover.md` §5).
+  `run_conversion_gain_calibration()` is the one exception to "never touches the stream's settings":
+  since `CameraStream` can't change `exposure_us` while running, it repeatedly stops/reconfigures/
+  restarts `camera_stream` itself while sweeping exposure (interrupting live view for the sweep's
+  duration), restoring the original `exposure_us` afterward. The exposure range is caller-supplied
+  (`exposure_min_us`/`exposure_max_us`/`n_levels`, linearly spaced), not auto-probed — deliberately, per
+  `docs/project_state.md`.
+- `spatial/` — pixel→physical-position conversion at the spectrometer's slit is a *fixed scale factor*
+  (the ratio of the imaging spectrometer's two relay-lens focal lengths, `DEFAULT_SCALE_FACTOR = 1.5`
+  in `calibrate.py`), not a per-point fit — no translation-stage measurement session exists in this
+  codebase; the project's scope only needs displacement along the detector's spatial axis, and the
+  focal-length ratio is precise enough on its own (misalignment shows up as blur/aberration, not a
+  quantifiable scale-factor uncertainty). `ScaleFactorPositionCalibration` implements
+  `analysis.interfaces.PositionCalibration` directly. `io.py`'s `load_scale_factor()` differs from
+  every other `load_*()` in this package: a missing file returns `DEFAULT_SCALE_FACTOR` rather than
+  raising `FileNotFoundError`, since (unlike a baseline or flat field) the scale factor always has a
+  physically valid default. A GUI-entered manual override is persisted via `save_scale_factor()` and
+  reused in future sessions.
+- `spectral/` — pixel→wavelength calibration from a spectral-lamp image. `calibrate.py`'s
+  `calibrate_spectral()` fits matched (pixel, wavelength_nm) pairs via `shared/fitting.py`; the
+  returned `WavelengthCalibrationResult` implements `analysis.interfaces.WavelengthAxis` directly
+  (`wavelength_nm()`/`sigma_wavelength_nm()` live on the result itself, the same "result IS the
+  interface" pattern as `analysis/results.py`'s `SpatialDispersionFitResult.zeta()`) and reuses
+  `CalibrationRecord` for provenance. `sigma_wavelength_nm()` propagates `coefficient_sigma` treating
+  coefficients as uncorrelated — a documented approximation, flagged for review once real lamp data
+  exists. `line_matching.py`'s `match_lines()` — detecting line peaks and matching them to reference
+  wavelengths — is an unimplemented stub (`NotImplementedError`): it's blocked on choosing a reference
+  lamp and having its known line wavelengths, plus an approximate prior pixel→wavelength dispersion to
+  make matching tractable, neither of which exists yet. `workflow.py`'s `run_spectral_calibration()` is
+  fully wired (acquire → preprocess each frame individually via a caller-supplied `CalibrationSet` →
+  average → `match_lines()` → `calibrate_spectral()` → save) but will raise `NotImplementedError` until
+  `line_matching.py` is filled in.
 - Exceptions derive from `CalibrationError` (see `exceptions.py`): `SettingsMismatchError`,
-  `InvalidFlatFieldError`. `pipeline.preprocessing` re-exports `SettingsMismatchError` for caller
-  convenience, since `preprocessing/`'s `apply_baseline()` can raise it too — but it is a
-  `CalibrationError`, not a `PreprocessingError`; catch both explicitly if a caller needs to handle
-  anything either package can raise.
+  `InvalidFlatFieldError`, `InsufficientDataError` (mirrors `analysis/exceptions.py`'s version, kept
+  separate for the same no-cross-dependency reason as `shared/fitting.py`). `pipeline.preprocessing`
+  re-exports `SettingsMismatchError` for caller convenience, since `preprocessing/`'s `apply_baseline()`
+  can raise it too — but it is a `CalibrationError`, not a `PreprocessingError`; catch both explicitly
+  if a caller needs to handle anything either package can raise.
 
 ### Preprocessing (`src/pipeline/preprocessing/`)
 

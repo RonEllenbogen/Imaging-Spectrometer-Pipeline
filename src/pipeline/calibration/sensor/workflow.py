@@ -17,10 +17,16 @@ signal "ready for phase two". Neither is decided yet (gui/ is not
 started), so this module exposes the two acquisition phases separately
 instead -- capture_dark_frames() and capture_illuminated_frames() -- and
 leaves combining them (build_flat_field() + save_flat_field()) to
-finish_flat_field_calibration(), called once the caller has both. This
-mirrors how spatial/'s SpatialCalibrationSession is designed as a
-multi-step, caller-paced interaction rather than one blocking call, for
-the same reason (see docs/project_handover.md §5/§6).
+finish_flat_field_calibration(), called once the caller has both.
+
+Conversion-gain calibration sweeps exposure time across several levels,
+which -- unlike flat-field's physical setup change -- is entirely
+software-controlled, so it CAN be done in one blocking call despite also
+being multi-step: run_conversion_gain_calibration() repeatedly
+stops/reconfigures/restarts camera_stream itself as it steps through the
+sweep (see its own docstring for why: CameraStream has no way to change
+exposure_us while running). This interrupts live view on that stream for
+the sweep's duration, restored to its original exposure_us once it's done.
 
 build_bad_pixel_map() has no workflow function here -- it's derived
 purely from an already-built flat field, with no CameraStream involved,
@@ -33,11 +39,17 @@ Callers chain build_bad_pixel_map() + save_bad_pixel_map() directly.
 import logging
 from pathlib import Path
 
+import numpy as np
+
 from pipeline.acquisition import CameraStream, FrameData
 
+from ..shared.metadata import CalibrationRecord
 from .baseline import build_baseline, save_baseline
+from .conversion_gain import (
+    build_conversion_gain, save_conversion_gain, ConversionGainRecord,
+    MIN_ILLUMINATION_LEVELS, MIN_FRAMES_PER_LEVEL,
+)
 from .flat_field import build_flat_field, save_flat_field
-from .metadata import CalibrationRecord
 
 # Constants
 
@@ -76,15 +88,15 @@ def run_baseline_calibration(camera_stream: CameraStream, n_frames: int, path: s
     Raises
     ------
     ValueError
-        Propagated from build_baseline() (e.g. n_frames < 1).
+        Propagated from build_baseline() (e.g. n_frames < 2).
     RuntimeError, CameraError
         Propagated from CameraStream.collect_n_frames() if camera_stream
         isn't running, or dies while collecting.
     '''
 
     frames = camera_stream.collect_n_frames(n_frames)
-    baseline, record = build_baseline(frames)
-    save_baseline(path, baseline, record)
+    result, record = build_baseline(frames)
+    save_baseline(path, result, record)
     logger.info("baseline calibration complete: %d frames -> %s", n_frames, path)
     return record
 
@@ -174,7 +186,108 @@ def finish_flat_field_calibration(
     return record
 
 
+def run_conversion_gain_calibration(
+    camera_stream: CameraStream,
+    exposure_min_us: float,
+    exposure_max_us: float,
+    n_levels: int,
+    n_frames_per_level: int,
+    path: str | Path,
+) -> ConversionGainRecord:
+
+    '''
+    Sweeps camera_stream's exposure time across n_levels evenly-spaced
+    values between exposure_min_us and exposure_max_us, capturing
+    n_frames_per_level frames at each, then builds and saves a
+    conversion-gain measurement from the results -- all in one call.
+
+    Unlike every other workflow function in this module, this one DOES
+    stop()/start() camera_stream itself, repeatedly -- CameraStream has no
+    way to change exposure_us while running (see conversion_gain.py's
+    module docstring), so a stop -> mutate exposure_us -> start cycle per
+    level is the only way to sweep it. This interrupts live view (if any)
+    sharing this stream for the whole duration of the sweep -- unlike
+    baseline/flat-field calibration, which never touch the stream's
+    settings and can run alongside live view untouched.
+    camera_stream's original exposure_us is restored (and the stream
+    restarted) once the sweep finishes, successfully or not.
+
+    Parameters
+    ----------
+    camera_stream
+        An already-running CameraStream.
+    exposure_min_us, exposure_max_us
+        Bounds of the exposure sweep, in microseconds. Choosing a range
+        that spans from just above the noise floor to just below
+        saturation, at this setup's fixed illumination brightness, is the
+        caller's responsibility -- see conversion_gain.py's module
+        docstring for why this isn't determined automatically.
+    n_levels
+        Number of evenly-spaced exposure levels to sample. At least
+        MIN_ILLUMINATION_LEVELS.
+    n_frames_per_level
+        Number of frames to capture at each level. At least
+        MIN_FRAMES_PER_LEVEL.
+    path
+        Where to save the resulting conversion-gain artifact.
+
+    Returns
+    -------
+    ConversionGainRecord
+
+    Raises
+    ------
+    ValueError
+        If n_levels/n_frames_per_level are below their minimums, or
+        exposure_max_us <= exposure_min_us.
+    InvalidConversionGainError
+        Propagated from build_conversion_gain() if a level saturates or
+        the fit comes out physically invalid.
+    RuntimeError
+        If camera_stream isn't running when this is called.
+    '''
+
+    if n_levels < MIN_ILLUMINATION_LEVELS:
+        raise ValueError(f"n_levels must be at least {MIN_ILLUMINATION_LEVELS}, got {n_levels}")
+    if n_frames_per_level < MIN_FRAMES_PER_LEVEL:
+        raise ValueError(
+            f"n_frames_per_level must be at least {MIN_FRAMES_PER_LEVEL}, got {n_frames_per_level}"
+        )
+    if exposure_max_us <= exposure_min_us:
+        raise ValueError(
+            f"exposure_max_us ({exposure_max_us}) must be greater than "
+            f"exposure_min_us ({exposure_min_us})"
+        )
+    if not camera_stream.is_running:
+        raise RuntimeError("run_conversion_gain_calibration() requires an already-running CameraStream")
+
+    original_exposure_us = camera_stream.exposure_us
+    exposure_levels = np.linspace(exposure_min_us, exposure_max_us, n_levels)
+
+    frames_by_exposure: dict[float, list[FrameData]] = {}
+    try:
+        for exposure_us in exposure_levels:
+            exposure_us = float(exposure_us)
+            camera_stream.stop()
+            camera_stream.exposure_us = exposure_us
+            camera_stream.start()
+            frames_by_exposure[exposure_us] = camera_stream.collect_n_frames(n_frames_per_level)
+    finally:
+        camera_stream.stop()
+        camera_stream.exposure_us = original_exposure_us
+        camera_stream.start()
+
+    result, record = build_conversion_gain(frames_by_exposure)
+    save_conversion_gain(path, result, record)
+    logger.info(
+        "conversion gain calibration complete: %d levels x %d frames -> %s (gain=%.4f e-/ADU)",
+        n_levels, n_frames_per_level, path, result.gain_e_per_adu,
+    )
+    return record
+
+
 __all__ = [
     "run_baseline_calibration",
     "capture_dark_frames", "capture_illuminated_frames", "finish_flat_field_calibration",
+    "run_conversion_gain_calibration",
 ]

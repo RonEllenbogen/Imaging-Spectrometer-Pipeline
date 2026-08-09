@@ -15,7 +15,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from pipeline.acquisition import FrameData
-from pipeline.calibration.sensor import check_saturation, SaturationCheckResult, CalibrationRecord
+from pipeline.calibration.sensor import check_saturation, SaturationCheckResult
+from pipeline.calibration.shared import CalibrationRecord
 
 from .processed_frame import ProcessedFrame
 from .validation import check_frame_sanity

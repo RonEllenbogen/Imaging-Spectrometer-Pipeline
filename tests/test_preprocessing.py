@@ -279,7 +279,8 @@ class TestPreprocessingPipeline:
         offset = 20.0
 
         background_frames = [_frame(_uniform(offset)) for _ in range(5)]
-        baseline, baseline_record = build_baseline(background_frames)
+        baseline_result, baseline_record = build_baseline(background_frames)
+        baseline = baseline_result.baseline
 
         illuminated_frames = [_frame(_uniform(150)) for _ in range(5)]
         dark_frames = [_frame(_uniform(offset)) for _ in range(5)]

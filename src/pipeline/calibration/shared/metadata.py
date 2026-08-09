@@ -1,11 +1,17 @@
 """
 Shared calibration metadata. CalibrationRecord tags a calibration
-artifact (baseline, flat field, bad-pixel map) with the settings it was
-captured under, so a science frame's actual settings can be checked
-against it before the artifact is applied. Building the artifacts
-themselves is each artifact type's own responsibility (baseline.py,
-flat_field.py, bad_pixel_map.py) -- this module only provides the shared
-record shape and the comparison logic every one of them needs.
+artifact with the settings it was captured under, so a science frame's
+actual settings can be checked against it before the artifact is applied.
+Lives in shared/ (not sensor/) since more than one calibration subpackage
+now consumes it: calibration/sensor/'s baseline/flat-field/bad-pixel-map
+artifacts, and calibration/spectral/'s wavelength calibration (built from
+lamp frames, which carry exposure/gain/timing exactly like any other
+frame-based artifact) -- calibration/spatial/ does NOT use this, since
+its scale factor isn't built from a captured frame at any particular
+setting (see calibration/spatial/io.py's own ScaleFactorRecord instead).
+Building the artifacts themselves is each artifact type's own
+responsibility -- this module only provides the shared record shape and
+the comparison logic every one of them needs.
 """
 
 # Imports

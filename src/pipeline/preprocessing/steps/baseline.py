@@ -12,7 +12,7 @@ module's.
 import numpy as np
 
 from pipeline.acquisition import FrameData
-from pipeline.calibration.sensor import CalibrationRecord, check_settings_match
+from pipeline.calibration.shared import CalibrationRecord, check_settings_match
 
 from ..processed_frame import ProcessedFrame
 

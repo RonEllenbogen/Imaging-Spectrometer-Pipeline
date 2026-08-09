@@ -10,7 +10,7 @@ job, not this module's.
 
 import numpy as np
 
-from pipeline.calibration.sensor import CalibrationRecord
+from pipeline.calibration.shared import CalibrationRecord
 
 from ..processed_frame import ProcessedFrame
 

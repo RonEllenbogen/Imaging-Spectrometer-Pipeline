@@ -23,9 +23,9 @@ import numpy as np
 from pipeline.acquisition import FrameData
 from ..exceptions import InvalidFlatFieldError
 from ..shared.io import save_artifact, load_artifact
+from ..shared.metadata import CalibrationRecord
 from .saturation import check_saturation
 from .baseline import build_baseline
-from .metadata import CalibrationRecord
 
 # Constants
 
@@ -81,10 +81,15 @@ def build_flat_field(
                 f"reduce illumination or exposure and recapture"
             )
 
-    illuminated_average, illum_record = build_baseline(illuminated_frames)
-    dark_average, _ = build_baseline(dark_frames)
+    illuminated_result, illum_record = build_baseline(illuminated_frames)
+    dark_result, _ = build_baseline(dark_frames)
+    # Reuses build_baseline() purely as a frame-averaging helper here --
+    # its measured background_sigma isn't physically meaningful for a
+    # flat-field artifact, so both results' background_sigma is discarded.
+    # One side effect: this now inherits build_baseline()'s 2-frame
+    # minimum per phase (was 1), since averaging is delegated to it.
 
-    dark_subtracted = np.clip(illuminated_average - dark_average, 0, None)
+    dark_subtracted = np.clip(illuminated_result.baseline - dark_result.baseline, 0, None)
 
     mean_value = dark_subtracted.mean()
     if mean_value <= 0:
@@ -127,7 +132,7 @@ def save_flat_field(path: str | Path, flat_field: np.ndarray, record: Calibratio
     None
     '''
 
-    save_artifact(path, flat_field, record)
+    save_artifact(path, {"flat_field": flat_field}, record)
 
 
 def load_flat_field(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
@@ -151,9 +156,9 @@ def load_flat_field(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
         If path doesn't exist.
     '''
 
-    flat_field, record = load_artifact(path, CalibrationRecord)
+    arrays, record = load_artifact(path, CalibrationRecord)
     logger.info("loaded flat field from %s (age %.1fs)", path, record.age_seconds)
-    return flat_field, record
+    return arrays["flat_field"], record
 
 
 __all__ = ["build_flat_field", "save_flat_field", "load_flat_field"]

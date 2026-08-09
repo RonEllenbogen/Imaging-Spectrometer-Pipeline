@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from ..shared.io import save_artifact, load_artifact
-from .metadata import CalibrationRecord
+from ..shared.metadata import CalibrationRecord
 
 # Constants
 
@@ -111,7 +111,7 @@ def save_bad_pixel_map(path: str | Path, mask: np.ndarray, record: CalibrationRe
     None
     '''
 
-    save_artifact(path, mask, record)
+    save_artifact(path, {"mask": mask}, record)
 
 
 def load_bad_pixel_map(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]:
@@ -135,9 +135,9 @@ def load_bad_pixel_map(path: str | Path) -> tuple[np.ndarray, CalibrationRecord]
         If path doesn't exist.
     '''
 
-    mask, record = load_artifact(path, CalibrationRecord)
+    arrays, record = load_artifact(path, CalibrationRecord)
     logger.info("loaded bad-pixel map from %s (age %.1fs)", path, record.age_seconds)
-    return mask, record
+    return arrays["mask"], record
 
 
 __all__ = ["build_bad_pixel_map", "SIGMA_THRESHOLD", "save_bad_pixel_map", "load_bad_pixel_map"]

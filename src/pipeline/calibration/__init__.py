@@ -9,7 +9,10 @@ rather than re-exported here, since more subpackages are still to come.
 
 # Imports
 
-from .exceptions import CalibrationError, SettingsMismatchError, InvalidFlatFieldError
+from .exceptions import (
+    CalibrationError, SettingsMismatchError, InvalidFlatFieldError,
+    InvalidConversionGainError, InsufficientDataError,
+)
 
 # Constants
 
@@ -17,4 +20,7 @@ from .exceptions import CalibrationError, SettingsMismatchError, InvalidFlatFiel
 
 # Functions
 
-__all__ = ["CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError"]
+__all__ = [
+    "CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError",
+    "InvalidConversionGainError", "InsufficientDataError",
+]

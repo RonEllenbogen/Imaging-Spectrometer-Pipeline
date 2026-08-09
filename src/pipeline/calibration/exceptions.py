@@ -29,7 +29,7 @@ class SettingsMismatchError(CalibrationError):
     """Raised when a science frame's acquisition settings don't match the
     settings a loaded calibration artifact was tagged with. This is the
     check FrameData's exposure_us/gain_db exist to enable, compared
-    against a CalibrationRecord from calibration/sensor/metadata.py."""
+    against a CalibrationRecord from calibration/shared/metadata.py."""
 
     def __init__(self, parameter: str, frame_value, calibration_value):
         super().__init__(
@@ -49,7 +49,42 @@ class InvalidFlatFieldError(CalibrationError):
         super().__init__(f"invalid flat field: {reason}")
         self.reason = reason
 
+
+class InvalidConversionGainError(CalibrationError):
+    """Raised when a candidate conversion-gain (photon transfer curve)
+    measurement fails validation -- a saturated frame in the exposure
+    sweep, or a fitted variance-vs-mean slope that isn't positive (a
+    non-positive slope is physically invalid; sensor noise variance can't
+    decrease with increasing signal, so this means something in the sweep
+    -- illumination drift, non-linearity, insufficient dynamic range -- was
+    wrong, not just an unlucky fit). reason should say which."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"invalid conversion gain measurement: {reason}")
+        self.reason = reason
+
+
+class InsufficientDataError(CalibrationError):
+    """Raised when shared/fitting.py's polynomial fit is asked to solve for
+    more coefficients than it has data points for -- a hard mathematical
+    requirement (degree + 1 points minimum), not a configurable threshold.
+    Mirrors analysis/exceptions.py's InsufficientDataError; kept as a
+    separate CalibrationError subclass rather than reused directly, since
+    calibration/ must not depend on analysis/ (see shared/fitting.py's
+    module docstring)."""
+
+    def __init__(self, degree: int, n_points: int):
+        super().__init__(
+            f"cannot fit degree-{degree} polynomial with only {n_points} "
+            f"point(s); need at least {degree + 1}"
+        )
+        self.degree = degree
+        self.n_points = n_points
+
 # Functions
 
 
-__all__ = ["CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError"]
+__all__ = [
+    "CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError",
+    "InvalidConversionGainError", "InsufficientDataError",
+]
