@@ -12,14 +12,6 @@ update loop, the skip-counter state machine, and the real per-tick
 computation described in the module design are a follow-up phase. The
 degree selector is present and changes the panel's *displayed* (still
 fake) numbers, but does not trigger any real refit.
-
-Import note: this module wants pipeline.gui.theme for shared colors/
-fonts, but theme.py does not exist yet in this branch (see
-docs/project_state.md -- gui/ is listed as "not started"). Rather than
-build theme.py here (explicitly out of scope for this module), a small
-local fallback palette is used when the import fails -- see the
-try/except right below the imports. Delete the fallback once theme.py
-lands and this import stops failing.
 '''
 
 # Imports
@@ -47,28 +39,13 @@ from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
 from pipeline.preprocessing import CalibrationSet
 
-try:
-    from pipeline.gui.theme import (
-        ACCENT_COLOR,
-        BACKGROUND_COLOR,
-        FOREGROUND_COLOR,
-        GRID_COLOR,
-        load_bundled_font,
-    )
-except ImportError:
-    # See module docstring -- gui/theme.py isn't built yet. Local stand-in
-    # so this module can be built/screenshotted/tested on its own.
-    from PySide6.QtGui import QFont
-
-    BACKGROUND_COLOR = "#1e1e1e"
-    FOREGROUND_COLOR = "#e0e0e0"
-    GRID_COLOR = "#3a3a3a"
-    ACCENT_COLOR = "#4fa8ff"
-
-    def load_bundled_font(point_size: int = 10) -> "QFont":
-        font = QFont("Sans Serif")
-        font.setPointSize(point_size)
-        return font
+from pipeline.gui.theme import (
+    COLOR_ACCENT as ACCENT_COLOR,
+    COLOR_BACKGROUND as BACKGROUND_COLOR,
+    COLOR_TEXT_PRIMARY as FOREGROUND_COLOR,
+    COLOR_PLOT_GRID as GRID_COLOR,
+    load_bundled_font,
+)
 
 
 # Constants
