@@ -22,6 +22,7 @@ top-level screen's page-navigation code.
 # Imports
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -56,6 +57,13 @@ from pipeline.gui.theme import (
 
 DEFAULT_N_FRAMES = 50
 
+# Exposure-mode choice strings, shared by BaselineDialog and FlatFieldDialog's
+# exposure_mode_combo below -- mirrors cli/calibration.py's mutually-exclusive
+# --auto-exposure/--exposure-us flag pair, minus the CLI's "give neither" case
+# (a combo box always has one of the two selected).
+EXPOSURE_MODE_AUTO = "Auto"
+EXPOSURE_MODE_MANUAL = "Manual"
+
 _DIALOG_STYLE = f"""
 QDialog {{
     background-color: {COLOR_BACKGROUND};
@@ -70,7 +78,7 @@ QLabel[role="phase"] {{
     color: {COLOR_ACCENT};
     font-weight: 600;
 }}
-QSpinBox, QDoubleSpinBox {{
+QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {COLOR_SURFACE};
     color: {COLOR_TEXT_PRIMARY};
     border: 1px solid {COLOR_BORDER};
@@ -102,8 +110,15 @@ class BaselineDialog(QDialog):
 
     '''
     Form for a single-phase baseline calibration: number of background
-    frames to average, plus gain_db (a required numeric input, same as
-    the CLI -- not in configs/default.yaml since it varies per session).
+    frames to average, an Auto/Manual exposure choice, plus gain_db (a
+    required numeric input, same as the CLI -- not in configs/default.yaml
+    since it varies per session).
+
+    Auto/Manual mirrors cli/calibration.py's mutually-exclusive
+    --auto-exposure/--exposure-us flags: "Auto" leaves exposure_us() as
+    None (real auto-exposure convergence decides it at capture time) and
+    resets gain_db_spin to 0.0 as a starting suggestion; "Manual" enables
+    exposure_us_spin for a fixed exposure_us and leaves gain_db_spin alone.
 
     Mirrors cli/calibration.py's _cmd_baseline / run_baseline_calibration().
     '''
@@ -138,11 +153,23 @@ class BaselineDialog(QDialog):
         self.n_frames_spin.setValue(DEFAULT_N_FRAMES)
         form.addRow("Number of frames:", self.n_frames_spin)
 
+        self.exposure_mode_combo = QComboBox()
+        self.exposure_mode_combo.addItems([EXPOSURE_MODE_AUTO, EXPOSURE_MODE_MANUAL])
+        form.addRow("Exposure:", self.exposure_mode_combo)
+
+        self.exposure_us_spin = QDoubleSpinBox()
+        self.exposure_us_spin.setRange(1.0, 1_000_000.0)
+        self.exposure_us_spin.setSuffix(" us")
+        form.addRow("Exposure (exposure_us):", self.exposure_us_spin)
+
         self.gain_db_spin = QDoubleSpinBox()
         self.gain_db_spin.setRange(0.0, 48.0)
         self.gain_db_spin.setSingleStep(0.1)
         self.gain_db_spin.setSuffix(" dB")
         form.addRow("Gain (db):", self.gain_db_spin)
+
+        self.exposure_mode_combo.currentTextChanged.connect(self._on_exposure_mode_changed)
+        self._on_exposure_mode_changed(self.exposure_mode_combo.currentText())
 
         layout.addLayout(form)
 
@@ -157,6 +184,32 @@ class BaselineDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _on_exposure_mode_changed(self, mode: str) -> None:
+
+        '''
+        "Auto": disables exposure_us_spin (its value is ignored -- real
+        auto-exposure convergence decides exposure_us at capture time) and
+        resets gain_db_spin to 0.0 as a starting suggestion, re-applied
+        every time Auto is (re-)selected, not just once.
+
+        "Manual": enables exposure_us_spin; gain_db_spin is left as-is.
+        '''
+
+        is_auto = mode == EXPOSURE_MODE_AUTO
+        self.exposure_us_spin.setEnabled(not is_auto)
+        if is_auto:
+            self.gain_db_spin.setValue(0.0)
+
+    def auto_exposure(self) -> bool:
+        '''True if "Auto" exposure is currently selected.'''
+        return self.exposure_mode_combo.currentText() == EXPOSURE_MODE_AUTO
+
+    def exposure_us(self) -> float | None:
+        '''Manually-entered exposure_us, or None if "Auto" is selected.'''
+        if self.auto_exposure():
+            return None
+        return self.exposure_us_spin.value()
+
 
 class FlatFieldDialog(QDialog):
 
@@ -165,6 +218,11 @@ class FlatFieldDialog(QDialog):
     illuminated frames, with an explicit UI pause (this dialog's phase
     stepper) between them rather than one blocking call -- the physical
     setup changes between phases (block the beam, then illuminate it).
+
+    Also carries an Auto/Manual exposure choice (see auto_exposure()/
+    exposure_us() below), same semantics as BaselineDialog's -- applies to
+    both phases of this capture, matching how a single build_camera_stream()
+    call configures the whole session on the CLI side.
 
     Mirrors cli/calibration.py's _cmd_flat_field (input() prompts there
     become this dialog's phase transitions), calling capture_dark_frames()
@@ -200,11 +258,20 @@ class FlatFieldDialog(QDialog):
         self.n_frames_spin.setRange(2, 1000)
         self.n_frames_spin.setValue(DEFAULT_N_FRAMES)
         form.addRow("Frames per phase:", self.n_frames_spin)
+        self.exposure_mode_combo = QComboBox()
+        self.exposure_mode_combo.addItems([EXPOSURE_MODE_AUTO, EXPOSURE_MODE_MANUAL])
+        form.addRow("Exposure:", self.exposure_mode_combo)
+        self.exposure_us_spin = QDoubleSpinBox()
+        self.exposure_us_spin.setRange(1.0, 1_000_000.0)
+        self.exposure_us_spin.setSuffix(" us")
+        form.addRow("Exposure (exposure_us):", self.exposure_us_spin)
         self.gain_db_spin = QDoubleSpinBox()
         self.gain_db_spin.setRange(0.0, 48.0)
         self.gain_db_spin.setSingleStep(0.1)
         self.gain_db_spin.setSuffix(" dB")
         form.addRow("Gain (gain_db):", self.gain_db_spin)
+        self.exposure_mode_combo.currentTextChanged.connect(self._on_exposure_mode_changed)
+        self._on_exposure_mode_changed(self.exposure_mode_combo.currentText())
         layout.addLayout(form)
 
         self.phase_label = QLabel()
@@ -261,6 +328,32 @@ class FlatFieldDialog(QDialog):
             return
         self._phase += 1
         self._render_phase()
+
+    def _on_exposure_mode_changed(self, mode: str) -> None:
+
+        '''
+        "Auto": disables exposure_us_spin (its value is ignored -- real
+        auto-exposure convergence decides exposure_us at capture time) and
+        resets gain_db_spin to 0.0 as a starting suggestion, re-applied
+        every time Auto is (re-)selected, not just once.
+
+        "Manual": enables exposure_us_spin; gain_db_spin is left as-is.
+        '''
+
+        is_auto = mode == EXPOSURE_MODE_AUTO
+        self.exposure_us_spin.setEnabled(not is_auto)
+        if is_auto:
+            self.gain_db_spin.setValue(0.0)
+
+    def auto_exposure(self) -> bool:
+        '''True if "Auto" exposure is currently selected.'''
+        return self.exposure_mode_combo.currentText() == EXPOSURE_MODE_AUTO
+
+    def exposure_us(self) -> float | None:
+        '''Manually-entered exposure_us, or None if "Auto" is selected.'''
+        if self.auto_exposure():
+            return None
+        return self.exposure_us_spin.value()
 
 
 class ConversionGainDialog(QDialog):
@@ -485,4 +578,6 @@ __all__ = [
     "show_camera_error_dialog",
     "show_calibration_error_dialog",
     "DEFAULT_N_FRAMES",
+    "EXPOSURE_MODE_AUTO",
+    "EXPOSURE_MODE_MANUAL",
 ]
