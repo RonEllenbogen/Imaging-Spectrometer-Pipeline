@@ -430,6 +430,13 @@ ones (per-type — the user picks which one, not an all-or-nothing choice). Cali
 mutually exclusive phases, never simultaneous, which happens to line up exactly with the one-camera-
 connection-at-a-time hardware constraint without needing to special-case it.
 
+**Fixed layout, not responsive.** Every page's layout is designed to look best at a fixed default window
+size, not to reflow as the window is resized. Resizing the window should not rearrange widgets, change
+spacing, or restretch cards/panels — the current skeleton pages use stretch factors and layouts that
+reflow on resize, which needs revisiting on a future pass across `calibration_screen.py`, `live_view.py`,
+and any future page, likely by fixing the window size (disabling resize) or constraining layouts to hold
+their proportions rather than expand into extra space.
+
 **The calibration screen is not uniform across the five types:**
 - **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
   override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
@@ -666,6 +673,15 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   independently re-verified (diffs read in full, suite re-run) rather than trusting
   the initial report.
 - **Build the GUI** per the design recorded in §5. Nothing started in code yet.
+- **GUI: fixed (non-responsive) layout across all pages.** Currently the calibration screen and live
+  view both reflow on window resize (stretch factors, expanding layouts) — needs a pass to make every
+  page hold a fixed layout tuned for its default window size regardless of resizing. See §5.
+- **GUI live view: manual ROI entry.** Add fields on the live-view screen for the user to manually enter
+  min/max bounds on both axes (spatial ROI rows, spectral-column signal-threshold range) based on what
+  they see in the live feed, overriding the automatic mechanisms currently in place
+  (`preprocessing/steps/roi.py`'s row bounds, `signal_threshold.py`'s per-column SNR gate) per-axis when
+  entered; falls back to the existing automatic mechanism for any axis left blank. Needs a "Reset ROI"
+  button restoring the automatic default, for when the user wants to undo a manual entry.
 - **`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
   degree > 1.** Currently only `coefficient_sigma` (marginal, per-coefficient) is
   stored; a statistically sound uncertainty on `zeta(wavelength_nm)` needs the fit's
