@@ -21,6 +21,7 @@ top-level screen's page-navigation code.
 
 # Imports
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pipeline.gui.live_view import DEFAULT_DEGREE, DEGREE_CHOICES, DEGREE_LABELS
+from pipeline.gui.live_view import DEGREE_CHOICES, DEGREE_LABELS
 from pipeline.gui.theme import (
     COLOR_ACCENT,
     COLOR_ACCENT_ALT,
@@ -59,6 +60,10 @@ from pipeline.gui.theme import (
 # Constants
 
 DEFAULT_N_FRAMES = 50
+# Deliberately its own constant rather than reusing live_view.DEFAULT_DEGREE
+# (1): a spectral calibration's pixel->wavelength_nm fit needs a higher
+# baseline degree than the live view's default spatial dispersion fit.
+DEFAULT_DEGREE = 3
 
 # Exposure-mode choice strings, shared by BaselineDialog and FlatFieldDialog's
 # exposure_mode_combo below -- mirrors cli/calibration.py's mutually-exclusive
@@ -80,6 +85,12 @@ QLabel[role="hint"] {{
 QLabel[role="phase"] {{
     color: {COLOR_ACCENT};
     font-weight: 600;
+}}
+QLabel[role="formula"] {{
+    background-color: {COLOR_SURFACE};
+    border: 1px solid {COLOR_BORDER};
+    border-radius: 4px;
+    padding: 8px 10px;
 }}
 QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {COLOR_SURFACE};
@@ -562,7 +573,7 @@ class SpectralCalibrationDialog(QDialog):
         mode_row = QHBoxLayout()
         mode_row.setSpacing(SPACING_MEDIUM)
         self.mode_group = QButtonGroup(self)
-        self.capture_mode_radio = QRadioButton("Capture from Lamp")
+        self.capture_mode_radio = QRadioButton("Automatic")
         self.capture_mode_radio.setChecked(True)
         self.manual_mode_radio = QRadioButton("Manual Entry")
         self.mode_group.addButton(self.capture_mode_radio)
@@ -598,10 +609,16 @@ class SpectralCalibrationDialog(QDialog):
         page_layout.setSpacing(SPACING_MEDIUM)
 
         hint = QLabel(
-            "Captures lamp frames from this project's chosen reference "
-            "lamp -- Argon -- using the curated 751.46-842.46nm window, "
-            "picked roughly symmetric about the Ti:Sapphire laser's "
-            "800nm central wavelength."
+            "Place the lamp in front of the imaging spectrometer's closed "
+            "entrance slit then perform Baseline calibration. Turn off the "
+            "lamp and perform phase 1 of Flat Field calibration. Illuminate "
+            "the sensor uniformly (with the lamp if you wish) and perform "
+            "phase 2 of Flat Field calibration. Turn on the lamp and place it "
+            "in front of the imaging spectrometer's entrance slit, widened to "
+            "the correct width, then perform Spectral Calibration by clicking "
+            "Start Capture. Once this is done, turn off the lamp and recalibrate "
+            "the Baseline with the same room-lighting configuration used in spatial "
+            "chirp measurement."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -643,12 +660,8 @@ class SpectralCalibrationDialog(QDialog):
         page_layout.setSpacing(SPACING_MEDIUM)
 
         hint = QLabel(
-            "Enter a pixel -> wavelength_nm polynomial measured "
-            "independently of this software (e.g. reading off known line "
-            "positions by hand): wavelength_nm = c0 + c1*pixel + "
-            "c2*pixel^2 + ..., ascending order. Each coefficient's "
-            "uncertainty is required -- there is no fit residual here to "
-            "estimate it from."
+            "Enter the coefficients of a user-calibrated polynomial mapping "
+            "of sensor-column to wavelength."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -664,6 +677,13 @@ class SpectralCalibrationDialog(QDialog):
         degree_row.addWidget(self.manual_degree_selector)
         degree_row.addStretch(1)
         page_layout.addLayout(degree_row)
+
+        self.formula_label = QLabel()
+        self.formula_label.setTextFormat(Qt.RichText)
+        self.formula_label.setAlignment(Qt.AlignCenter)
+        self.formula_label.setProperty("role", "formula")
+        self.formula_label.setFont(load_bundled_font(12))
+        page_layout.addWidget(self.formula_label)
 
         self._coefficient_form = QFormLayout()
         self._coefficient_form.setSpacing(SPACING_SMALL)
@@ -691,6 +711,7 @@ class SpectralCalibrationDialog(QDialog):
         self._coefficient_rows = []
 
         degree = self.manual_degree_selector.currentData()
+        self.formula_label.setText(manual_spectral_formula_html(degree))
         for i in range(degree + 1):
             value_spin = QDoubleSpinBox()
             value_spin.setRange(-1_000_000.0, 1_000_000.0)
@@ -732,6 +753,38 @@ class SpectralCalibrationDialog(QDialog):
 
 
 # Functions
+
+
+def manual_spectral_formula_html(degree: int) -> str:
+
+    '''
+    Rich-text (HTML) general form of the pixel -> wavelength_nm polynomial
+    at the given degree, e.g. "λ = c<sub>0</sub> + c<sub>1</sub>x +
+    c<sub>2</sub>x<sup>2</sup>" for degree 2, with real sub/superscripts
+    for QLabel's built-in rich-text support -- shown above
+    SpectralCalibrationDialog's manual-entry coefficient rows and kept in
+    sync with manual_degree_selector by _rebuild_coefficient_rows().
+    Mirrors live_view.py's fit_formula_html() convention, but for the
+    pixel->wavelength_nm direction used by manual entry (fit_formula_html()
+    only covers the reverse wavelength_nm->pixel direction).
+
+    Parameters
+    ----------
+    degree
+        Polynomial degree (1, 2, or 3 -- see DEGREE_CHOICES).
+
+    Returns
+    -------
+    str
+        HTML fragment suitable for a QLabel with rich text enabled.
+    '''
+
+    terms = ["c<sub>0</sub>"]
+    for power in range(1, degree + 1):
+        x_part = "x" if power == 1 else f"x<sup>{power}</sup>"
+        terms.append(f"c<sub>{power}</sub>{x_part}")
+
+    return "λ = " + " + ".join(terms)
 
 
 def show_camera_error_dialog(parent: QWidget | None, message: str) -> None:
@@ -794,9 +847,11 @@ __all__ = [
     "ConversionGainDialog",
     "SpatialCalibrationDialog",
     "SpectralCalibrationDialog",
+    "manual_spectral_formula_html",
     "show_camera_error_dialog",
     "show_calibration_error_dialog",
     "DEFAULT_N_FRAMES",
+    "DEFAULT_DEGREE",
     "EXPOSURE_MODE_AUTO",
     "EXPOSURE_MODE_MANUAL",
 ]

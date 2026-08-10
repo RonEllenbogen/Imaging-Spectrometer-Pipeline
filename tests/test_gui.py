@@ -63,6 +63,8 @@ from pipeline.gui.calibration_dialogs import (  # noqa: E402
     FlatFieldDialog,
     SpatialCalibrationDialog,
     SpectralCalibrationDialog,
+    manual_spectral_formula_html,
+    DEFAULT_DEGREE as SPECTRAL_DEFAULT_DEGREE,
 )
 from pipeline.gui.calibration_screen import (  # noqa: E402
     CalibrationScreen,
@@ -451,15 +453,15 @@ def test_spectral_dialog_capture_mode_has_frame_gain_and_degree_fields(qtbot):
     qtbot.addWidget(dialog)
     assert dialog.n_frames_spin.value() > 0
     assert dialog.gain_db_spin is not None
-    assert dialog.capture_degree_selector.currentData() == DEFAULT_DEGREE
+    assert dialog.capture_degree_selector.currentData() == SPECTRAL_DEFAULT_DEGREE
 
 
-def test_spectral_dialog_manual_degree_defaults_to_two_coefficient_rows(qtbot):
+def test_spectral_dialog_manual_degree_defaults_to_cubic_coefficient_rows(qtbot):
     dialog = SpectralCalibrationDialog()
     qtbot.addWidget(dialog)
     dialog.manual_mode_radio.setChecked(True)
-    assert dialog.manual_degree_selector.currentData() == DEFAULT_DEGREE
-    assert len(dialog._coefficient_rows) == DEFAULT_DEGREE + 1
+    assert dialog.manual_degree_selector.currentData() == SPECTRAL_DEFAULT_DEGREE
+    assert len(dialog._coefficient_rows) == SPECTRAL_DEFAULT_DEGREE + 1
 
 
 def test_spectral_dialog_manual_degree_change_rebuilds_coefficient_rows(qtbot):
@@ -480,10 +482,49 @@ def test_spectral_dialog_manual_degree_change_rebuilds_coefficient_rows(qtbot):
     assert len(dialog._coefficient_rows) == 2
 
 
+def test_spectral_dialog_manual_formula_label_matches_default_degree(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.manual_mode_radio.setChecked(True)
+    default_degree = dialog.manual_degree_selector.currentData()
+    assert dialog.formula_label.text() == manual_spectral_formula_html(default_degree)
+
+
+def test_spectral_dialog_manual_formula_label_updates_with_degree(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.manual_mode_radio.setChecked(True)
+
+    quadratic_index = DEGREE_CHOICES.index(2)
+    dialog.manual_degree_selector.setCurrentIndex(quadratic_index)
+    assert dialog.formula_label.text() == manual_spectral_formula_html(2)
+
+
+class TestManualSpectralFormulaHtml:
+
+    def test_degree_one(self):
+        assert manual_spectral_formula_html(1) == "λ = c<sub>0</sub> + c<sub>1</sub>x"
+
+    def test_degree_two_adds_squared_term(self):
+        html = manual_spectral_formula_html(2)
+        assert html.endswith("c<sub>2</sub>x<sup>2</sup>")
+
+    def test_degree_three_adds_cubed_term(self):
+        html = manual_spectral_formula_html(3)
+        assert html.endswith("c<sub>3</sub>x<sup>3</sup>")
+
+    def test_degree_increases_term_count(self):
+        html1 = manual_spectral_formula_html(1)
+        html3 = manual_spectral_formula_html(3)
+        assert html1.count("c<sub>") == 2
+        assert html3.count("c<sub>") == 4
+
+
 def test_spectral_dialog_manual_getters_return_entered_values(qtbot):
     dialog = SpectralCalibrationDialog()
     qtbot.addWidget(dialog)
     dialog.manual_mode_radio.setChecked(True)
+    dialog.manual_degree_selector.setCurrentIndex(DEGREE_CHOICES.index(1))
 
     values = [780.0, 0.045]
     sigmas = [0.5, 0.001]

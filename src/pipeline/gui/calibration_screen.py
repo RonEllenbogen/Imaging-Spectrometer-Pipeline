@@ -435,8 +435,7 @@ class CreatePage(QWidget):
 
         self.spectral_card = _CalibrationTypeCard(
             "Spectral",
-            "Fits pixel-to-wavelength from an Argon lamp capture, or "
-            "accepts a manually measured polynomial instead.",
+            "Create a sensor-column to wavelength mapping using an Argon lamp.",
             "Configure...",
             COLOR_ACCENT,
         )
