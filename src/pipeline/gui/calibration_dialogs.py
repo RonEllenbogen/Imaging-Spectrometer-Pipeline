@@ -123,8 +123,8 @@ class BaselineDialog(QDialog):
         layout.addWidget(heading)
 
         hint = QLabel(
-            "Averages background frames with no illumination to measure "
-            "the per-pixel dark offset and its noise (background_sigma)."
+            "Block the beam and configure room lighting to the level "
+            "used in spatial chirp measurement, then click Start Capture."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -142,7 +142,7 @@ class BaselineDialog(QDialog):
         self.gain_db_spin.setRange(0.0, 48.0)
         self.gain_db_spin.setSingleStep(0.1)
         self.gain_db_spin.setSuffix(" dB")
-        form.addRow("Gain (gain_db):", self.gain_db_spin)
+        form.addRow("Gain (db):", self.gain_db_spin)
 
         layout.addLayout(form)
 
@@ -233,8 +233,8 @@ class FlatFieldDialog(QDialog):
 
     def _render_phase(self) -> None:
         if self._phase == self.PHASE_DARK:
-            self.phase_label.setText("Phase 1 of 2 -- Dark frames")
-            self.instruction_label.setText("Block the beam, then click Continue.")
+            self.phase_label.setText("Phase 1 of 2 -- Baseline frames")
+            self.instruction_label.setText("Block the beam and configure room lighting to the level used in spatial chirp measurement, then click Continue.")
             self.status_label.setText("Not started.")
             self.continue_button.setText("Continue")
         elif self._phase == self.PHASE_ILLUMINATED:
@@ -242,7 +242,7 @@ class FlatFieldDialog(QDialog):
             self.instruction_label.setText(
                 "Set up uniform illumination, then click Continue."
             )
-            self.status_label.setText("Dark frames captured.")
+            self.status_label.setText("Baseline frames captured.")
             self.continue_button.setText("Continue")
         else:
             self.phase_label.setText("Finishing")
@@ -288,9 +288,9 @@ class ConversionGainDialog(QDialog):
         layout.addWidget(heading)
 
         hint = QLabel(
-            "Sweeps exposure time at fixed uniform illumination to fit "
-            "gain_e_per_adu from a photon transfer curve. All fields are "
-            "required -- no default range exists for this setup."
+            "Block the beam and configure room lighting to the level used "
+            "in spatial chirp measurement. Set up uniform illumination. "
+            "Fill in required fields, then click Start Sweep."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
@@ -386,14 +386,17 @@ class SpatialCalibrationDialog(QDialog):
         heading.setFont(load_bundled_font(14, bold=True))
         layout.addWidget(heading)
 
+        '''
         badge = QLabel("No camera interaction -- manual value entry only")
         badge.setProperty("role", "phase")
         layout.addWidget(badge)
+        '''
 
         hint = QLabel(
-            "Pixel-to-physical-position scale factor at the spectrometer's "
-            "input slit -- the ratio of the two relay lenses' focal "
-            "lengths. Enter a manually measured value, or leave the "
+            "Scale factor converting distances along the camera's "
+            "spatial axis to distances on the slit-plane. Theoretical "
+            "default is the ratio of the focal length of the first lens "
+            "to that of the second. Enter a manually measured value, or leave the "
             "default in place."
         )
         hint.setProperty("role", "hint")
