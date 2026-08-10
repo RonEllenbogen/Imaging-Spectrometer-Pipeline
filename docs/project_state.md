@@ -527,6 +527,12 @@ fabricating an internal number that isn't statistically sound yet.
   to it. Instead: plot the full scatter (or column averages as a lighter reference layer) and draw the
   line from the actually-reported combined result (slope = ζ_combined, anchored through the data), so the
   picture and the number can never visually contradict each other.
+- **Residual plot beneath the graph.** When an extended measurement is run, add a residual subplot
+  underneath the main scatter/fit-curve graph (observed x0 minus the fitted curve, per column/shot,
+  sharing the same x-axis) — a standard fit-quality check, and a natural fit for extended measurement's
+  already-static (non-live-updating) graph. Not needed for the live single-shot view, which redraws too
+  fast for a residual panel to be readable. Noted here for whenever extended measurement itself is built
+  (§6 -- unwired placeholder button in the current skeleton).
 
 **Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
 genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw

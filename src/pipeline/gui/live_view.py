@@ -16,6 +16,7 @@ fake) numbers, but does not trigger any real refit.
 
 # Imports
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -77,6 +78,23 @@ MICRONS_PER_MM = 1000.0
 # _PlaceholderFit, not derived from any real per-frame column range.
 EVALUATED_AT_COLUMN = 960.0
 
+# Fit-curve overlay styling -- black rather than COLOR_ACCENT, and thicker
+# than the default 2px, specifically so it reads clearly against every
+# region of the viridis heatmap underneath it (COLOR_ACCENT's blue was
+# hard to distinguish against the heatmap's own blue/purple low end).
+FIT_CURVE_COLOR = "#000000"
+FIT_CURVE_WIDTH = 3
+
+# Unicode superscript digits/minus sign, for rendering an axis's
+# power-of-ten scale annotation (e.g. "x10^-3") properly instead of
+# pyqtgraph's default "%g" text (e.g. "x0.001") -- see
+# format_power_of_ten_superscript()/_PowerOfTenAxisItem below.
+_SUPERSCRIPT_DIGITS = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "-": "⁻",
+}
+
 # Classes
 
 @dataclass(frozen=True)
@@ -93,6 +111,29 @@ class _PlaceholderFit:
     # only meaningful when zeta_sigma is None (degree > 1); see
     # evaluated_at_text() and the "Evaluated At:" side-panel row.
     evaluated_at_column: float | None = None
+
+
+class _PowerOfTenAxisItem(pg.AxisItem):
+
+    '''
+    AxisItem whose auto-SI-prefix scale annotation is rendered as proper
+    Unicode-superscript scientific notation ("x10^-3") instead of
+    pyqtgraph's default plain-decimal "%g" formatting ("x0.001") -- see
+    format_power_of_ten_superscript(). Used for the strip chart's left
+    axis, where "Spatial Dispersion" has no physical SI unit to prefix
+    (px/nm), so pyqtgraph's default unit-prefix annotation is the only
+    place this scale factor is ever shown.
+    '''
+
+    def labelString(self) -> str:
+
+        if self.labelUnits != "" or not self.autoSIPrefix or self.autoSIPrefixScale == 1.0:
+            return super().labelString()
+
+        units = f"({format_power_of_ten_superscript(1.0 / self.autoSIPrefixScale)})"
+        style = ";".join(f"{k}: {self.labelStyle[k]}" for k in self.labelStyle)
+        s = f"{self.labelText} {units}"
+        return f"<span style='{style}'>{s}</span>"
 
 
 class LiveViewWidget(QWidget):
@@ -196,18 +237,19 @@ class LiveViewWidget(QWidget):
 
         plot_widget = pg.PlotWidget()
         self._main_plot = plot_widget.getPlotItem()
-        self._main_plot.setLabel("left", "Physical Position (mm)")
+        self._main_plot.setLabel("left", "Relative Physical Position (mm)")
         self._main_plot.setLabel("bottom", self._x_axis_label())
         self._main_plot.showGrid(x=True, y=True, alpha=0.3)
         self._style_plot_axes(self._main_plot)
 
-        # Heatmap first, so the scatter/fit curve render on top of it.
+        # Heatmap first (so everything else renders on top of it), then
+        # scatter/error bars, then the fit curve LAST -- it traces nearly
+        # the same path as the scatter points, so drawing it underneath
+        # them (the original order) left it almost entirely hidden behind
+        # the denser, larger scatter markers.
         self._image_item = pg.ImageItem()
         self._image_item.setColorMap(pg.colormap.get("viridis"))
         self._main_plot.addItem(self._image_item)
-
-        self._fit_curve = pg.PlotDataItem(pen=pg.mkPen(color=ACCENT_COLOR, width=2))
-        self._main_plot.addItem(self._fit_curve)
 
         self._scatter = pg.ScatterPlotItem(
             size=7, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 200)
@@ -217,12 +259,19 @@ class LiveViewWidget(QWidget):
         self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
         self._main_plot.addItem(self._error_bars)
 
+        self._fit_curve = pg.PlotDataItem(
+            pen=pg.mkPen(color=FIT_CURVE_COLOR, width=FIT_CURVE_WIDTH)
+        )
+        self._main_plot.addItem(self._fit_curve)
+
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         return plot_widget
 
     def _build_strip_chart(self) -> pg.PlotWidget:
 
-        plot_widget = pg.PlotWidget()
+        plot_widget = pg.PlotWidget(
+            axisItems={"left": _PowerOfTenAxisItem(orientation="left")}
+        )
         self._strip_plot = plot_widget.getPlotItem()
         self._strip_plot.setLabel("left", "Spatial Dispersion")
         self._strip_plot.setLabel("bottom", "Time (s ago)")
@@ -239,8 +288,12 @@ class LiveViewWidget(QWidget):
         self._strip_plot.addItem(self._strip_curve)
 
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        plot_widget.setMinimumHeight(140)
-        plot_widget.setMaximumHeight(180)
+        # Tall enough for the rotated left-axis label to fit without
+        # clipping once its power-of-ten scale annotation is appended
+        # (see _PowerOfTenAxisItem) -- 140/180 (the pre-annotation cap)
+        # cut "Spatial Dispersion (x10^-3)" off partway through.
+        plot_widget.setMinimumHeight(260)
+        plot_widget.setMaximumHeight(340)
         return plot_widget
 
     def _style_plot_axes(self, plot_item: pg.PlotItem) -> None:
@@ -264,7 +317,13 @@ class LiveViewWidget(QWidget):
         layout.addStretch(1)
 
         self._extended_measurement_button = QPushButton("Extended Measurement...")
-        self._extended_measurement_button.setFont(load_bundled_font(10))
+        self._extended_measurement_button.setFont(load_bundled_font(13, bold=True))
+        self._extended_measurement_button.setMinimumHeight(56)
+        self._extended_measurement_button.setStyleSheet(
+            f"QPushButton {{ background-color: {ACCENT_COLOR}; color: {BACKGROUND_COLOR}; "
+            f"border-radius: 6px; padding: 10px; }}"
+            f"QPushButton:hover {{ background-color: {ACCENT_COLOR}; border: 2px solid {FOREGROUND_COLOR}; }}"
+        )
         self._extended_measurement_button.setToolTip(
             "Not yet implemented -- placeholder for a future extended-"
             "measurement / N-shot combination workflow."
@@ -529,6 +588,47 @@ class LiveViewWidget(QWidget):
 
 # Functions
 
+def format_power_of_ten_superscript(multiplier: float) -> str:
+
+    '''
+    Formats a power-of-ten multiplier (e.g. 0.001) as "x10^-3" using
+    real Unicode superscript characters, for _PowerOfTenAxisItem's axis
+    scale annotation. Pure/non-Qt, unlike _PowerOfTenAxisItem itself, so
+    it's directly unit-testable.
+
+    Parameters
+    ----------
+    multiplier
+        A strictly positive, finite power of ten (e.g.
+        1.0 / AxisItem.autoSIPrefixScale). Anything that isn't a power
+        of ten (within floating-point tolerance) raises -- silently
+        rendering a non-power-of-ten value this way would be wrong, not
+        just imprecise.
+
+    Returns
+    -------
+    str
+        e.g. "×10⁻³" for multiplier=0.001, "×10³" for multiplier=1000.0.
+
+    Raises
+    ------
+    ValueError
+        If multiplier is not finite/positive, or not a power of ten.
+    '''
+
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise ValueError(f"multiplier must be finite and positive, got {multiplier!r}")
+
+    exponent = round(math.log10(multiplier))
+    if not math.isclose(multiplier, 10.0 ** exponent, rel_tol=1e-9):
+        raise ValueError(f"{multiplier!r} is not a power of ten")
+
+    sign = "-" if exponent < 0 else ""
+    digits = str(abs(exponent))
+    superscript_exponent = "".join(_SUPERSCRIPT_DIGITS[c] for c in sign + digits)
+    return f"×10{superscript_exponent}"
+
+
 def wavelength_axis_label(wavelength_axis: WavelengthAxis | None) -> str:
 
     '''
@@ -669,10 +769,13 @@ __all__ = [
     "heatmap_x_extent",
     "evaluated_at_text",
     "fit_formula_html",
+    "format_power_of_ten_superscript",
     "DEGREE_CHOICES",
     "DEGREE_LABELS",
     "DEFAULT_DEGREE",
     "STRIP_CHART_WINDOW_SECONDS",
     "MICRONS_PER_MM",
     "EVALUATED_AT_COLUMN",
+    "FIT_CURVE_COLOR",
+    "FIT_CURVE_WIDTH",
 ]

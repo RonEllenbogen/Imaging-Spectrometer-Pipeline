@@ -68,8 +68,10 @@ from pipeline.gui.live_view import (  # noqa: E402
     EVALUATED_AT_COLUMN,
     MICRONS_PER_MM,
     LiveViewWidget,
+    _PowerOfTenAxisItem,
     evaluated_at_text,
     fit_formula_html,
+    format_power_of_ten_superscript,
     heatmap_x_extent,
     wavelength_axis_label,
 )
@@ -394,6 +396,33 @@ class TestFitFormulaHtml:
         assert html3.count("c<sub>") == 4
 
 
+class TestFormatPowerOfTenSuperscript:
+
+    def test_negative_exponent(self):
+        assert format_power_of_ten_superscript(0.001) == "×10⁻³"
+
+    def test_positive_exponent(self):
+        assert format_power_of_ten_superscript(1000.0) == "×10³"
+
+    def test_zero_exponent(self):
+        assert format_power_of_ten_superscript(1.0) == "×10⁰"
+
+    def test_double_digit_exponent(self):
+        assert format_power_of_ten_superscript(1e-12) == "×10⁻¹²"
+
+    def test_non_power_of_ten_raises(self):
+        with pytest.raises(ValueError):
+            format_power_of_ten_superscript(0.002)
+
+    def test_zero_raises(self):
+        with pytest.raises(ValueError):
+            format_power_of_ten_superscript(0.0)
+
+    def test_negative_raises(self):
+        with pytest.raises(ValueError):
+            format_power_of_ten_superscript(-0.001)
+
+
 # ---------------------------------------------------------------------------
 # live_view.py -- LiveViewWidget pytest-qt smoke tests (offscreen)
 # ---------------------------------------------------------------------------
@@ -536,3 +565,23 @@ class TestLiveViewWidgetRefinements:
         widget = _make_live_view_widget(qtbot)
         widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
         assert "median" not in widget._zeta_note_label.text().lower()
+
+    def test_y_axis_label_says_relative_physical_position(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._main_plot.getAxis("left").labelText == "Relative Physical Position (mm)"
+
+    def test_fit_curve_is_black_and_thicker_than_default(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        pen = widget._fit_curve.opts["pen"]
+        assert pen.color().name() == "#000000"
+        assert pen.width() >= 3
+
+    def test_strip_chart_left_axis_is_power_of_ten_axis(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert isinstance(widget._strip_plot.getAxis("left"), _PowerOfTenAxisItem)
+
+    def test_extended_measurement_button_is_prominent(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        button = widget._extended_measurement_button
+        assert button.minimumHeight() >= 56
+        assert "background-color" in button.styleSheet()
