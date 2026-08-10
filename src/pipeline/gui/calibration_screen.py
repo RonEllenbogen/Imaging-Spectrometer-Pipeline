@@ -448,8 +448,8 @@ class CreatePage(QWidget):
 
         self.baseline_card = _CalibrationTypeCard(
             "Baseline",
-            "Single-phase: averages background frames for dark offset "
-            "and background_sigma.",
+            "Compute a baseline frame for background + dark"
+            "noise correction.",
             "Configure...",
             COLOR_ACCENT,
         )
@@ -458,8 +458,7 @@ class CreatePage(QWidget):
 
         self.flat_field_card = _CalibrationTypeCard(
             "Flat Field",
-            "Two-phase: dark, then uniformly illuminated frames. "
-            "Bad-pixel map builds automatically afterward.",
+            "Compute a flat field for PRNU correction.",
             "Configure...",
             COLOR_ACCENT,
         )
@@ -468,7 +467,8 @@ class CreatePage(QWidget):
 
         self.conversion_gain_card = _CalibrationTypeCard(
             "Conversion Gain",
-            "Exposure sweep at fixed illumination to fit gain_e_per_adu.",
+            "Compute the sensor's conversion gain for uncertainty"
+            "calculations.",
             "Configure...",
             COLOR_ACCENT,
         )
@@ -484,8 +484,9 @@ class CreatePage(QWidget):
 
         self.spatial_card = _CalibrationTypeCard(
             "Spatial",
-            "No camera interaction -- manually enter a scale-factor "
-            "override, or use the physical default.",
+            "Input an externally calibrated value for the Imaging"
+            "Spectrometer's spatial magnification, or use the"
+            "theoretical default.",
             "Enter Value...",
             COLOR_ACCENT_ALT,
         )
