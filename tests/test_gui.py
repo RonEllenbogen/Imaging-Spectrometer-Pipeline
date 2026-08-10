@@ -38,6 +38,8 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWidgets import QGroupBox  # noqa: E402
+
 from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
 from pipeline.analysis import SensorNoiseModel  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord  # noqa: E402
@@ -57,7 +59,11 @@ from pipeline.gui.calibration_screen import (  # noqa: E402
 from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
     DEGREE_CHOICES,
+    EVALUATED_AT_COLUMN,
+    MICRONS_PER_MM,
     LiveViewWidget,
+    evaluated_at_text,
+    fit_formula_html,
     heatmap_x_extent,
     wavelength_axis_label,
 )
@@ -240,6 +246,46 @@ class TestHeatmapXExtent:
         assert x1 == pytest.approx(500.0 + 0.01 * 1919)
 
 
+class TestEvaluatedAtText:
+
+    def test_none_axis_gives_pixel_column_fallback(self):
+        assert evaluated_at_text(EVALUATED_AT_COLUMN, None) == "Pixel column 960"
+
+    def test_real_axis_gives_wavelength_text(self):
+        axis = _FakeWavelengthAxis()
+        # axis.wavelength_nm(960) == 500.0 + 0.01 * 960 == 509.6
+        assert evaluated_at_text(960.0, axis) == "509.6 nm"
+
+    def test_pixel_column_rounds_to_nearest_int(self):
+        assert evaluated_at_text(959.6, None) == "Pixel column 960"
+
+
+class TestFitFormulaHtml:
+
+    def test_degree_one_pixel_fallback(self):
+        assert fit_formula_html(1, None) == "x<sub>0</sub>(column) = c<sub>0</sub> + c<sub>1</sub>·column"
+
+    def test_degree_one_wavelength(self):
+        axis = _FakeWavelengthAxis()
+        assert fit_formula_html(1, axis) == "x<sub>0</sub>(λ) = c<sub>0</sub> + c<sub>1</sub>λ"
+
+    def test_degree_two_adds_squared_term(self):
+        axis = _FakeWavelengthAxis()
+        html = fit_formula_html(2, axis)
+        assert html.endswith("c<sub>2</sub>λ<sup>2</sup>")
+
+    def test_degree_three_adds_cubed_term(self):
+        axis = _FakeWavelengthAxis()
+        html = fit_formula_html(3, axis)
+        assert html.endswith("c<sub>3</sub>λ<sup>3</sup>")
+
+    def test_degree_increases_term_count(self):
+        html1 = fit_formula_html(1, None)
+        html3 = fit_formula_html(3, None)
+        assert html1.count("c<sub>") == 2
+        assert html3.count("c<sub>") == 4
+
+
 # ---------------------------------------------------------------------------
 # live_view.py -- LiveViewWidget pytest-qt smoke tests (offscreen)
 # ---------------------------------------------------------------------------
@@ -307,3 +353,78 @@ class TestLiveViewWidgetSmoke:
         button = widget._extended_measurement_button
         assert button.text() == "Extended Measurement..."
         assert button.receivers("2clicked()") == 0
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- Phase-1 review refinements (colormap, mm conversion,
+# background styling, formatting, formula box, evaluated-at note)
+# ---------------------------------------------------------------------------
+
+class TestLiveViewWidgetRefinements:
+
+    def test_heatmap_has_a_colormap_lookup_table(self, qtbot):
+        # A plain-greyscale ImageItem has no lookup table at all -- once a
+        # colormap is applied, .lut is populated.
+        widget = _make_live_view_widget(qtbot)
+        assert widget._image_item.lut is not None
+
+    def test_zeta_label_has_word_wrap(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._zeta_label.wordWrap()
+
+    def test_evaluated_at_label_has_word_wrap(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._evaluated_at_label.wordWrap()
+
+    def test_formula_label_has_word_wrap(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._formula_label.wordWrap()
+
+    def test_group_boxes_and_combo_box_have_explicit_background(self, qtbot):
+        # See _group_box_stylesheet()/_combo_box_stylesheet() -- the
+        # top-level stylesheet doesn't reliably cascade into these widgets,
+        # so each carries its own explicit background-color rule.
+        widget = _make_live_view_widget(qtbot)
+        for box in widget.findChildren(QGroupBox):
+            assert "background-color" in box.styleSheet()
+        assert "background-color" in widget._degree_selector.styleSheet()
+
+    def test_convert_to_mm_matches_known_hardware_geometry(self, qtbot):
+        # 1200 spatial pixels * 3.45 um/pixel * 1.5 scale factor ==
+        # 6210 um == 6.21 mm at the slit -- see calibration/spatial/
+        # calibrate.py's module docstring and docs/project_state.md's
+        # "Bug fixed during GUI review" note.
+        widget = _make_live_view_widget(qtbot)
+        y_mm, _ = widget._convert_to_mm(np.array([1200.0]), np.array([0.0]))
+        assert y_mm[0] == pytest.approx(6.21)
+
+    def test_coefficients_and_zeta_use_plus_minus_character(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert "±" in widget._coefficients_label.text()
+        assert "+/-" not in widget._coefficients_label.text()
+        assert "±" in widget._zeta_label.text()
+        assert "+/-" not in widget._zeta_label.text()
+
+    def test_formula_label_updates_with_degree(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        linear_text = widget._formula_label.text()
+
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+        assert widget._formula_label.text() != linear_text
+        assert "c<sub>2</sub>" in widget._formula_label.text()
+
+    def test_evaluated_at_label_only_populated_for_degree_greater_than_one(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._evaluated_at_label.text() == ""
+
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+        assert widget._evaluated_at_label.text() != ""
+        assert "960" in widget._evaluated_at_label.text()
+
+    def test_zeta_note_no_longer_mentions_median_x_value_inline(self, qtbot):
+        # The evaluated-at value moved to its own labeled row (see above)
+        # rather than being buried in this note's prose.
+        widget = _make_live_view_widget(qtbot)
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+        assert "median" not in widget._zeta_note_label.text().lower()
