@@ -26,6 +26,11 @@ from pipeline.calibration.sensor import (
     run_conversion_gain_calibration,
     save_bad_pixel_map,
 )
+from pipeline.calibration.spatial import (
+    ScaleFactorPositionCalibration,
+    load_scale_factor,
+    save_scale_factor,
+)
 from pipeline.utils.helpers import load_config
 
 # Constants
@@ -36,6 +41,12 @@ DEFAULT_BASELINE_FILENAME = "baseline.npz"
 DEFAULT_FLAT_FIELD_FILENAME = "flat_field.npz"
 DEFAULT_BAD_PIXEL_MAP_FILENAME = "bad_pixel_map.npz"
 DEFAULT_CONVERSION_GAIN_FILENAME = "conversion_gain.npz"
+# Not exported from calibration/spatial/io.py -- unlike the four artifact
+# types above, the scale factor previously had no CLI-facing filename at
+# all (see docs/project_state.md's GUI review notes). Named here to match
+# its siblings' convention; gui/calibration_screen.py's own
+# _DEFAULT_SCALE_FACTOR_FILENAME constant predates this and is left as-is.
+DEFAULT_SCALE_FACTOR_FILENAME = "scale_factor.npz"
 DEFAULT_N_FRAMES = 50
 
 # Classes
@@ -43,7 +54,13 @@ DEFAULT_N_FRAMES = 50
 # Functions
 
 
-def build_camera_stream(gain_db: float, *, config_path: Path | None = None) -> CameraStream:
+def build_camera_stream(
+    gain_db: float,
+    *,
+    config_path: Path | None = None,
+    exposure_us: float | None = None,
+    auto_exposure: bool = False,
+) -> CameraStream:
 
     '''
     Build a CameraStream from default config and a caller-supplied gain.
@@ -56,6 +73,17 @@ def build_camera_stream(gain_db: float, *, config_path: Path | None = None) -> C
         Sensor gain in decibels (not stored in the YAML config).
     config_path
         YAML config file. Defaults to repo-root configs/default.yaml.
+    exposure_us
+        Exposure time in microseconds for this session. Defaults to
+        config's camera.exposure_time when omitted (unchanged prior
+        behavior). Ignored if auto_exposure is True -- still passed
+        through to CameraStream, which ignores it identically (see
+        CameraStream's own docstring).
+    auto_exposure
+        If True, the real camera runs a one-time ExposureAuto convergence
+        instead of using exposure_us -- see PylonBackend. The converged
+        value becomes CameraStream.exposure_us once start() returns (used
+        to tag every captured frame/CalibrationRecord correctly).
 
     Returns
     -------
@@ -67,12 +95,15 @@ def build_camera_stream(gain_db: float, *, config_path: Path | None = None) -> C
         config_path = DEFAULT_CONFIG_PATH
     config = load_config(config_path)
     camera = config["camera"]
+    if exposure_us is None:
+        exposure_us = camera["exposure_time"]
     return CameraStream(
-        exposure_us=camera["exposure_time"],
+        exposure_us=exposure_us,
         gain_db=gain_db,
         pixel_format=camera["pixel_format"],
         timeout_ms=camera["timeout"],
         serial_number=camera["serial_number"],
+        auto_exposure=auto_exposure,
     )
 
 
@@ -139,9 +170,35 @@ def _add_gain_db(subparser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_exposure_args(subparser: argparse.ArgumentParser) -> None:
+
+    '''
+    --auto-exposure and --exposure-us, mutually exclusive -- neither is
+    required, matching the prior (implicit) behavior of always falling
+    back to configs/default.yaml's camera.exposure_time when omitted.
+    '''
+
+    group = subparser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--auto-exposure",
+        action="store_true",
+        dest="auto_exposure",
+        help="Run one-time auto-exposure convergence instead of a fixed exposure time.",
+    )
+    group.add_argument(
+        "--exposure-us",
+        type=float,
+        default=None,
+        dest="exposure_us",
+        help="Exposure time in microseconds (default: configs/default.yaml's camera.exposure_time).",
+    )
+
+
 def _cmd_baseline(args: argparse.Namespace) -> None:
     path = resolve_artifact_path(args.output_dir, args.path, DEFAULT_BASELINE_FILENAME)
-    stream = build_camera_stream(args.gain_db)
+    stream = build_camera_stream(
+        args.gain_db, exposure_us=args.exposure_us, auto_exposure=args.auto_exposure
+    )
     stream.start()
     try:
         run_baseline_calibration(stream, args.n_frames, path)
@@ -152,7 +209,9 @@ def _cmd_baseline(args: argparse.Namespace) -> None:
 
 def _cmd_flat_field(args: argparse.Namespace) -> None:
     path = resolve_artifact_path(args.output_dir, args.path, DEFAULT_FLAT_FIELD_FILENAME)
-    stream = build_camera_stream(args.gain_db)
+    stream = build_camera_stream(
+        args.gain_db, exposure_us=args.exposure_us, auto_exposure=args.auto_exposure
+    )
     stream.start()
     try:
         input("Block the beam, then press Enter to capture dark frames...")
@@ -181,6 +240,24 @@ def _cmd_bad_pixel_map(args: argparse.Namespace) -> None:
     flat_field, flat_field_record = load_flat_field(flat_field_path)
     mask, record = build_bad_pixel_map(flat_field, flat_field_record)
     save_bad_pixel_map(output_path, mask, record)
+
+
+def _cmd_spatial(args: argparse.Namespace) -> None:
+    path = resolve_artifact_path(
+        args.output_dir, args.path, DEFAULT_SCALE_FACTOR_FILENAME
+    )
+    if args.scale_factor is not None:
+        calibration = ScaleFactorPositionCalibration(scale_factor=args.scale_factor)
+        save_scale_factor(path, calibration, source="manual")
+        print(f"saved scale_factor={calibration.scale_factor} to {path}")
+        return
+
+    # No --scale-factor given -- report whatever's currently active (a
+    # saved override, or DEFAULT_SCALE_FACTOR if none exists yet), same
+    # read-only behavior as `noise-model`. No camera involved either way,
+    # matching build_bad_pixel_map()'s reasoning (see _cmd_bad_pixel_map).
+    calibration, record = load_scale_factor(path)
+    print(f"scale_factor={calibration.scale_factor} (source={record.source})")
 
 
 def _cmd_conversion_gain(args: argparse.Namespace) -> None:
@@ -225,8 +302,15 @@ def _cmd_noise_model(args: argparse.Namespace) -> None:
     print(repr(model))
 
 
-def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO)
+def build_parser() -> argparse.ArgumentParser:
+
+    '''
+    Builds the full argparse parser (every subcommand, every flag) with
+    no side effects -- split out from main() so tests can exercise
+    argument parsing directly (parser.parse_args([...])) without
+    triggering logging setup or a subcommand's actual func (which may
+    require a camera).
+    '''
 
     parser = argparse.ArgumentParser(
         description=(
@@ -241,6 +325,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Acquire background frames and save a baseline artifact.",
     )
     _add_gain_db(baseline_parser)
+    _add_exposure_args(baseline_parser)
     _add_output_args(baseline_parser)
     baseline_parser.add_argument(
         "--n-frames",
@@ -256,6 +341,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Two-phase flat-field calibration with interactive setup prompts.",
     )
     _add_gain_db(flat_field_parser)
+    _add_exposure_args(flat_field_parser)
     _add_output_args(flat_field_parser)
     flat_field_parser.add_argument(
         "--n-frames",
@@ -281,6 +367,24 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     bad_pixel_parser.set_defaults(func=_cmd_bad_pixel_map)
+
+    spatial_parser = subparsers.add_parser(
+        "spatial",
+        help="Set or report the spatial (pixel-to-position) scale factor -- no camera involved.",
+    )
+    _add_output_args(spatial_parser)
+    spatial_parser.add_argument(
+        "--scale-factor",
+        type=float,
+        default=None,
+        dest="scale_factor",
+        help=(
+            "Manually-measured relay-optics scale factor to save (source=manual). "
+            "Omit to report the currently active value instead (a saved override, "
+            "or DEFAULT_SCALE_FACTOR if none exists yet)."
+        ),
+    )
+    spatial_parser.set_defaults(func=_cmd_spatial)
 
     conversion_gain_parser = subparsers.add_parser(
         "conversion-gain",
@@ -342,7 +446,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     noise_model_parser.set_defaults(func=_cmd_noise_model)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO)
+    args = build_parser().parse_args(argv)
     args.func(args)
 
 

@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 
 from pipeline.analysis import SensorNoiseModel, WavelengthAxis
 from pipeline.calibration.sensor import (
+    ConversionGainRecord,
     load_bad_pixel_map,
     load_baseline,
     load_conversion_gain,
@@ -222,12 +223,25 @@ class CalibrationBundle:
         intentional NotImplementedError stub (see calibration_screen's
         SPECTRAL_UNAVAILABLE_NOTE), so no WavelengthAxis implementation
         exists yet to construct one from.
+    conversion_gain_record
+        The ConversionGainRecord tagging the loaded conversion-gain
+        artifact (gain_db/timestamp/n_illumination_levels it was measured
+        under -- see calibration/sensor/conversion_gain.py; deliberately
+        has no exposure_us, since exposure is the swept variable, not a
+        fixed setting) -- kept separately from noise_model, which only
+        retains the derived gain_e_per_adu float. None until a
+        conversion-gain artifact is loaded. Exists so a caller (e.g. the
+        live-view screen) can compare the sensor's currently-configured
+        gain against what the noise model was actually measured under,
+        the same way calibration_set.baseline_record already lets
+        baseline settings be compared.
     '''
 
     calibration_set: CalibrationSet | None
     noise_model: SensorNoiseModel | None
     position_calibration: ScaleFactorPositionCalibration
     wavelength_axis: WavelengthAxis | None = None
+    conversion_gain_record: ConversionGainRecord | None = None
 
 
 SPECTRAL_UNAVAILABLE_NOTE = (
@@ -411,7 +425,7 @@ class CreatePage(QWidget):
         self.spatial_card = _CalibrationTypeCard(
             "Spatial",
             "Input an externally calibrated value for the Imaging"
-            " Spectrometer's spatial magnification, or use the"
+            " Spectrometer's inverse spatial magnification, or use the"
             " theoretical default.",
             "Enter Value...",
             COLOR_ACCENT_ALT,
@@ -553,7 +567,7 @@ class CalibrationScreen(QWidget):
             bad_pixel_mask, _ = load_bad_pixel_map(
                 DEFAULT_ARTIFACT_DIR / DEFAULT_BAD_PIXEL_MAP_FILENAME
             )
-            conversion_gain_result, _ = load_conversion_gain(
+            conversion_gain_result, conversion_gain_record = load_conversion_gain(
                 DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME
             )
         except FileNotFoundError:
@@ -582,6 +596,7 @@ class CalibrationScreen(QWidget):
             calibration_set=calibration_set,
             noise_model=noise_model,
             position_calibration=position_calibration,
+            conversion_gain_record=conversion_gain_record,
         )
         self.calibration_ready.emit(self._bundle)
 

@@ -531,6 +531,73 @@ class TestSyntheticBackendOnly:
         assert frame.dtype == expected_dtype
         assert frame.max() <= true_max
 
+
+class _EchoDifferentExposureBackend:
+
+    '''
+    Minimal CameraBackend test double whose configure() returns a
+    DIFFERENT exposure_us than it was given -- simulating what a real
+    auto-exposure backend does (the converged value differs from the
+    ignored nominal request). SyntheticBackend can't exercise this case
+    itself, since it always echoes back exactly what it was passed.
+    '''
+
+    def __init__(self, applied_exposure_us: float):
+        self._applied_exposure_us = applied_exposure_us
+
+    def connect(self) -> None:
+        pass
+
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> float:
+        return self._applied_exposure_us
+
+    def grab_one(self, timeout_ms: int) -> np.ndarray:
+        raise CameraTimeoutError(timeout_ms)
+
+    def close(self) -> None:
+        pass
+
+
+class TestConfigureReturnValue:
+
+    '''
+    CameraBackend.configure() returns the actually-applied exposure_us
+    (see backends.py's docstring on why) -- these checks are the
+    hardware-independent half of that contract; TestPylonBackendOnly's
+    test_manual_exposure_actually_applied_on_device/
+    test_auto_exposure_converges cover the real-hardware half.
+    '''
+
+    def test_synthetic_backend_echoes_exposure_us_back(self):
+        backend = SyntheticBackend(seed=FIXTURE_SEED)
+        backend.connect()
+        returned = backend.configure(
+            exposure_us=FIXTURE_EXPOSURE_US,
+            gain_db=FIXTURE_GAIN_DB,
+            pixel_format=FIXTURE_PIXEL_FORMAT,
+        )
+        assert returned == FIXTURE_EXPOSURE_US
+
+    def test_camera_stream_start_adopts_backends_applied_exposure(self):
+        # CameraStream.exposure_us must end up as whatever configure()
+        # reports was actually applied, not the value passed at
+        # construction -- the only way to verify this without hardware is
+        # a backend that deliberately returns something different.
+        applied_exposure_us = FIXTURE_EXPOSURE_US * 3
+        stream = CameraStream(
+            exposure_us=FIXTURE_EXPOSURE_US,
+            gain_db=FIXTURE_GAIN_DB,
+            pixel_format=FIXTURE_PIXEL_FORMAT,
+            timeout_ms=TEST_GRAB_TIMEOUT_MS,
+            backend=_EchoDifferentExposureBackend(applied_exposure_us),
+        )
+        stream.start()
+        try:
+            assert stream.exposure_us == applied_exposure_us
+        finally:
+            stream.stop()
+
+
 class TestPylonBackendOnly:
     """
     Real-hardware-specific checks: device discovery, whether SDK calls
@@ -622,7 +689,7 @@ class TestPylonBackendOnly:
         backend = PylonBackend(serial_number=SERIAL_NUMBER, auto_exposure=False)
         backend.connect()
         try:
-            backend.configure(
+            returned_exposure = backend.configure(
                 exposure_us=FIXTURE_EXPOSURE_US,
                 gain_db=FIXTURE_GAIN_DB,
                 pixel_format=FIXTURE_PIXEL_FORMAT,
@@ -630,6 +697,9 @@ class TestPylonBackendOnly:
             assert backend._camera is not None
             actual_exposure = backend._camera.ExposureTime.GetValue()
             assert actual_exposure == pytest.approx(FIXTURE_EXPOSURE_US, rel=EXPOSURE_TOLERANCE_REL)
+            # configure()'s return value must match what was actually
+            # applied, not just echo the requested exposure_us back blindly.
+            assert returned_exposure == pytest.approx(actual_exposure)
         finally:
             backend.close()
 
@@ -647,14 +717,18 @@ class TestPylonBackendOnly:
         )
         backend.connect()
         try:
-            backend.configure(
+            returned_exposure = backend.configure(
                 exposure_us=FIXTURE_EXPOSURE_US,  # ignored when auto_exposure=True
                 gain_db=FIXTURE_GAIN_DB,
                 pixel_format=FIXTURE_PIXEL_FORMAT,
             )
             assert backend._camera is not None
             assert backend._camera.ExposureAuto.GetValue() == "Off"
-            assert backend._camera.ExposureTime.GetValue() > 0
+            actual_exposure = backend._camera.ExposureTime.GetValue()
+            assert actual_exposure > 0
+            # The whole point of auto-exposure: the returned value is the
+            # real converged exposure, not the ignored nominal exposure_us.
+            assert returned_exposure == pytest.approx(actual_exposure)
         finally:
             backend.close()
 

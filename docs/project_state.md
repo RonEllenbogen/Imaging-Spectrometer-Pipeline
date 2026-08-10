@@ -396,6 +396,8 @@ Built as `src/pipeline/cli/calibration.py` (+ minimal `__init__.py`), a `python 
 physical-setup phases — block the beam, then set up uniform illumination — mirroring why
 `sensor/workflow.py`'s flat-field functions are split the way they are), `bad-pixel-map` (loads a
 flat-field artifact and derives the mask; no camera involved, matching `build_bad_pixel_map()` itself),
+`spatial` (sets or reports the scale factor via `calibration/spatial/`'s `save_scale_factor()`/
+`load_scale_factor()` — no camera involved either; added later than the other four, see below),
 `conversion-gain` (`--exposure-min-us`/`--exposure-max-us`/`--n-levels` are required CLI arguments with
 no defaults, matching the caller-supplied-not-auto-probed decision in §6), and a bonus `noise-model`
 subcommand that loads a saved baseline + conversion-gain artifact and prints the `SensorNoiseModel` they'd
@@ -414,8 +416,45 @@ Four minor issues found (docstring quote-style convention, a missing blank line 
 still listed — and `resolve_artifact_path()` silently dropping a relative path's subdirectory when
 combined with `--output-dir`) — all fixed in a follow-up pass and re-verified independently the same way.
 
+**Exposure/gain audit, ahead of real lab use.** A later audit (prompted by a real calibration session
+being imminent) found two real gaps, both fixed: no CLI coverage at all for the spatial scale factor
+(added as the `spatial` subcommand above), and no way to override `exposure_us` per invocation — every
+camera-touching subcommand silently used `configs/default.yaml`'s fixed `camera.exposure_time`. Fixed by
+adding a mutually-exclusive `--auto-exposure`/`--exposure-us` pair to `baseline`/`flat-field`
+(`conversion-gain` deliberately excluded — it already sweeps its own exposure range, a fixed override
+wouldn't mean anything there); `build_camera_stream()` gained matching `exposure_us`/`auto_exposure`
+parameters, both optional, defaulting to the pre-existing config-driven behavior when omitted (no change
+for existing usage that doesn't pass either flag). Everything else — every call from `cli/calibration.py`
+into `calibration/sensor/workflow.py` — was checked param-for-param against that module's real signatures
+and found to match exactly; no other drift found.
+
+**`--auto-exposure` required fixing real acquisition-layer gaps first, not just adding a flag.**
+`PylonBackend._converge_auto_exposure()` (genuine pypylon `ExposureAuto="Once"` GenICam calls) already
+existed but was fully disconnected — nothing ever constructed `PylonBackend(auto_exposure=True)`, and
+`configs/default.yaml`'s own `auto_exposure` field was read only by a standalone bring-up script
+(`scripts/camera_testing.py`), never by the pipeline package itself. Fixed: `CameraStream` gained
+`auto_exposure`/`auto_timeout_ms` constructor parameters, threaded to `PylonBackend`'s construction.
+Separately, and just as important: nothing read back the real converged exposure value after
+auto-exposure finished, which would have left every captured frame's `FrameData.exposure_us` (and any
+`CalibrationRecord` built from it) silently wrong whenever auto-exposure was actually used.
+`CameraBackend.configure()`'s contract changed to *return* the applied exposure (µs) —
+`PylonBackend` reads back `ExposureTime.GetValue()` after convergence; the manual path and
+`SyntheticBackend` both just echo back what they were given — and `CameraStream.start()` now adopts that
+return value into `self.exposure_us` before the grab thread starts, so every frame afterward carries the
+true applied exposure regardless of which path configured it.
+
+`build_camera_stream()`'s `--gain-db` stays a required CLI flag in both auto and manual exposure modes —
+deliberately no silent default, unlike the GUI's own "Auto" preset (§5), which is a convenience default
+for a different, less explicit context.
+
+`tests/test_cli.py` (new) covers argument parsing for every subcommand (including the mutual-exclusion
+rule on `baseline`/`flat-field`'s new flags, and confirming `conversion-gain` does NOT accept
+`--exposure-us`) — the CLI previously had no dedicated test file at all; the "argparse-tested" status in
+this section's own history was verified manually via `--help`, not via committed tests.
+
 No hardware-connected code path has actually been exercised against a real camera yet — everything above
-was verified via imports, argparse `--help`, and the existing synthetic-only test suite.
+was verified via imports, argparse `--help`, the CLI's own new test file, and the existing synthetic-only
+test suite.
 
 ---
 
@@ -682,6 +721,13 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
 - **GUI: fixed (non-responsive) layout across all pages.** Currently the calibration screen and live
   view both reflow on window resize (stretch factors, expanding layouts) — needs a pass to make every
   page hold a fixed layout tuned for its default window size regardless of resizing. See §5.
+- **Input validation pass**, GUI and CLI both -- not yet done anywhere. Numeric
+  fields (exposure_us, gain_db, scale factor, ROI bounds once built, etc.) and
+  CLI arguments currently rely on Qt's own spin-box range clamping or accept
+  whatever argparse's type= coercion allows, with no deliberate validation
+  layer of this codebase's own (rejecting nonsensical combinations, clearer
+  error messages, etc.). Noted for a future pass once more of the real
+  input surfaces (dialogs, CLI flags) exist to validate.
 - **GUI live view: manual ROI entry.** Add fields on the live-view screen for the user to manually enter
   min/max bounds on both axes (spatial ROI rows, spectral-column signal-threshold range) based on what
   they see in the live feed, overriding the automatic mechanisms currently in place

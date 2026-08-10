@@ -47,6 +47,8 @@ class CameraStream:
         backend: CameraBackend | None = None,
         serial_number: str | None = None,
         max_consecutive_timeouts: int = DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
+        auto_exposure: bool = False,
+        auto_timeout_ms: int = 5000,
     ):
 
         '''
@@ -54,6 +56,9 @@ class CameraStream:
         ----------
         exposure_us
             Exposure time in microseconds, passed to backend.configure().
+            Ignored (but still required) when auto_exposure is True -- the
+            real converged value is read back from configure()'s return
+            and takes over as self.exposure_us instead (see start()).
         gain_db
             Sensor gain in decibels, passed to backend.configure().
         pixel_format
@@ -66,6 +71,16 @@ class CameraStream:
         max_consecutive_timeouts
             Number of consecutive CameraTimeoutErrors to tolerate before
             _run() treats the stream as fatally broken and exits.
+        auto_exposure
+            If True and backend is None (real PylonBackend construction),
+            configure() runs a one-time ExposureAuto convergence instead of
+            setting exposure_us directly -- see PylonBackend. Has no effect
+            if an explicit backend (e.g. SyntheticBackend) is supplied;
+            pass auto_exposure directly to that backend's own constructor
+            instead, if it supports the concept.
+        auto_timeout_ms
+            Timeout, per grab, while waiting for auto-exposure to converge.
+            Only relevant when auto_exposure is True and backend is None.
         '''
 
         self.exposure_us = exposure_us
@@ -78,7 +93,11 @@ class CameraStream:
         if backend is None:
             if serial_number is None:
                 raise ValueError("serial_number is required when backend is not provided")
-            backend = PylonBackend(serial_number=serial_number)
+            backend = PylonBackend(
+                serial_number=serial_number,
+                auto_exposure=auto_exposure,
+                auto_timeout=auto_timeout_ms,
+            )
         self._backend = backend
 
         # Threading machinery -- no thread exists until start() creates one
@@ -104,6 +123,13 @@ class CameraStream:
         Connects the backend, configures it, and starts the background
         grab thread. Blocks until connected and configured -- does NOT
         wait for a first frame to arrive. A no-op if already running.
+
+        self.exposure_us is updated to whatever configure() reports was
+        actually applied -- identical to the value passed in for a fixed
+        exposure, but the real converged value when auto_exposure is on
+        (see CameraBackend.configure()'s docstring) -- so every FrameData
+        grabbed by _run() afterward carries the true applied exposure, not
+        a stale nominal one.
         '''
 
         if self.is_running:
@@ -114,7 +140,9 @@ class CameraStream:
         self._backend.connect()
 
         try:
-            self._backend.configure(self.exposure_us, self.gain_db, self.pixel_format)
+            self.exposure_us = self._backend.configure(
+                self.exposure_us, self.gain_db, self.pixel_format
+            )
         except CameraConfigurationError:
             # Connected but misconfigured -- close before re-raising so the
             # device isn't left open, blocking the next start() attempt

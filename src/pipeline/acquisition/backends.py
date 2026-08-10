@@ -28,7 +28,7 @@ class CameraBackend(Protocol):
 
         ...
 
-    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> None:
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> float:
 
         '''
         Apply acquisition settings before grabbing begins.
@@ -36,13 +36,25 @@ class CameraBackend(Protocol):
         Parameters
         ----------
         exposure_us
-            The exposure time in microseconds to set on the camera.
+            The exposure time in microseconds to set on the camera. Ignored
+            by a backend running auto-exposure convergence -- see the
+            return value in that case.
         gain_db
             The gain in decibels to set on the camera.
         pixel_format
             The pixel format to set on the camera. Must be one of the keys in PIXEL_FORMAT_DTYPES.
+
+        Returns
+        -------
+        float
+            The exposure time actually applied, in microseconds -- equal to
+            the passed-in exposure_us for a fixed-exposure backend, but the
+            real converged value for a backend running auto-exposure
+            (PylonBackend with auto_exposure=True). Callers (CameraStream)
+            must use this, not the value they passed in, to tag captured
+            frames with the true applied exposure.
         '''
-        
+
         ...
 
     def grab_one(self, timeout_ms: int) -> np.ndarray:
@@ -150,7 +162,7 @@ class PylonBackend:
                 f"failed to open device with serial number {self.serial_number!r}: {e}"
             ) from e
 
-    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> None:
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> float:
 
         '''
         Applies pixel format and gain unconditionally, then either runs a
@@ -172,7 +184,12 @@ class PylonBackend:
 
         Returns
         -------
-        None
+        float
+            The exposure time actually applied, in microseconds --
+            exposure_us unchanged in the manual path, or the real
+            converged value (read back from the camera) in the
+            auto-exposure path. See CameraBackend.configure()'s docstring
+            for why callers must use this over the passed-in exposure_us.
 
         Raises
         ------
@@ -202,7 +219,7 @@ class PylonBackend:
             ) from e
 
         if self.auto_exposure:
-            self._converge_auto_exposure(self._camera)
+            applied_exposure_us = self._converge_auto_exposure(self._camera)
         else:
             try:
                 self._camera.ExposureAuto.SetValue("Off")
@@ -210,10 +227,12 @@ class PylonBackend:
             except genicam.GenericException as e:
                 raise CameraConfigurationError("exposure_us", exposure_us, str(e)) from e
             self._camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            applied_exposure_us = exposure_us
 
         self._configured = True
+        return applied_exposure_us
 
-    def _converge_auto_exposure(self, camera: pylon.InstantCamera) -> None:
+    def _converge_auto_exposure(self, camera: pylon.InstantCamera) -> float:
 
         '''
         Runs ExposureAuto="Once" to convergence, matching the working
@@ -221,13 +240,18 @@ class PylonBackend:
         auto-exposure algorithm and deliberately leaves grabbing running
         afterward -- unlike a one-shot script, this needs to feed
         straight into a continuous grab_one() loop, not stop and restart.
+        Reads back the converged exposure time before returning, so the
+        caller (configure()) can report the real applied value rather
+        than the nominal exposure_us it was asked for but never used.
 
         Private to PylonBackend -- not part of the shared CameraBackend
         contract, since SyntheticBackend has no equivalent concept.
 
         Returns
         -------
-        None
+        float
+            The converged exposure time, in microseconds, read directly
+            from the camera via ExposureTime.GetValue().
 
         Raises
         ------
@@ -244,6 +268,7 @@ class PylonBackend:
                     self.auto_timeout, pylon.TimeoutHandling_ThrowException
                 )
                 warm_up_grab.Release()
+            return camera.ExposureTime.GetValue()
         except genicam.TimeoutException as e:
             raise CameraConfigurationError(
                 "auto_exposure", True, f"did not converge within {self.auto_timeout}ms"
@@ -361,7 +386,7 @@ class SyntheticBackend:
 
         self._connected = True
 
-    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> None:
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str) -> float:
 
         '''
         Pretend to apply acquisition settings before grabbing begins.
@@ -374,6 +399,14 @@ class SyntheticBackend:
             The gain in decibels to set on the camera.
         pixel_format
             The pixel format to set on the camera. Must be one of the keys in PIXEL_FORMAT_DTYPES.
+
+        Returns
+        -------
+        float
+            exposure_us, unchanged -- SyntheticBackend has no auto-exposure
+            concept (see CameraBackend.configure()'s docstring for why this
+            return value exists at all), so it always echoes back what it
+            was given.
         '''
 
         if pixel_format not in PIXEL_FORMAT_INFO:
@@ -384,6 +417,7 @@ class SyntheticBackend:
         self._dtype = dtype_for_pixel_format(pixel_format)
         self._max_value = max_value_for_pixel_format(pixel_format)
         # Exposure_us / gain_db accepted for interface compatibility, not currently used to scale the synthetic signal.
+        return exposure_us
 
     def grab_one(self, timeout_ms: int) -> np.ndarray:
 
