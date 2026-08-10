@@ -375,7 +375,7 @@ class CreatePage(QWidget):
         self.baseline_card = _CalibrationTypeCard(
             "Baseline",
             "Compute a baseline frame for background + dark"
-            "noise correction.",
+            " noise correction.",
             "Configure...",
             COLOR_ACCENT,
         )
@@ -394,7 +394,7 @@ class CreatePage(QWidget):
         self.conversion_gain_card = _CalibrationTypeCard(
             "Conversion Gain",
             "Compute the sensor's conversion gain for uncertainty"
-            "calculations.",
+            " calculations.",
             "Configure...",
             COLOR_ACCENT,
         )
@@ -411,8 +411,8 @@ class CreatePage(QWidget):
         self.spatial_card = _CalibrationTypeCard(
             "Spatial",
             "Input an externally calibrated value for the Imaging"
-            "Spectrometer's spatial magnification, or use the"
-            "theoretical default.",
+            " Spectrometer's spatial magnification, or use the"
+            " theoretical default.",
             "Enter Value...",
             COLOR_ACCENT_ALT,
         )
