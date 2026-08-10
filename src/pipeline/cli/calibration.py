@@ -10,6 +10,7 @@ connected Basler camera for subcommands that acquire frames.
 
 import argparse
 import logging
+import time
 from pathlib import Path
 
 from pipeline.acquisition import CameraStream
@@ -20,17 +21,25 @@ from pipeline.calibration.sensor import (
     capture_illuminated_frames,
     finish_flat_field_calibration,
     load_baseline,
+    load_bad_pixel_map,
     load_conversion_gain,
     load_flat_field,
     run_baseline_calibration,
     run_conversion_gain_calibration,
     save_bad_pixel_map,
 )
+from pipeline.calibration.shared import CalibrationRecord
 from pipeline.calibration.spatial import (
     ScaleFactorPositionCalibration,
     load_scale_factor,
     save_scale_factor,
 )
+from pipeline.calibration.spectral import (
+    build_manual_spectral_calibration,
+    run_spectral_calibration,
+    save_spectral_calibration,
+)
+from pipeline.preprocessing import CalibrationSet
 from pipeline.utils.helpers import load_config
 
 # Constants
@@ -47,7 +56,17 @@ DEFAULT_CONVERSION_GAIN_FILENAME = "conversion_gain.npz"
 # its siblings' convention; gui/calibration_screen.py's own
 # _DEFAULT_SCALE_FACTOR_FILENAME constant predates this and is left as-is.
 DEFAULT_SCALE_FACTOR_FILENAME = "scale_factor.npz"
+DEFAULT_SPECTRAL_FILENAME = "spectral.npz"
 DEFAULT_N_FRAMES = 50
+DEFAULT_SPECTRAL_DEGREE = 1
+
+# A manual spectral entry captures no frame at all, but CalibrationRecord
+# requires a positive exposure_us and a gain_db regardless (see
+# calibration/shared/metadata.py) -- these are "not applicable"
+# placeholders, same convention as source_frame_count=1 for a manual
+# entry (see build_manual_spectral_calibration()'s own docstring).
+MANUAL_SPECTRAL_EXPOSURE_US = 1.0
+MANUAL_SPECTRAL_GAIN_DB = 0.0
 
 # Classes
 
@@ -302,6 +321,71 @@ def _cmd_noise_model(args: argparse.Namespace) -> None:
     print(repr(model))
 
 
+def _cmd_spectral_capture(args: argparse.Namespace) -> None:
+    path = resolve_artifact_path(args.output_dir, args.path, DEFAULT_SPECTRAL_FILENAME)
+    if args.baseline is None:
+        baseline_path = resolve_artifact_path(
+            args.output_dir, None, DEFAULT_BASELINE_FILENAME
+        )
+    else:
+        baseline_path = Path(args.baseline)
+    if args.flat_field is None:
+        flat_field_path = resolve_artifact_path(
+            args.output_dir, None, DEFAULT_FLAT_FIELD_FILENAME
+        )
+    else:
+        flat_field_path = Path(args.flat_field)
+    if args.bad_pixel_map is None:
+        bad_pixel_map_path = resolve_artifact_path(
+            args.output_dir, None, DEFAULT_BAD_PIXEL_MAP_FILENAME
+        )
+    else:
+        bad_pixel_map_path = Path(args.bad_pixel_map)
+
+    baseline_result, baseline_record = load_baseline(baseline_path)
+    flat_field, flat_field_record = load_flat_field(flat_field_path)
+    bad_pixel_mask, _ = load_bad_pixel_map(bad_pixel_map_path)
+    sensor_calibration = CalibrationSet(
+        baseline=baseline_result.baseline,
+        baseline_record=baseline_record,
+        flat_field=flat_field,
+        flat_field_record=flat_field_record,
+        bad_pixel_mask=bad_pixel_mask,
+        background_sigma=baseline_result.background_sigma,
+    )
+
+    stream = build_camera_stream(
+        args.gain_db, exposure_us=args.exposure_us, auto_exposure=args.auto_exposure
+    )
+    stream.start()
+    try:
+        run_spectral_calibration(
+            stream, args.n_frames, sensor_calibration, path, degree=args.degree,
+        )
+    finally:
+        if stream.is_running:
+            stream.stop()
+
+
+def _cmd_spectral_manual(args: argparse.Namespace) -> None:
+    if len(args.coefficients) != len(args.coefficient_sigma):
+        args.parser.error(
+            "--coefficients and --coefficient-sigma must have the same length "
+            f"(got {len(args.coefficients)} and {len(args.coefficient_sigma)})"
+        )
+    path = resolve_artifact_path(args.output_dir, args.path, DEFAULT_SPECTRAL_FILENAME)
+    record = CalibrationRecord(
+        exposure_us=MANUAL_SPECTRAL_EXPOSURE_US,
+        gain_db=MANUAL_SPECTRAL_GAIN_DB,
+        timestamp=time.time(),
+        source_frame_count=1,
+    )
+    result = build_manual_spectral_calibration(
+        args.coefficients, args.coefficient_sigma, record
+    )
+    save_spectral_calibration(path, result)
+
+
 def build_parser() -> argparse.ArgumentParser:
 
     '''
@@ -445,6 +529,79 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     noise_model_parser.set_defaults(func=_cmd_noise_model)
+
+    spectral_capture_parser = subparsers.add_parser(
+        "spectral-capture",
+        help="Acquire lamp frames and fit a pixel->wavelength_nm calibration.",
+    )
+    _add_gain_db(spectral_capture_parser)
+    _add_exposure_args(spectral_capture_parser)
+    _add_output_args(spectral_capture_parser)
+    spectral_capture_parser.add_argument(
+        "--n-frames",
+        type=int,
+        default=DEFAULT_N_FRAMES,
+        dest="n_frames",
+        help=f"Number of lamp frames to average (default: {DEFAULT_N_FRAMES}).",
+    )
+    spectral_capture_parser.add_argument(
+        "--degree",
+        type=int,
+        default=DEFAULT_SPECTRAL_DEGREE,
+        help=f"Polynomial degree for the pixel->wavelength_nm fit (default: {DEFAULT_SPECTRAL_DEGREE}).",
+    )
+    spectral_capture_parser.add_argument(
+        "--baseline",
+        default=None,
+        help=(
+            f"Baseline artifact to preprocess lamp frames with (default: "
+            f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_BASELINE_FILENAME})."
+        ),
+    )
+    spectral_capture_parser.add_argument(
+        "--flat-field",
+        default=None,
+        dest="flat_field",
+        help=(
+            f"Flat-field artifact to preprocess lamp frames with (default: "
+            f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_FLAT_FIELD_FILENAME})."
+        ),
+    )
+    spectral_capture_parser.add_argument(
+        "--bad-pixel-map",
+        default=None,
+        dest="bad_pixel_map",
+        help=(
+            f"Bad-pixel-map artifact to preprocess lamp frames with (default: "
+            f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_BAD_PIXEL_MAP_FILENAME})."
+        ),
+    )
+    spectral_capture_parser.set_defaults(func=_cmd_spectral_capture)
+
+    spectral_manual_parser = subparsers.add_parser(
+        "spectral-manual",
+        help="Enter a pixel->wavelength_nm calibration by hand, bypassing lamp capture.",
+    )
+    spectral_manual_parser.add_argument(
+        "--coefficients",
+        type=float,
+        nargs="+",
+        required=True,
+        help=(
+            "Ascending-order pixel->wavelength_nm polynomial coefficients "
+            "(c0 c1 c2 ...; wavelength_nm = c0 + c1*pixel + c2*pixel^2 + ...)."
+        ),
+    )
+    spectral_manual_parser.add_argument(
+        "--coefficient-sigma",
+        type=float,
+        nargs="+",
+        required=True,
+        dest="coefficient_sigma",
+        help="1-sigma uncertainty for each coefficient, same length/order as --coefficients.",
+    )
+    _add_output_args(spectral_manual_parser)
+    spectral_manual_parser.set_defaults(func=_cmd_spectral_manual, parser=spectral_manual_parser)
 
     return parser
 

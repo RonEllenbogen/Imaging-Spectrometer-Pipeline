@@ -12,9 +12,13 @@ mutual-exclusion rules it's supposed to have.
 # Imports
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from pipeline.cli import calibration as cli
+from pipeline.calibration.spectral import load_spectral_calibration
 from pipeline.cli.calibration import (
     DEFAULT_ARTIFACT_DIR,
     build_camera_stream,
@@ -198,3 +202,221 @@ class TestArgumentParsing:
     def test_unknown_command_exits(self):
         with pytest.raises(SystemExit):
             self.parser.parse_args(["not-a-real-command"])
+
+
+# ---------------------------------------------------------------------------
+# spectral-capture / spectral-manual subcommands
+# ---------------------------------------------------------------------------
+#
+# Deliberately does not touch a real camera anywhere -- spectral-capture's
+# CameraStream/run_spectral_calibration wiring is exercised only through
+# monkeypatched stand-ins, the same scope every other camera-touching
+# subcommand in this module (baseline, flat-field, conversion-gain) is
+# left untested against real hardware. spectral-manual touches no camera
+# at all, so it's exercised for real (write + load an actual artifact).
+
+
+class TestSpectralManualArgumentParsing:
+
+    def test_parses_coefficients_and_sigma(self, monkeypatch, tmp_path):
+        captured = {}
+        monkeypatch.setattr(cli, "_cmd_spectral_manual", lambda args: captured.update(vars(args)))
+
+        cli.main([
+            "spectral-manual",
+            "--coefficients", "400.0", "0.5",
+            "--coefficient-sigma", "0.1", "0.01",
+            "--path", str(tmp_path / "spectral.npz"),
+        ])
+
+        assert captured["coefficients"] == [400.0, 0.5]
+        assert captured["coefficient_sigma"] == [0.1, 0.01]
+        assert captured["path"] == str(tmp_path / "spectral.npz")
+
+    def test_coefficients_required(self):
+        with pytest.raises(SystemExit):
+            cli.main(["spectral-manual", "--coefficient-sigma", "0.1", "0.01"])
+
+    def test_coefficient_sigma_required(self):
+        with pytest.raises(SystemExit):
+            cli.main(["spectral-manual", "--coefficients", "400.0", "0.5"])
+
+    def test_mismatched_lengths_raises_argparse_error(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main([
+                "spectral-manual",
+                "--coefficients", "400.0", "0.5",
+                "--coefficient-sigma", "0.1",
+            ])
+
+        assert exc_info.value.code == 2
+        assert "same length" in capsys.readouterr().err
+
+
+class TestSpectralManualEndToEnd:
+
+    '''
+    Manual mode touches no camera at all, so -- unlike spectral-capture --
+    it can be exercised for real: build args via the CLI's own parser,
+    run the resulting func(args), and confirm a real spectral.npz
+    artifact is written and loads back correctly.
+    '''
+
+    def test_writes_and_loads_artifact(self, tmp_path):
+        path = tmp_path / "spectral.npz"
+
+        cli.main([
+            "spectral-manual",
+            "--coefficients", "400.0", "0.5",
+            "--coefficient-sigma", "0.2", "0.01",
+            "--path", str(path),
+        ])
+
+        assert path.exists()
+        loaded = load_spectral_calibration(path)
+        assert loaded.fit.degree == 1
+        assert np.allclose(loaded.fit.coefficients, [400.0, 0.5])
+        assert np.allclose(loaded.fit.coefficient_sigma, [0.2, 0.01])
+        assert loaded.record.source_frame_count == 1
+        assert np.isclose(loaded.wavelength_nm(np.array([0.0]))[0], 400.0)
+
+    def test_output_dir_relative_path(self, tmp_path):
+        cli.main([
+            "spectral-manual",
+            "--coefficients", "400.0", "0.5",
+            "--coefficient-sigma", "0.2", "0.01",
+            "--output-dir", str(tmp_path),
+        ])
+
+        assert (tmp_path / cli.DEFAULT_SPECTRAL_FILENAME).exists()
+
+
+class TestSpectralCaptureArgumentParsing:
+
+    def test_parses_arguments(self, monkeypatch, tmp_path):
+        captured = {}
+        monkeypatch.setattr(cli, "_cmd_spectral_capture", lambda args: captured.update(vars(args)))
+
+        cli.main([
+            "spectral-capture",
+            "--gain-db", "2.5",
+            "--n-frames", "20",
+            "--degree", "2",
+            "--baseline", "custom_baseline.npz",
+            "--flat-field", "custom_flat.npz",
+            "--bad-pixel-map", "custom_mask.npz",
+            "--path", str(tmp_path / "spectral.npz"),
+        ])
+
+        assert captured["gain_db"] == 2.5
+        assert captured["n_frames"] == 20
+        assert captured["degree"] == 2
+        assert captured["baseline"] == "custom_baseline.npz"
+        assert captured["flat_field"] == "custom_flat.npz"
+        assert captured["bad_pixel_map"] == "custom_mask.npz"
+
+    def test_defaults(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(cli, "_cmd_spectral_capture", lambda args: captured.update(vars(args)))
+
+        cli.main(["spectral-capture", "--gain-db", "0.0"])
+
+        assert captured["n_frames"] == cli.DEFAULT_N_FRAMES
+        assert captured["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
+        assert captured["baseline"] is None
+        assert captured["flat_field"] is None
+        assert captured["bad_pixel_map"] is None
+        assert captured["path"] is None
+        assert captured["auto_exposure"] is False
+        assert captured["exposure_us"] is None
+
+    def test_gain_db_required(self):
+        with pytest.raises(SystemExit):
+            cli.main(["spectral-capture"])
+
+    def test_auto_and_manual_exposure_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            cli.main([
+                "spectral-capture", "--gain-db", "1.0",
+                "--auto-exposure", "--exposure-us", "2000",
+            ])
+
+
+class TestSpectralCapturePathResolution:
+
+    '''
+    Exercises _cmd_spectral_capture()'s own default-path-resolution logic
+    for real, with every collaborator that would otherwise touch a camera
+    or the filesystem replaced by a recording stand-in.
+    '''
+
+    def _patch_collaborators(self, monkeypatch, recorded):
+
+        def fake_load_baseline(path):
+            recorded["baseline_path"] = path
+            return SimpleNamespace(baseline=np.zeros((2, 2)), background_sigma=1.0), "baseline_record"
+
+        def fake_load_flat_field(path):
+            recorded["flat_field_path"] = path
+            return np.ones((2, 2)), "flat_field_record"
+
+        def fake_load_bad_pixel_map(path):
+            recorded["bad_pixel_map_path"] = path
+            return np.zeros((2, 2), dtype=bool), "bad_pixel_record"
+
+        class FakeStream:
+            is_running = False
+
+            def start(self):
+                recorded["stream_started"] = True
+
+            def stop(self):
+                recorded["stream_stopped"] = True
+
+        def fake_build_camera_stream(gain_db, *, exposure_us=None, auto_exposure=False, **kwargs):
+            recorded["gain_db"] = gain_db
+            recorded["exposure_us"] = exposure_us
+            recorded["auto_exposure"] = auto_exposure
+            return FakeStream()
+
+        def fake_run_spectral_calibration(stream, n_frames, sensor_calibration, path, degree=1):
+            recorded["n_frames"] = n_frames
+            recorded["degree"] = degree
+            recorded["path"] = path
+            recorded["sensor_calibration"] = sensor_calibration
+
+        monkeypatch.setattr(cli, "load_baseline", fake_load_baseline)
+        monkeypatch.setattr(cli, "load_flat_field", fake_load_flat_field)
+        monkeypatch.setattr(cli, "load_bad_pixel_map", fake_load_bad_pixel_map)
+        monkeypatch.setattr(cli, "build_camera_stream", fake_build_camera_stream)
+        monkeypatch.setattr(cli, "run_spectral_calibration", fake_run_spectral_calibration)
+
+    def test_defaults_input_artifact_paths_under_output_dir(self, monkeypatch, tmp_path):
+        recorded = {}
+        self._patch_collaborators(monkeypatch, recorded)
+
+        cli.main([
+            "spectral-capture", "--gain-db", "1.0", "--output-dir", str(tmp_path),
+        ])
+
+        assert recorded["baseline_path"] == tmp_path / cli.DEFAULT_BASELINE_FILENAME
+        assert recorded["flat_field_path"] == tmp_path / cli.DEFAULT_FLAT_FIELD_FILENAME
+        assert recorded["bad_pixel_map_path"] == tmp_path / cli.DEFAULT_BAD_PIXEL_MAP_FILENAME
+        assert recorded["path"] == tmp_path / cli.DEFAULT_SPECTRAL_FILENAME
+        assert recorded["n_frames"] == cli.DEFAULT_N_FRAMES
+        assert recorded["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
+        assert recorded["sensor_calibration"].background_sigma == 1.0
+
+    def test_explicit_artifact_paths_override_defaults(self, monkeypatch, tmp_path):
+        recorded = {}
+        self._patch_collaborators(monkeypatch, recorded)
+
+        custom_baseline = tmp_path / "my_baseline.npz"
+        cli.main([
+            "spectral-capture", "--gain-db", "1.0",
+            "--baseline", str(custom_baseline),
+        ])
+
+        assert recorded["baseline_path"] == custom_baseline
+        assert recorded["flat_field_path"] == Path(cli.DEFAULT_ARTIFACT_DIR) / cli.DEFAULT_FLAT_FIELD_FILENAME
+        assert recorded["stream_started"] is True
