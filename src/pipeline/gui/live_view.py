@@ -12,6 +12,14 @@ update loop, the skip-counter state machine, and the real per-tick
 computation described in the module design are a follow-up phase. The
 degree selector is present and changes the panel's *displayed* (still
 fake) numbers, but does not trigger any real refit.
+
+The Acquisition Settings side-panel section (exposure_us/gain_db spin
+boxes, pre-filled from the loaded baseline's capture settings) is the
+same kind of skeleton: editing either field runs the real drift-detection
+comparison against calibration_set.baseline_record (and
+conversion_gain_record, if supplied) and can pop a "recalibrate?" prompt,
+but does NOT reconfigure camera_stream -- that's deferred to the same
+future "real camera wiring" phase as the QTimer update loop above.
 '''
 
 # Imports
@@ -20,12 +28,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -35,6 +46,8 @@ from PySide6.QtWidgets import (
 from pipeline.acquisition import CameraStream
 from pipeline.analysis import SensorNoiseModel
 from pipeline.analysis.interfaces import WavelengthAxis
+from pipeline.calibration.sensor import ConversionGainRecord
+from pipeline.calibration.shared import EXPOSURE_MATCH_TOLERANCE_REL, GAIN_MATCH_TOLERANCE_ABS
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
 from pipeline.preprocessing import CalibrationSet
 
@@ -109,9 +122,19 @@ class LiveViewWidget(QWidget):
         A CameraStream the caller owns the lifecycle of (start/stop are
         not this widget's responsibility). Not polled in this phase --
         stored for the follow-up wiring phase's QTimer loop.
+    conversion_gain_record
+        ConversionGainRecord (gain_db + timing/sweep metadata, no
+        exposure_us -- conversion gain sweeps exposure by design) tagging
+        the loaded conversion-gain artifact, or None if no conversion-gain
+        artifact was loaded. When supplied, the Acquisition Settings
+        panel's gain_db field is drift-checked against it in addition to
+        calibration_set.baseline_record.gain_db, since the two artifacts
+        can drift independently of each other.
     parent
         Standard Qt parent widget.
     '''
+
+    recalibration_requested = Signal(str)
 
     def __init__(
         self,
@@ -120,6 +143,7 @@ class LiveViewWidget(QWidget):
         position_calibration: ScaleFactorPositionCalibration,
         wavelength_axis: WavelengthAxis | None,
         camera_stream: CameraStream,
+        conversion_gain_record: ConversionGainRecord | None = None,
         parent: QWidget | None = None,
     ) -> None:
 
@@ -130,6 +154,7 @@ class LiveViewWidget(QWidget):
         self._position_calibration = position_calibration
         self._wavelength_axis = wavelength_axis
         self._camera_stream = camera_stream
+        self._conversion_gain_record = conversion_gain_record
 
         self._current_degree = DEFAULT_DEGREE
 
@@ -239,6 +264,12 @@ class LiveViewWidget(QWidget):
         panel.setFixedWidth(SIDE_PANEL_WIDTH)
         layout = QVBoxLayout(panel)
 
+        # Acquisition Settings sits above the fit-related groups: it
+        # describes what the *camera* is doing (and whether that still
+        # matches what the loaded calibrations were built under), which
+        # is a precondition for trusting the fit diagnostics below it,
+        # not a peer of them.
+        layout.addWidget(self._build_acquisition_settings_group())
         layout.addWidget(self._build_degree_selector_group())
         layout.addWidget(self._build_fit_diagnostics_group())
         layout.addStretch(1)
@@ -254,6 +285,121 @@ class LiveViewWidget(QWidget):
         layout.addWidget(self._extended_measurement_button)
 
         return panel
+
+    def _build_acquisition_settings_group(self) -> QGroupBox:
+
+        '''
+        Exposure/gain display+entry, pre-filled from
+        calibration_set.baseline_record. SKELETON (see module docstring):
+        editing either field never touches camera_stream -- it only
+        drives the drift check below, warning when the entered value
+        diverges from what the loaded calibrations were actually captured
+        under.
+        '''
+
+        group = QGroupBox("Acquisition Settings")
+        group.setFont(load_bundled_font(10))
+        group.setToolTip(
+            "Skeleton only -- does not reconfigure the camera. Pre-filled "
+            "from the loaded baseline's capture settings; drifting past "
+            "tolerance from the loaded calibrations prompts a "
+            "recalibration check."
+        )
+        form = QFormLayout(group)
+
+        baseline_record = self._calibration_set.baseline_record
+
+        self._exposure_spin = QDoubleSpinBox()
+        self._exposure_spin.setFont(load_bundled_font(10))
+        self._exposure_spin.setRange(1.0, 1_000_000.0)
+        self._exposure_spin.setDecimals(1)
+        self._exposure_spin.setSuffix(" us")
+        self._exposure_spin.setValue(baseline_record.exposure_us)
+        self._exposure_spin.valueChanged.connect(self._on_exposure_changed)
+        form.addRow("Exposure:", self._exposure_spin)
+
+        self._gain_spin = QDoubleSpinBox()
+        self._gain_spin.setFont(load_bundled_font(10))
+        self._gain_spin.setRange(0.0, 48.0)
+        self._gain_spin.setSingleStep(0.1)
+        self._gain_spin.setSuffix(" dB")
+        self._gain_spin.setValue(baseline_record.gain_db)
+        self._gain_spin.valueChanged.connect(self._on_gain_changed)
+        form.addRow("Gain:", self._gain_spin)
+
+        return group
+
+    # -- acquisition settings drift detection ----------------------------
+
+    def _on_exposure_changed(self, exposure_us: float) -> None:
+
+        baseline_exposure_us = self._calibration_set.baseline_record.exposure_us
+        if not exposure_has_drifted(exposure_us, baseline_exposure_us):
+            return
+
+        self._prompt_recalibration(
+            artifact_type="baseline",
+            message=(
+                f"Exposure has changed from {baseline_exposure_us:.1f} us "
+                f"(baseline) to {exposure_us:.1f} us. Recalibrate baseline?"
+            ),
+        )
+
+    def _on_gain_changed(self, gain_db: float) -> None:
+
+        # Gain is checked against baseline and (if loaded) conversion-gain
+        # independently, since the two artifacts can drift apart from one
+        # another -- e.g. a re-run baseline at the new gain would clear the
+        # first warning while the conversion-gain artifact is still stale.
+        baseline_gain_db = self._calibration_set.baseline_record.gain_db
+        if gain_has_drifted(gain_db, baseline_gain_db):
+            self._prompt_recalibration(
+                artifact_type="baseline",
+                message=(
+                    f"Gain has changed from {baseline_gain_db:.1f} dB "
+                    f"(baseline) to {gain_db:.1f} dB. Recalibrate baseline?"
+                ),
+            )
+
+        if self._conversion_gain_record is not None:
+            conversion_gain_db = self._conversion_gain_record.gain_db
+            if gain_has_drifted(gain_db, conversion_gain_db):
+                self._prompt_recalibration(
+                    artifact_type="conversion_gain",
+                    message=(
+                        f"Gain has changed from {conversion_gain_db:.1f} dB "
+                        f"(conversion-gain calibration) to {gain_db:.1f} dB. "
+                        f"Recalibrate conversion gain?"
+                    ),
+                )
+
+    def _prompt_recalibration(self, artifact_type: str, message: str) -> None:
+
+        '''
+        Asks the user whether to recalibrate a specific drifted artifact.
+        Emits recalibration_requested(artifact_type) on "Yes" -- nothing
+        in this codebase yet connects to that signal (see its own
+        docstring in the class header), the same not-yet-wired treatment
+        as _extended_measurement_button below.
+
+        Parameters
+        ----------
+        artifact_type
+            Which artifact drifted -- "baseline" or "conversion_gain".
+        message
+            Full prompt text, naming the setting, its captured value, and
+            the newly-entered value.
+        '''
+
+        response = QMessageBox.question(
+            self,
+            "Recalibration Recommended",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if response == QMessageBox.Yes:
+            self.recalibration_requested.emit(artifact_type)
 
     def _build_degree_selector_group(self) -> QGroupBox:
 
@@ -515,10 +661,66 @@ def heatmap_x_extent(
     return float(endpoints[0]), float(endpoints[1])
 
 
+def exposure_has_drifted(current_exposure_us: float, baseline_exposure_us: float) -> bool:
+
+    '''
+    True if current_exposure_us differs from baseline_exposure_us by more
+    than EXPOSURE_MATCH_TOLERANCE_REL -- the exact relative-difference
+    formula calibration/shared/metadata.py's check_settings_match() uses,
+    reused here rather than approximated differently, so the GUI's drift
+    warning and preprocessing's own hard settings-mismatch check agree on
+    what counts as "the same" exposure.
+
+    Parameters
+    ----------
+    current_exposure_us
+        The value currently entered in the Acquisition Settings panel.
+    baseline_exposure_us
+        calibration_set.baseline_record.exposure_us -- what the loaded
+        baseline was actually captured under.
+
+    Returns
+    -------
+    bool
+    '''
+
+    exposure_diff_rel = abs(current_exposure_us - baseline_exposure_us) / baseline_exposure_us
+    return exposure_diff_rel > EXPOSURE_MATCH_TOLERANCE_REL
+
+
+def gain_has_drifted(current_gain_db: float, reference_gain_db: float) -> bool:
+
+    '''
+    True if current_gain_db differs from reference_gain_db by more than
+    GAIN_MATCH_TOLERANCE_ABS -- the exact absolute-difference formula
+    calibration/shared/metadata.py's check_settings_match() uses. Generic
+    over which artifact's gain_db is being compared against (baseline's or
+    conversion_gain_record's), since both are checked with the same
+    tolerance and the same math.
+
+    Parameters
+    ----------
+    current_gain_db
+        The value currently entered in the Acquisition Settings panel.
+    reference_gain_db
+        The captured gain_db to compare against (baseline_record's or
+        conversion_gain_record's).
+
+    Returns
+    -------
+    bool
+    '''
+
+    gain_diff_abs = abs(current_gain_db - reference_gain_db)
+    return gain_diff_abs > GAIN_MATCH_TOLERANCE_ABS
+
+
 __all__ = [
     "LiveViewWidget",
     "wavelength_axis_label",
     "heatmap_x_extent",
+    "exposure_has_drifted",
+    "gain_has_drifted",
     "DEGREE_CHOICES",
     "DEGREE_LABELS",
     "DEFAULT_DEGREE",

@@ -38,9 +38,16 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWidgets import QMessageBox  # noqa: E402
+
 from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
 from pipeline.analysis import SensorNoiseModel  # noqa: E402
-from pipeline.calibration.shared import CalibrationRecord  # noqa: E402
+from pipeline.calibration.sensor import ConversionGainRecord  # noqa: E402
+from pipeline.calibration.shared import (  # noqa: E402
+    CalibrationRecord,
+    EXPOSURE_MATCH_TOLERANCE_REL,
+    GAIN_MATCH_TOLERANCE_ABS,
+)
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 from pipeline.gui.calibration_dialogs import (  # noqa: E402
@@ -58,6 +65,8 @@ from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
     DEGREE_CHOICES,
     LiveViewWidget,
+    exposure_has_drifted,
+    gain_has_drifted,
     heatmap_x_extent,
     wavelength_axis_label,
 )
@@ -307,3 +316,105 @@ class TestLiveViewWidgetSmoke:
         button = widget._extended_measurement_button
         assert button.text() == "Extended Measurement..."
         assert button.receivers("2clicked()") == 0
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- Acquisition Settings / drift-detection pure helpers
+# ---------------------------------------------------------------------------
+
+class TestExposureHasDrifted:
+
+    def test_within_tolerance_is_not_drifted(self):
+        baseline_exposure_us = 2000.0
+        current = baseline_exposure_us * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 0.5)
+        assert not exposure_has_drifted(current, baseline_exposure_us)
+
+    def test_beyond_tolerance_is_drifted(self):
+        baseline_exposure_us = 2000.0
+        current = baseline_exposure_us * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 2)
+        assert exposure_has_drifted(current, baseline_exposure_us)
+
+
+class TestGainHasDrifted:
+
+    def test_within_tolerance_is_not_drifted(self):
+        baseline_gain_db = 10.0
+        current = baseline_gain_db + GAIN_MATCH_TOLERANCE_ABS * 0.5
+        assert not gain_has_drifted(current, baseline_gain_db)
+
+    def test_beyond_tolerance_is_drifted(self):
+        baseline_gain_db = 10.0
+        current = baseline_gain_db + GAIN_MATCH_TOLERANCE_ABS * 2
+        assert gain_has_drifted(current, baseline_gain_db)
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- Acquisition Settings panel (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestAcquisitionSettingsPanel:
+
+    def test_fields_prefilled_from_baseline_record(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        assert widget._exposure_spin.value() == pytest.approx(FIXTURE_EXPOSURE_US)
+        assert widget._gain_spin.value() == pytest.approx(FIXTURE_GAIN_DB)
+
+    def test_recalibration_requested_fires_for_confirmed_exposure_drift(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.question",
+            lambda *args, **kwargs: QMessageBox.Yes,
+        )
+        widget = _make_live_view_widget(qtbot)
+        drifted_exposure_us = FIXTURE_EXPOSURE_US * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 2)
+
+        with qtbot.waitSignal(widget.recalibration_requested, timeout=1000) as blocker:
+            widget._exposure_spin.setValue(drifted_exposure_us)
+
+        assert blocker.args == ["baseline"]
+
+    def test_recalibration_requested_not_fired_when_declined(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.question",
+            lambda *args, **kwargs: QMessageBox.No,
+        )
+        widget = _make_live_view_widget(qtbot)
+        received = []
+        widget.recalibration_requested.connect(received.append)
+        drifted_exposure_us = FIXTURE_EXPOSURE_US * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 2)
+
+        widget._exposure_spin.setValue(drifted_exposure_us)
+
+        assert received == []
+
+    def test_recalibration_requested_fires_conversion_gain_for_isolated_drift(
+        self, qtbot, monkeypatch
+    ):
+        # gain_db is set so it matches baseline_record.gain_db (no baseline
+        # drift) but drifts beyond tolerance from conversion_gain_record's
+        # gain_db -- isolates the conversion-gain-specific prompt/signal
+        # from the baseline one, per the spec's "drift independently" note.
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.question",
+            lambda *args, **kwargs: QMessageBox.Yes,
+        )
+        conversion_gain_record = ConversionGainRecord(
+            gain_db=5.0, timestamp=time.time(), n_illumination_levels=5,
+        )
+        widget = LiveViewWidget(
+            calibration_set=_calibration_set(),
+            noise_model=SensorNoiseModel(gain_e_per_adu=2.2, background_sigma=1.0),
+            position_calibration=ScaleFactorPositionCalibration(),
+            wavelength_axis=None,
+            camera_stream=_camera_stream(),
+            conversion_gain_record=conversion_gain_record,
+        )
+        qtbot.addWidget(widget)
+
+        near_baseline_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 0.5
+        assert not gain_has_drifted(near_baseline_gain_db, FIXTURE_GAIN_DB)
+        assert gain_has_drifted(near_baseline_gain_db, conversion_gain_record.gain_db)
+
+        with qtbot.waitSignal(widget.recalibration_requested, timeout=1000) as blocker:
+            widget._gain_spin.setValue(near_baseline_gain_db)
+
+        assert blocker.args == ["conversion_gain"]
