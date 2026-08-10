@@ -46,6 +46,16 @@ reverted to that state. There is still no configured lint/format step (no `ruff`
 don't assume one is wired up unless you check first. `requirements.txt` remains an empty placeholder;
 `pyproject.toml` is the real source of truth for dependencies.
 
+## Git
+
+Commits and pushes to this repo must be attributed to the `RonEllenbogen` GitHub account. That means
+the commit author's (and committer's) git email must be one verified on that account
+(`ron.ellenbogen84@gmail.com`) — GitHub links a commit to a profile by matching the git email against
+the account's verified emails, not by matching the name string. A commit authored with an unverified or
+machine-local email (e.g. a `user@hostname.local` address from an unconfigured `git config user.email`)
+will show the right name on GitHub but won't link to the profile. Check `git config user.email` (and
+`user.name`) resolve correctly before committing if there's any doubt.
+
 ## Architecture
 
 ### Layering and the canonical frame contract
