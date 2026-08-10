@@ -64,6 +64,83 @@ class WavelengthCalibrationResult:
 
 # Functions
 
+def build_manual_spectral_calibration(
+    coefficients: np.ndarray,
+    coefficient_sigma: np.ndarray,
+    record: CalibrationRecord,
+) -> WavelengthCalibrationResult:
+
+    '''
+    Builds a WavelengthCalibrationResult directly from a pixel->wavelength_nm
+    polynomial the user measured independently (e.g. via Pylon Viewer,
+    reading off pixel positions of known spectral lines by hand) --
+    bypassing match_lines()/calibrate_spectral()'s automatic fit entirely.
+    Same coefficient convention as everywhere else in this module:
+    wavelength_nm = c0 + c1*pixel + c2*pixel^2 + ... (ascending order).
+
+    coefficient_sigma must be supplied by the caller, not defaulted or
+    derived here -- there is no fit residual to estimate it from, and
+    analysis/dispersion_fitting.py's TotalLeastSquaresFit hard-requires
+    sigma_wavelength_nm strictly positive everywhere downstream, so
+    inventing a placeholder precision nobody actually measured would
+    silently misrepresent the calibration's real uncertainty. If the
+    user doesn't have a real uncertainty estimate, entering a
+    deliberately conservative (large) value is their call to make, not
+    this function's.
+
+    Parameters
+    ----------
+    coefficients
+        Polynomial coefficients, ascending order (c0, c1, c2, ...).
+    coefficient_sigma
+        1-sigma uncertainty on each coefficient, same shape as
+        coefficients, strictly positive.
+    record
+        Tags the resulting calibration with provenance -- same role as in
+        calibrate_spectral(), though exposure_us/gain_db are even less
+        physically load-bearing here (no frame was captured at all for a
+        manually-entered calibration); kept for logging consistency.
+        CalibrationRecord.source_frame_count must be >= 1 even though no
+        frames were actually captured -- callers constructing this record
+        for a manual entry should pass source_frame_count=1 as a
+        convention meaning "not applicable", not 0 (which the class
+        rejects outright).
+
+    Returns
+    -------
+    WavelengthCalibrationResult
+
+    Raises
+    ------
+    ValueError
+        If coefficient_sigma isn't the same shape as coefficients, or any
+        entry isn't strictly positive (mirrors PolynomialFitResult's own
+        shape validation, plus the strict-positivity check
+        TotalLeastSquaresFit would otherwise only catch much later, at
+        the first downstream per-shot fit).
+    '''
+
+    coefficients = np.asarray(coefficients, dtype=np.float64)
+    coefficient_sigma = np.asarray(coefficient_sigma, dtype=np.float64)
+    if coefficient_sigma.shape != coefficients.shape:
+        raise ValueError(
+            "coefficient_sigma must have the same shape as coefficients, got "
+            f"{coefficient_sigma.shape}, {coefficients.shape}"
+        )
+    if np.any(coefficient_sigma <= 0):
+        raise ValueError(f"coefficient_sigma must be strictly positive, got {coefficient_sigma!r}")
+
+    fit = PolynomialFitResult(
+        degree=coefficients.shape[0] - 1,
+        coefficients=coefficients,
+        coefficient_sigma=coefficient_sigma,
+        reduced_chi_squared=float("nan"),   # not applicable -- no fit was run
+        residuals=np.array([]),
+        normalized_residuals=np.array([]),
+    )
+    return WavelengthCalibrationResult(fit=fit, record=record)
+
+
 def calibrate_spectral(
     pixel: np.ndarray,
     wavelength_nm: np.ndarray,
@@ -114,4 +191,4 @@ def calibrate_spectral(
     return WavelengthCalibrationResult(fit=fit, record=record)
 
 
-__all__ = ["WavelengthCalibrationResult", "calibrate_spectral"]
+__all__ = ["WavelengthCalibrationResult", "calibrate_spectral", "build_manual_spectral_calibration"]

@@ -16,6 +16,7 @@ per-frame-correction side) plus the end-to-end pipeline test.
 
 # Imports
 
+import math
 import time
 
 import numpy as np
@@ -25,6 +26,7 @@ from pipeline.acquisition import FrameData, CANONICAL_SHAPE, CANONICAL_DTYPE, CA
 
 from pipeline.calibration.exceptions import (
     SettingsMismatchError, InvalidFlatFieldError, InvalidConversionGainError, InsufficientDataError,
+    LineMatchingError,
 )
 from pipeline.calibration.shared import (
     save_artifact, load_artifact,
@@ -48,9 +50,11 @@ from pipeline.calibration.spatial import (
     ScaleFactorRecord, save_scale_factor, load_scale_factor,
 )
 from pipeline.calibration.spectral import (
-    calibrate_spectral, WavelengthCalibrationResult,
+    calibrate_spectral, build_manual_spectral_calibration, WavelengthCalibrationResult,
     save_spectral_calibration, load_spectral_calibration,
     match_lines, run_spectral_calibration,
+    diffraction_angle_rad, predicted_pixel_separation,
+    load_reference_lines, ARGON_LAMP_NAME, ARGON_MIN_WAVELENGTH_NM, ARGON_MAX_WAVELENGTH_NM,
 )
 from pipeline.preprocessing import CalibrationSet
 
@@ -782,11 +786,183 @@ class TestCalibrateSpectral:
         assert loaded.record == result.record
 
 
-class TestLineMatchingStub:
+class TestGratingGeometry:
 
-    def test_not_implemented(self):
-        with pytest.raises(NotImplementedError):
+    def test_theta_m_800nm_matches_hand_derivation(self):
+        # See docs/project_state.md's spectral-calibration design
+        # discussion -- hand-derived and independently confirmed.
+        assert math.degrees(diffraction_angle_rad(800.0)) == pytest.approx(-12.778, abs=0.01)
+
+    def test_predicted_separation_matches_full_sensor_bandpass(self):
+        # The full 1920-column sensor spans ~108nm around 800nm -- see
+        # design discussion. +/-54nm should predict close to 1920px.
+        separation = predicted_pixel_separation(854.0, 746.0)
+        assert abs(separation) == pytest.approx(1920.0, rel=0.05)
+
+    def test_predicted_separation_antisymmetric(self):
+        assert predicted_pixel_separation(800.0, 810.0) == pytest.approx(
+            -predicted_pixel_separation(810.0, 800.0)
+        )
+
+    def test_predicted_separation_zero_for_equal_wavelengths(self):
+        assert predicted_pixel_separation(800.0, 800.0) == pytest.approx(0.0)
+
+    def test_wavelength_with_no_real_diffraction_angle_raises(self):
+        with pytest.raises(ValueError):
+            diffraction_angle_rad(2100.0)   # far outside any real usable range -- sin(theta_m) out of [-1, 1]
+
+
+class TestReferenceLines:
+
+    def test_loads_curated_argon_window(self):
+        lines = load_reference_lines(ARGON_LAMP_NAME, ARGON_MIN_WAVELENGTH_NM, ARGON_MAX_WAVELENGTH_NM)
+        assert len(lines) == 11
+        assert lines[0] == pytest.approx(751.46)
+        assert lines[-1] == pytest.approx(842.46)
+        assert np.all(np.diff(lines) > 0)
+
+    def test_empty_range_returns_empty(self):
+        lines = load_reference_lines(ARGON_LAMP_NAME, 1.0, 2.0)
+        assert lines.size == 0
+
+    def test_wrong_lamp_name_returns_empty(self):
+        lines = load_reference_lines("NotARealLamp", ARGON_MIN_WAVELENGTH_NM, ARGON_MAX_WAVELENGTH_NM)
+        assert lines.size == 0
+
+
+def _reference_line_true_pixels(slope_sign: float = 1.0):
+    '''
+    Argon reference wavelengths plus their PREDICTED pixel positions under
+    a made-up (but physically-shaped) affine pixel<->diffraction-angle
+    relationship -- built from grating_geometry.py's own
+    diffraction_angle_rad(), so these tests check the matching
+    *algorithm*, not a re-derivation of the physics (see
+    line_matching.py's module docstring). slope_sign=-1 tests the
+    opposite pixel/wavelength orientation.
+    '''
+    lines = load_reference_lines(ARGON_LAMP_NAME, ARGON_MIN_WAVELENGTH_NM, ARGON_MAX_WAVELENGTH_NM)
+    theta_m = np.array([diffraction_angle_rad(w) for w in lines])
+    slope = slope_sign * 100.0 * 1000.0 / PIXEL_PITCH_UM   # f/pixel_pitch, mm->um
+    intercept = 960.0 - slope * diffraction_angle_rad(800.62)   # centers ~800.62nm at pixel 960
+    return lines, intercept + slope * theta_m
+
+
+def _build_lamp_image(
+    pixel_positions: np.ndarray,
+    extra_peak_pixels: tuple = (),
+    peak_height: float = 500.0,
+    peak_sigma_px: float = 2.0,
+    noise_std: float = 2.0,
+    seed: int = 0,
+) -> np.ndarray:
+    '''A synthetic averaged/preprocessed lamp image: sharp Gaussian peaks
+    at pixel_positions (+ optional spurious extra_peak_pixels), identical
+    down every spatial row (match_lines() collapses over the spatial axis
+    anyway), plus noise.'''
+    n_spatial, n_spectral = CANONICAL_SHAPE
+    columns = np.arange(n_spectral)
+    spectrum = np.zeros(n_spectral)
+    for pixel in pixel_positions:
+        spectrum += peak_height * np.exp(-0.5 * ((columns - pixel) / peak_sigma_px) ** 2)
+    for pixel in extra_peak_pixels:
+        spectrum += (peak_height * 0.6) * np.exp(-0.5 * ((columns - pixel) / peak_sigma_px) ** 2)
+    spectrum += np.random.default_rng(seed).normal(scale=noise_std, size=n_spectral)
+    return np.tile(np.clip(spectrum, 0, None), (n_spatial, 1))
+
+
+class TestMatchLines:
+
+    def test_matches_all_lines_with_sub_pixel_accuracy(self):
+        lines, true_pixels = _reference_line_true_pixels()
+        pixel, wavelength_nm, sigma_pixel, sigma_wavelength_nm = match_lines(
+            _build_lamp_image(true_pixels)
+        )
+
+        assert set(wavelength_nm.tolist()) == set(lines.tolist())
+        true_pixel_for = dict(zip(lines, true_pixels))
+        max_error = max(abs(p - true_pixel_for[w]) for p, w in zip(pixel, wavelength_nm))
+        assert max_error < 0.5
+        assert np.all(sigma_pixel > 0)
+        assert np.all(sigma_wavelength_nm > 0)
+        assert np.all(np.diff(pixel) > 0)   # documented return contract: ascending pixel
+
+    def test_reversed_orientation_still_matches(self):
+        # Not assuming a fixed sign for "pixel increases with wavelength"
+        # -- see module docstring's note on sensor/optics orientation.
+        lines, true_pixels = _reference_line_true_pixels(slope_sign=-1.0)
+        _, wavelength_nm, _, _ = match_lines(_build_lamp_image(true_pixels))
+        assert set(wavelength_nm.tolist()) == set(lines.tolist())
+
+    def test_missing_lines_matches_only_present_subset(self):
+        lines, true_pixels = _reference_line_true_pixels()
+        subset_idx = [0, 2, 4, 6, 8, 10]
+        _, wavelength_nm, _, _ = match_lines(_build_lamp_image(true_pixels[subset_idx]))
+        assert set(wavelength_nm.tolist()) == set(lines[subset_idx].tolist())
+
+    def test_ignores_extra_spurious_peaks(self):
+        lines, true_pixels = _reference_line_true_pixels()
+        image = _build_lamp_image(true_pixels, extra_peak_pixels=(100.0, 500.0, 1700.0))
+        _, wavelength_nm, _, _ = match_lines(image)
+        assert set(wavelength_nm.tolist()) == set(lines.tolist())
+
+    def test_too_few_detected_peaks_raises(self):
+        _, true_pixels = _reference_line_true_pixels()
+        with pytest.raises(LineMatchingError):
+            match_lines(_build_lamp_image(true_pixels[:2]))
+
+    def test_all_zero_image_raises(self):
+        with pytest.raises(LineMatchingError):
             match_lines(np.zeros(CANONICAL_SHAPE))
+
+    def test_runs_fast(self):
+        # Regression guard: an earlier unvectorized version of the
+        # matching search took minutes on this same input -- see
+        # _match_peaks_to_lines()'s docstring for the fix.
+        _, true_pixels = _reference_line_true_pixels()
+        image = _build_lamp_image(true_pixels)
+        start = time.time()
+        match_lines(image)
+        assert time.time() - start < 5.0
+
+
+class TestBuildManualSpectralCalibration:
+
+    def test_builds_valid_result(self):
+        record = CalibrationRecord(
+            exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+            timestamp=time.time(), source_frame_count=1,
+        )
+        result = build_manual_spectral_calibration(
+            np.array([400.0, 0.5]), np.array([1.0, 0.001]), record,
+        )
+        assert isinstance(result, WavelengthCalibrationResult)
+        assert result.fit.degree == 1
+        assert np.allclose(result.wavelength_nm(np.array([0.0, 1000.0])), [400.0, 900.0])
+        assert np.all(result.sigma_wavelength_nm(np.array([0.0, 1000.0])) > 0)
+
+    def test_mismatched_shape_raises(self):
+        record = _record()
+        with pytest.raises(ValueError):
+            build_manual_spectral_calibration(np.array([400.0, 0.5]), np.array([1.0]), record)
+
+    def test_non_positive_sigma_raises(self):
+        record = _record()
+        with pytest.raises(ValueError):
+            build_manual_spectral_calibration(np.array([400.0, 0.5]), np.array([1.0, 0.0]), record)
+
+    def test_save_load_round_trips(self, tmp_path):
+        record = CalibrationRecord(
+            exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+            timestamp=time.time(), source_frame_count=1,
+        )
+        result = build_manual_spectral_calibration(
+            np.array([400.0, 0.5]), np.array([1.0, 0.001]), record,
+        )
+        path = tmp_path / "manual_spectral.npz"
+        save_spectral_calibration(path, result)
+        loaded = load_spectral_calibration(path)
+        assert np.allclose(loaded.fit.coefficients, result.fit.coefficients)
+        assert np.allclose(loaded.fit.coefficient_sigma, result.fit.coefficient_sigma)
 
 
 def _sensor_calibration_set() -> CalibrationSet:
@@ -834,10 +1010,15 @@ class TestRunSpectralCalibration:
         finally:
             stream.stop()
 
-    def test_propagates_not_implemented_when_line_matching_missing(self, tmp_path):
+    def test_propagates_line_matching_error_for_non_line_like_signal(self, tmp_path):
+        # SyntheticBackend's frames are a smooth Gaussian beam profile, not
+        # discrete spectral lines -- real match_lines() correctly finds no
+        # matchable peaks in one and raises, exercising the real (now
+        # implemented) match_lines() through the full workflow wiring
+        # rather than a monkeypatched stand-in.
         stream = _make_running_stream()
         try:
-            with pytest.raises(NotImplementedError):
+            with pytest.raises(LineMatchingError):
                 run_spectral_calibration(
                     stream, n_frames=1, sensor_calibration=_sensor_calibration_set(),
                     path=tmp_path / "spectral.npz",

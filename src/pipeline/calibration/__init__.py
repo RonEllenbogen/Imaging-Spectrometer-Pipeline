@@ -11,7 +11,7 @@ rather than re-exported here, since more subpackages are still to come.
 
 from .exceptions import (
     CalibrationError, SettingsMismatchError, InvalidFlatFieldError,
-    InvalidConversionGainError, InsufficientDataError,
+    InvalidConversionGainError, InsufficientDataError, LineMatchingError,
 )
 
 # Constants
@@ -22,5 +22,5 @@ from .exceptions import (
 
 __all__ = [
     "CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError",
-    "InvalidConversionGainError", "InsufficientDataError",
+    "InvalidConversionGainError", "InsufficientDataError", "LineMatchingError",
 ]

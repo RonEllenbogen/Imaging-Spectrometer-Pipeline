@@ -81,10 +81,22 @@ class InsufficientDataError(CalibrationError):
         self.degree = degree
         self.n_points = n_points
 
+
+class LineMatchingError(CalibrationError):
+    """Raised when spectral/line_matching.py's match_lines() cannot find a
+    confident correspondence between detected spectral peaks and known
+    reference lines -- too few peaks detected in the lamp image, or no
+    candidate identification scored well enough against the predicted
+    geometry pattern. reason should say which."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"spectral line matching failed: {reason}")
+        self.reason = reason
+
 # Functions
 
 
 __all__ = [
     "CalibrationError", "SettingsMismatchError", "InvalidFlatFieldError",
-    "InvalidConversionGainError", "InsufficientDataError",
+    "InvalidConversionGainError", "InsufficientDataError", "LineMatchingError",
 ]

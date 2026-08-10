@@ -16,9 +16,8 @@ present results live through a GUI.
 
 Build order (see `docs/notes.md` for the full roadmap): acquisition → preprocessing → analysis →
 validation → headless CLI integration → GUI → full integration. `acquisition/`, `preprocessing/`,
-`calibration/sensor/`, `calibration/shared/`, `calibration/spatial/`, and `analysis/` are built and
-tested (synthetic data only, beyond `acquisition/`). `calibration/spectral/` is built except for
-`line_matching.py`, which is blocked on reference-lamp selection (see its own module docstring).
+`calibration/sensor/`, `calibration/shared/`, `calibration/spatial/`, `calibration/spectral/`, and
+`analysis/` are built and tested (synthetic data only, beyond `acquisition/`).
 `gui/app.py` and `main.py` are still empty stubs or not yet started.
 
 ## Commands
@@ -138,23 +137,30 @@ never on `preprocessing/`, even though both `calibration/sensor/flat_field.py` a
   raising `FileNotFoundError`, since (unlike a baseline or flat field) the scale factor always has a
   physically valid default. A GUI-entered manual override is persisted via `save_scale_factor()` and
   reused in future sessions.
-- `spectral/` — pixel→wavelength calibration from a spectral-lamp image. `calibrate.py`'s
-  `calibrate_spectral()` fits matched (pixel, wavelength_nm) pairs via `shared/fitting.py`; the
-  returned `WavelengthCalibrationResult` implements `analysis.interfaces.WavelengthAxis` directly
-  (`wavelength_nm()`/`sigma_wavelength_nm()` live on the result itself, the same "result IS the
-  interface" pattern as `analysis/results.py`'s `SpatialDispersionFitResult.zeta()`) and reuses
-  `CalibrationRecord` for provenance. `sigma_wavelength_nm()` propagates `coefficient_sigma` treating
-  coefficients as uncorrelated — a documented approximation, flagged for review once real lamp data
-  exists. `line_matching.py`'s `match_lines()` — detecting line peaks and matching them to reference
-  wavelengths — is an unimplemented stub (`NotImplementedError`): it's blocked on choosing a reference
-  lamp and having its known line wavelengths, plus an approximate prior pixel→wavelength dispersion to
-  make matching tractable, neither of which exists yet. `workflow.py`'s `run_spectral_calibration()` is
-  fully wired (acquire → preprocess each frame individually via a caller-supplied `CalibrationSet` →
-  average → `match_lines()` → `calibrate_spectral()` → save) but will raise `NotImplementedError` until
-  `line_matching.py` is filled in.
+- `spectral/` — pixel→wavelength calibration from a spectral-lamp image (reference lamp: Argon).
+  `calibrate.py`'s `calibrate_spectral()` fits matched (pixel, wavelength_nm) pairs via
+  `shared/fitting.py`; the returned `WavelengthCalibrationResult` implements
+  `analysis.interfaces.WavelengthAxis` directly (`wavelength_nm()`/`sigma_wavelength_nm()` live on the
+  result itself, the same "result IS the interface" pattern as `analysis/results.py`'s
+  `SpatialDispersionFitResult.zeta()`) and reuses `CalibrationRecord` for provenance.
+  `sigma_wavelength_nm()` propagates `coefficient_sigma` treating coefficients as uncorrelated — a
+  documented approximation, flagged for review once real lamp data exists. `calibrate.py`'s
+  `build_manual_spectral_calibration()` is a second path into the same result type, for a wavelength
+  calibration measured entirely outside this codebase (e.g. via Pylon Viewer) — takes coefficients and
+  their uncertainty directly, no fit involved. `grating_geometry.py` predicts relative pixel spacing
+  between two wavelengths from the spectrometer's transmission-grating equation (config-driven
+  constants in `configs/default.yaml`'s `spectrometer:` section); `reference_lines.py` loads Argon's
+  known line wavelengths from `data/reference/oriel_spectral_calibration_lamps.csv`.
+  `line_matching.py`'s `match_lines()` detects spectral peaks (1D collapse + `scipy.signal.find_peaks`
+  + sub-pixel intensity-weighted refinement) and matches them to reference lines via a search over the
+  geometry-predicted spacing pattern, raising a new `LineMatchingError` if too few peaks are found or no
+  candidate identification scores well enough. `workflow.py`'s `run_spectral_calibration()` is fully
+  wired (acquire → preprocess each frame individually via a caller-supplied `CalibrationSet` → average →
+  `match_lines()` → `calibrate_spectral()` → save) and runs end-to-end.
 - Exceptions derive from `CalibrationError` (see `exceptions.py`): `SettingsMismatchError`,
   `InvalidFlatFieldError`, `InsufficientDataError` (mirrors `analysis/exceptions.py`'s version, kept
-  separate for the same no-cross-dependency reason as `shared/fitting.py`). `pipeline.preprocessing`
+  separate for the same no-cross-dependency reason as `shared/fitting.py`), `LineMatchingError`
+  (spectral peak-to-reference-line matching failed). `pipeline.preprocessing`
   re-exports `SettingsMismatchError` for caller convenience, since `preprocessing/`'s `apply_baseline()`
   can raise it too — but it is a `CalibrationError`, not a `PreprocessingError`; catch both explicitly
   if a caller needs to handle anything either package can raise.

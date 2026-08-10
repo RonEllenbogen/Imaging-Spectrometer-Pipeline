@@ -18,3 +18,13 @@ preprocessing:
   # Leave as entire spatial axis for now, once I have taken some real images can refine these bounds
   roi_row_min: 0
   roi_row_max: 1200
+
+# Transmission-grating spectrometer geometry, used by calibration/spectral/grating_geometry.py
+# to predict relative spectral-line spacing on the detector, for matching lamp-spectrum peaks
+# to known reference wavelengths (see calibration/spectral/line_matching.py).
+spectrometer:
+  grating_lines_per_mm: 600 # rho in the grating equation m*lambda*rho = sin(theta_m) - sin(theta_i)
+  incidence_angle_deg: 15.0 # theta_i -- approximate; only affects matching-algorithm confidence,
+                            # not final calibration accuracy (see grating_geometry.py's module docstring)
+  lens_focal_length_mm: 100.0 # f -- second relay lens, converts angular deviation to detector-plane
+                              # displacement via delta_y = f * delta_theta

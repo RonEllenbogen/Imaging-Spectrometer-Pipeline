@@ -19,7 +19,7 @@ what's next.
 | `preprocessing/` | Complete, tested (synthetic only) — now includes mandatory signal-threshold masking, see §6 |
 | `calibration/sensor/` | Complete, tested (synthetic only) — moved out of `preprocessing/sensor_calibration/`, see §6 |
 | `calibration/shared/`, `calibration/spatial/` | Complete, tested (synthetic only) — see §3 |
-| `calibration/spectral/` | Complete except `line_matching.py`, blocked on reference-lamp selection — see §3 |
+| `calibration/spectral/` | Complete, tested (synthetic only) — `line_matching.py` now built (Argon lamp), see §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
 | `cli/` | Calibration subcommands complete, import/argparse-tested — real hardware paths unverified — see §4 |
 | `gui/` | Designed in detail, not built — see §5 |
@@ -278,15 +278,18 @@ src/pipeline/calibration/
 │   ├── calibrate.py        ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR
 │   └── io.py                ScaleFactorRecord, save_scale_factor(), load_scale_factor()
 └── spectral/
-    ├── calibrate.py        calibrate_spectral(), WavelengthCalibrationResult
-    ├── io.py                 save_spectral_calibration(), load_spectral_calibration()
-    ├── line_matching.py    match_lines() -- NotImplementedError stub, blocked (see below)
-    └── workflow.py          run_spectral_calibration()
+    ├── calibrate.py           calibrate_spectral(), build_manual_spectral_calibration(), WavelengthCalibrationResult
+    ├── grating_geometry.py    diffraction_angle_rad(), predicted_pixel_separation()
+    ├── reference_lines.py     load_reference_lines(), Argon lamp constants
+    ├── io.py                  save_spectral_calibration(), load_spectral_calibration()
+    ├── line_matching.py       match_lines() -- built (see below)
+    └── workflow.py            run_spectral_calibration()
 ```
 
-`tests/test_calibration.py` covers everything above except the blocked parts of `line_matching.py`
-itself (its own stub-raises-`NotImplementedError` behavior is tested; the real detection/matching logic
-isn't, since it doesn't exist yet).
+`tests/test_calibration.py` covers everything above, including `line_matching.py`'s real peak-detection
+and matching-search logic against synthetic lamp images built from `grating_geometry.py`'s own
+predictions (not hand-picked numbers) -- exact match, missing lines, extra spurious peaks, and both
+possible pixel/wavelength orientations are each their own test.
 
 **`CalibrationRecord` moved from `sensor/metadata.py` to `shared/metadata.py`.** Originally
 sensor-only; `spectral/`'s wavelength calibration is also frame-built (from lamp frames) and reuses it
@@ -358,14 +361,66 @@ covariance matrix (`cov_beta`) that could replace this if the approximation prov
 real lamp data; flagged for review once that data exists, same as the other placeholder/approximation
 decisions in this file.
 
-**`spectral/line_matching.py`'s `match_lines()` is genuinely blocked, not just unwritten.** It needs
-two things that don't exist yet: which reference lamp will be used (and its known reference-line
-wavelengths), and an approximate prior pixel→wavelength dispersion (from the grating equation /
-optical design) to make peak-to-line matching tractable rather than a blind assignment problem. Both
-are lamp-hardware decisions outside this codebase's scope until a lamp is chosen. The stub raises
-`NotImplementedError` with an explanatory message. Everything downstream of it is still built and
-tested against synthetic already-matched (pixel, wavelength_nm) data:
+**`spectral/line_matching.py`'s `match_lines()` is now built.** It was genuinely blocked (not just
+unwritten) until a reference lamp was chosen and a real optical-geometry prior became available. Both
+now exist: reference lamp is Argon, a lab-wide lamp reference table lives at
+`data/reference/oriel_spectral_calibration_lamps.csv`, and the spectrometer's transmission-grating
+equation (`m*lambda*rho = sin(theta_m) - sin(theta_i)`, `m=-1` fixed for this hardware) plus the second
+relay lens's `delta_y = f*delta_theta` mapping were supplied and verified numerically against hand
+derivations (θ_m(800nm)≈−12.8°, full 1920-column sensor spans ~108nm).
 
+- **`spectral/grating_geometry.py`** (new) — `diffraction_angle_rad(wavelength_nm)` (θ_m(λ) per the
+  grating equation) and `predicted_pixel_separation(wavelength_a_nm, wavelength_b_nm)` (signed pixel
+  displacement between two wavelengths, reusing `calibration.spatial.PIXEL_PITCH_UM` directly -- same
+  physical sensor, same pixel pitch on both axes, no relay-optics scale factor involved here since this
+  measures displacement AT THE DETECTOR, not the slit plane). `grating_lines_per_mm`/
+  `incidence_angle_deg`/`lens_focal_length_mm` are config-driven (`configs/default.yaml`'s new
+  `spectrometer:` section), matching `pixel_pitch_um`'s existing hardware-constant pattern. Deliberately
+  predicts only *relative* spacing between two wavelengths, never an absolute pixel position -- that
+  depends on the camera's precise physical translation, not known here; the central wavelength's own
+  θ_m cancels out of any two-wavelength difference, so imprecision in `incidence_angle_deg` ("roughly
+  15°") affects matching confidence, not the final fit's accuracy (which comes entirely from
+  `calibrate_spectral()`'s ODR on whatever `match_lines()` actually identifies).
+- **`spectral/reference_lines.py`** (new) — `load_reference_lines(lamp, wavelength_min_nm,
+  wavelength_max_nm, path=...)` reads the CSV (Python's `csv` module, no pandas dependency added).
+  `ARGON_MIN_WAVELENGTH_NM = 751.46`/`ARGON_MAX_WAVELENGTH_NM = 842.46` curate the CSV's full Argon line
+  list (which has no intensity data, and clusters in two disjoint UV/red bands with nothing in between)
+  down to 11 lines, roughly symmetric about the 800nm central wavelength (Ti:Sapphire) -- 842.46nm is
+  the largest-wavelength Ar line available, 751.46nm chosen equally spaced below 800nm.
+- **`spectral/line_matching.py`**'s `match_lines()` — collapses the preprocessed/averaged 2D image to a
+  1D spectrum (sum over the spatial axis), detects peaks (`scipy.signal.find_peaks`, prominence +
+  minimum-separation thresholds -- unverified starting points, same treatment as
+  `preprocessing/steps/signal_threshold.py`'s `SNR_THRESHOLD`/`calibration/sensor/bad_pixel_map.py`'s
+  `SIGMA_THRESHOLD` elsewhere in this codebase), sub-pixel-refines each via an intensity-weighted
+  centroid over a small window (the same weighted-first-moment approach
+  `analysis/centroiding.py`'s `IntensityWeightedMoment` uses for spatial centroiding, reimplemented
+  locally rather than imported -- `calibration/` must not depend on `analysis/`, same rule
+  `shared/fitting.py`'s separate TLS-machinery copy already follows). Matching searches every ordered
+  pair of detected peaks against every ordered pair of curated reference lines, solving the implied
+  affine `pixel = C + D*theta_m(wavelength)` for each candidate pair and scoring by how many remaining
+  reference lines land within tolerance of a (still-unclaimed) detected peak -- deliberately not
+  assuming a fixed sign for "does pixel increase with wavelength," since this project has hit sensor/
+  optics orientation flips before. Originally implemented as an unvectorized four-nested-Python-loop
+  search that took **over two minutes** on the full 11-detected/11-reference case; rewritten to
+  restrict the detected-pair loop to `i<j` (halves the search -- swapping both pairs simultaneously
+  gives an identical candidate, so nothing is lost) and vectorize the inner per-reference-line nearest-
+  detected-peak lookup via numpy broadcasting instead of a per-line Python loop -- now **~0.06 seconds**
+  on the same input. A new `LineMatchingError(CalibrationError)` (`calibration/exceptions.py`) is raised
+  when fewer than `MIN_MATCHED_LINES` (3) peaks are detected, or no candidate identification scores well
+  enough. `sigma_wavelength_nm` for matched lines uses a small fixed placeholder (0.01nm) reflecting
+  these tabulated atomic-line wavelengths' real (far tighter) precision -- negligible next to detected-
+  peak pixel uncertainty, but strictly positive as `shared/fitting.py` requires.
+- **`spectral/calibrate.py`'s `build_manual_spectral_calibration()`** (new) — a second, independent path
+  into `WavelengthCalibrationResult` for a wavelength calibration the user measures entirely separately
+  (e.g. via Pylon Viewer, reading off pixel positions of known lines by hand), bypassing
+  `match_lines()`/`calibrate_spectral()`'s automatic fit. Takes `coefficients` **and**
+  `coefficient_sigma` directly (same `wavelength_nm = c0 + c1*pixel + ...` convention as everywhere
+  else) -- `coefficient_sigma` must be supplied by the caller, not defaulted or derived, since there's
+  no fit residual to estimate it from and `analysis/dispersion_fitting.py`'s `TotalLeastSquaresFit`
+  hard-requires `sigma_wavelength_nm` strictly positive downstream; inventing a placeholder precision
+  nobody measured would silently misrepresent the calibration's real uncertainty. Note for CLI/GUI
+  callers: `CalibrationRecord.source_frame_count` must be >= 1 even though a manual entry captured zero
+  frames -- pass `1` as a "not applicable" convention, since the class rejects `0` outright.
 - `spectral/calibrate.py`'s `calibrate_spectral()` — fits matched line data, degree defaults to 1
   (first-order grating-dispersion approximation; higher degrees remain a model-adequacy diagnostic,
   same role as `analysis/`'s degree-1/2/3 comparison).
@@ -381,10 +436,10 @@ tested against synthetic already-matched (pixel, wavelength_nm) data:
   `build_baseline()` averages background frames -- averaging raw lamp frames before dark/flat-field
   correction would reintroduce the DSNU-contamination problem `build_flat_field()` avoids by
   dark-subtracting before normalizing. Mirrors `calibration/sensor/workflow.py`'s pattern of the caller
-  supplying already-built pieces rather than this module loading anything from a hardcoded path.
-  Currently raises `NotImplementedError` end-to-end (propagated from `match_lines()`) until
-  `line_matching.py` is filled in; `tests/test_calibration.py` verifies the wiring itself with a
-  monkeypatched `match_lines()`.
+  supplying already-built pieces rather than this module loading anything from a hardcoded path. Now
+  runs end-to-end against a real lamp frame; `tests/test_calibration.py` covers both the full wiring
+  (monkeypatched `match_lines()`) and a real-`match_lines()` case (a `SyntheticBackend` frame's smooth
+  Gaussian beam profile correctly has no matchable line peaks, raising `LineMatchingError`).
 
 ---
 
@@ -479,8 +534,12 @@ their proportions rather than expand into extra space.
 **The calibration screen is not uniform across the five types:**
 - **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
   override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
-- **Spectral** is still blocked (`line_matching.py`, §3) and must be shown as unavailable, not offered as
-  if it works.
+- **Spectral** — `line_matching.py` itself is no longer blocked (§3, Argon reference lamp now chosen and
+  built), but the GUI card is still disabled pending its own build pass: a two-mode
+  `SpectralCalibrationDialog` ("Capture from Lamp" mirroring `BaselineDialog`'s single-phase form,
+  "Manual Entry" mirroring `SpatialCalibrationDialog`'s manual-value style but for a variable-length
+  coefficient+sigma list via `build_manual_spectral_calibration()`) plus removing the `CreatePage`
+  card's `SPECTRAL_UNAVAILABLE_NOTE` gating.
 - **Bad-pixel-map has no manual "create" option at all** — it runs automatically immediately after every
   flat-field capture (`build_bad_pixel_map()` + `save_bad_pixel_map()` chained onto
   `finish_flat_field_calibration()`), since it's derived purely from the flat field with no camera
@@ -604,9 +663,11 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   coverage moved to new `tests/test_calibration.py`; `apply_*()` and the
   end-to-end `run_preprocessing()` test stayed. Full suite still at 102
   passed, 17 skipped, now split across the two files.
-- **`calibration/spectral/line_matching.py`'s `match_lines()`** — blocked on choosing a reference lamp
-  (and its known reference-line wavelengths) and an approximate prior pixel→wavelength dispersion from
-  the grating equation / optical design. See §3 for what's already built around it.
+- ~~**`calibration/spectral/line_matching.py`'s `match_lines()`.**~~ **Done.** Argon reference lamp
+  chosen, grating-equation geometry supplied, peak-detection + matching search built (with a
+  physics-driven synthetic-lamp-image test suite) and verified fast (~0.06s, after fixing an initially
+  unvectorized version that took minutes) -- see §3. GUI enablement (`SpectralCalibrationDialog`, both
+  capture and manual-entry modes) and a CLI `spectral` subcommand are still to-do -- see §5.
 - ~~**Conversion gain measurement (e⁻/ADU).**~~ **Done.** New
   `calibration/sensor/conversion_gain.py`: `build_conversion_gain()` takes a
   photon transfer curve sweep -- uniform illumination at *fixed brightness*,
