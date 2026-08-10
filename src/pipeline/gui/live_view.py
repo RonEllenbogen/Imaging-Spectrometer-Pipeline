@@ -15,11 +15,15 @@ fake) numbers, but does not trigger any real refit.
 
 The Acquisition Settings side-panel section (exposure_us/gain_db spin
 boxes, pre-filled from the loaded baseline's capture settings) is the
-same kind of skeleton: editing either field runs the real drift-detection
-comparison against calibration_set.baseline_record (and
-conversion_gain_record, if supplied) and can pop a "recalibrate?" prompt,
-but does NOT reconfigure camera_stream -- that's deferred to the same
-future "real camera wiring" phase as the QTimer update loop above.
+same kind of skeleton: editing either field re-evaluates a combined
+drift state against calibration_set.baseline_record (and
+conversion_gain_record, if supplied) via _recompute_settings_drift().
+Crossing from "in tolerance" to "drifted" hides the fit diagnostics
+(reading "N/A") and the scatter/error-bar/fit-curve overlay (the raw
+heatmap keeps displaying underneath) and pops a single informational
+message; returning to "in tolerance" restores both. Does NOT reconfigure
+camera_stream, though -- that's deferred to the same future "real camera
+wiring" phase as the QTimer update loop above.
 '''
 
 # Imports
@@ -221,6 +225,13 @@ class LiveViewWidget(QWidget):
         self._build_ui()
         self._populate_placeholder_data()
 
+        # Self-consistent even if a caller constructs this widget directly
+        # with an already-mismatched baseline/conversion-gain pair (e.g.
+        # bypassing calibration_screen.py's own gate) -- starts in whatever
+        # state the supplied records actually imply, not assumed "OK".
+        self._settings_drifted = False
+        self._recompute_settings_drift()
+
     # -- construction ---------------------------------------------------
 
     def _apply_pyqtgraph_theme(self) -> None:
@@ -356,7 +367,9 @@ class LiveViewWidget(QWidget):
         )
         self._extended_measurement_button.setToolTip(
             "Not yet implemented -- placeholder for a future extended-"
-            "measurement / N-shot combination workflow."
+            "measurement / N-shot combination workflow. When built, "
+            "overriding exposure/gain there must trigger the same "
+            "recalibration prompt as the Acquisition Settings panel."
         )
         # Deliberately left unconnected: building the feature itself is a
         # non-goal of this phase (see module docstring).
@@ -381,8 +394,9 @@ class LiveViewWidget(QWidget):
         group.setToolTip(
             "Skeleton only -- does not reconfigure the camera. Pre-filled "
             "from the loaded baseline's capture settings; drifting past "
-            "tolerance from the loaded calibrations prompts a "
-            "recalibration check."
+            "tolerance from the loaded calibrations hides the fit "
+            "diagnostics and overlay (reading \"N/A\", raw heatmap still "
+            "shown) and shows an informational recalibration message."
         )
         form = QFormLayout(group)
 
@@ -412,73 +426,127 @@ class LiveViewWidget(QWidget):
 
     def _on_exposure_changed(self, exposure_us: float) -> None:
 
-        baseline_exposure_us = self._calibration_set.baseline_record.exposure_us
-        if not exposure_has_drifted(exposure_us, baseline_exposure_us):
-            return
-
-        self._prompt_recalibration(
-            artifact_type="baseline",
-            message=(
-                f"Exposure has changed from {baseline_exposure_us:.1f} us "
-                f"(baseline) to {exposure_us:.1f} us. Recalibrate baseline?"
-            ),
-        )
+        # exposure_us is unused directly -- kept as the parameter so this
+        # stays a valid QDoubleSpinBox.valueChanged slot signature; the
+        # recompute reads the spin box's current value itself, the same
+        # way _on_gain_changed does.
+        self._recompute_settings_drift()
 
     def _on_gain_changed(self, gain_db: float) -> None:
 
-        # Gain is checked against baseline and (if loaded) conversion-gain
-        # independently, since the two artifacts can drift apart from one
-        # another -- e.g. a re-run baseline at the new gain would clear the
-        # first warning while the conversion-gain artifact is still stale.
-        baseline_gain_db = self._calibration_set.baseline_record.gain_db
-        if gain_has_drifted(gain_db, baseline_gain_db):
-            self._prompt_recalibration(
-                artifact_type="baseline",
-                message=(
-                    f"Gain has changed from {baseline_gain_db:.1f} dB "
-                    f"(baseline) to {gain_db:.1f} dB. Recalibrate baseline?"
-                ),
-            )
+        self._recompute_settings_drift()
 
-        if self._conversion_gain_record is not None:
-            conversion_gain_db = self._conversion_gain_record.gain_db
-            if gain_has_drifted(gain_db, conversion_gain_db):
-                self._prompt_recalibration(
-                    artifact_type="conversion_gain",
-                    message=(
-                        f"Gain has changed from {conversion_gain_db:.1f} dB "
-                        f"(conversion-gain calibration) to {gain_db:.1f} dB. "
-                        f"Recalibrate conversion gain?"
-                    ),
-                )
-
-    def _prompt_recalibration(self, artifact_type: str, message: str) -> None:
+    def _recompute_settings_drift(self) -> None:
 
         '''
-        Asks the user whether to recalibrate a specific drifted artifact.
-        Emits recalibration_requested(artifact_type) on "Yes" -- nothing
-        in this codebase yet connects to that signal (see its own
-        docstring in the class header), the same not-yet-wired treatment
-        as _extended_measurement_button below.
+        Combined baseline/conversion-gain drift check, driving a single
+        self._settings_drifted state machine rather than the three
+        independent per-comparison prompts a naive per-field check would
+        produce. Reads self._exposure_spin/self._gain_spin's *current*
+        values directly (not a parameter) so it can be called equally from
+        a spin box's valueChanged slot or from __init__ before any signal
+        has ever fired.
+
+        Gain is checked against both baseline_record and (if loaded)
+        conversion_gain_record independently, since the two artifacts can
+        drift apart from one another -- e.g. a re-run baseline at the new
+        gain would clear the baseline comparison while the conversion-gain
+        artifact is still stale.
+
+        On a False -> True transition, enters the drifted state (N/A
+        diagnostics, hidden overlay, one informational popup). On a
+        True -> False transition, exits it (restores real diagnostics and
+        overlay visibility). No-op otherwise -- this is what makes the
+        popup fire once per drift episode, not on every spin-box tick.
+        '''
+
+        baseline_record = self._calibration_set.baseline_record
+
+        exposure_drifted = exposure_has_drifted(
+            self._exposure_spin.value(), baseline_record.exposure_us
+        )
+        baseline_gain_drifted = gain_has_drifted(
+            self._gain_spin.value(), baseline_record.gain_db
+        )
+        conversion_gain_drifted = (
+            self._conversion_gain_record is not None
+            and gain_has_drifted(
+                self._gain_spin.value(), self._conversion_gain_record.gain_db
+            )
+        )
+        drifted = exposure_drifted or baseline_gain_drifted or conversion_gain_drifted
+
+        if drifted and not self._settings_drifted:
+            self._settings_drifted = True
+            self._enter_drifted_state(
+                baseline_drifted=exposure_drifted or baseline_gain_drifted,
+                conversion_gain_drifted=conversion_gain_drifted,
+            )
+        elif not drifted and self._settings_drifted:
+            self._settings_drifted = False
+            self._exit_drifted_state()
+
+    def _enter_drifted_state(
+        self, baseline_drifted: bool, conversion_gain_drifted: bool
+    ) -> None:
+
+        '''
+        Entered on a False -> True self._settings_drifted transition: the
+        fit diagnostics can no longer be trusted against the newly-entered
+        exposure/gain, so they're replaced with an explicit "N/A" rather
+        than left showing stale numbers, and the scatter/error-bar/
+        fit-curve overlay is hidden (the raw heatmap -- self._image_item --
+        is left alone, since it's still a faithful live view of the
+        detector, just not one the current fit/dispersion figures apply
+        to). Pops one informational message, and emits
+        recalibration_requested for whichever comparison(s) actually
+        drifted, so a future recalibration-launcher still knows which
+        artifact(s) need reopening.
 
         Parameters
         ----------
-        artifact_type
-            Which artifact drifted -- "baseline" or "conversion_gain".
-        message
-            Full prompt text, naming the setting, its captured value, and
-            the newly-entered value.
+        baseline_drifted
+            True if exposure or gain drifted from calibration_set.
+            baseline_record.
+        conversion_gain_drifted
+            True if gain drifted from self._conversion_gain_record (always
+            False when no conversion-gain record was supplied).
         '''
 
-        response = QMessageBox.question(
+        self._chi_squared_label.setText("N/A")
+        self._coefficients_label.setText("N/A")
+        self._zeta_label.setText("N/A")
+        self._zeta_note_label.setText("")
+        self._evaluated_at_label.setText("")
+
+        self._scatter.setVisible(False)
+        self._error_bars.setVisible(False)
+        self._fit_curve.setVisible(False)
+
+        QMessageBox.warning(
             self,
-            "Recalibration Recommended",
-            message,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            "Recalibration Required",
+            "Please recalibrate baseline and conversion gain with new settings.",
         )
-        if response == QMessageBox.Yes:
-            self.recalibration_requested.emit(artifact_type)
+
+        if baseline_drifted:
+            self.recalibration_requested.emit("baseline")
+        if conversion_gain_drifted:
+            self.recalibration_requested.emit("conversion_gain")
+
+    def _exit_drifted_state(self) -> None:
+
+        '''
+        Entered on a True -> False self._settings_drifted transition:
+        restores the scatter/error-bar/fit-curve overlay's visibility and
+        recomputes the fit-diagnostics panel for the currently-selected
+        degree, undoing _enter_drifted_state()'s "N/A" placeholders.
+        '''
+
+        self._scatter.setVisible(True)
+        self._error_bars.setVisible(True)
+        self._fit_curve.setVisible(True)
+        self._update_fit_panel(self._current_degree)
 
     def _build_degree_selector_group(self) -> QGroupBox:
 

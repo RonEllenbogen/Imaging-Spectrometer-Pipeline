@@ -5,7 +5,8 @@ from .flat_field import build_flat_field, save_flat_field, load_flat_field
 from .bad_pixel_map import build_bad_pixel_map, SIGMA_THRESHOLD, save_bad_pixel_map, load_bad_pixel_map
 from .conversion_gain import (
     ConversionGainRecord, ConversionGainResult,
-    build_conversion_gain, save_conversion_gain, load_conversion_gain,
+    build_conversion_gain, check_conversion_gain_matches_baseline,
+    save_conversion_gain, load_conversion_gain,
     MIN_FRAMES_PER_LEVEL, MIN_ILLUMINATION_LEVELS,
 )
 from .workflow import (
@@ -22,7 +23,8 @@ __all__ = [
     "build_flat_field", "save_flat_field", "load_flat_field",
     "build_bad_pixel_map", "SIGMA_THRESHOLD", "save_bad_pixel_map", "load_bad_pixel_map",
     "ConversionGainRecord", "ConversionGainResult",
-    "build_conversion_gain", "save_conversion_gain", "load_conversion_gain",
+    "build_conversion_gain", "check_conversion_gain_matches_baseline",
+    "save_conversion_gain", "load_conversion_gain",
     "MIN_FRAMES_PER_LEVEL", "MIN_ILLUMINATION_LEVELS",
     "run_baseline_calibration",
     "capture_dark_frames", "capture_illuminated_frames", "finish_flat_field_calibration",

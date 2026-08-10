@@ -57,8 +57,10 @@ from PySide6.QtWidgets import (
 )
 
 from pipeline.analysis import SensorNoiseModel, WavelengthAxis
+from pipeline.calibration.exceptions import SettingsMismatchError
 from pipeline.calibration.sensor import (
     ConversionGainRecord,
+    check_conversion_gain_matches_baseline,
     load_bad_pixel_map,
     load_baseline,
     load_conversion_gain,
@@ -117,6 +119,13 @@ _DEFAULT_SCALE_FACTOR_FILENAME = "scale_factor.npz"
 _NO_EXISTING_CALIBRATIONS_TITLE = "No Existing Calibrations"
 _NO_EXISTING_CALIBRATIONS_MESSAGE = (
     "No existing calibrations found. Please create new calibrations."
+)
+
+_SETTINGS_MISMATCH_TITLE = "Calibration Settings Mismatch"
+_SETTINGS_MISMATCH_MESSAGE = (
+    "Baseline and conversion-gain calibrations were captured at different "
+    "gain settings. Recalibrate baseline and/or conversion gain so both "
+    "use the same gain before continuing."
 )
 
 _SCREEN_STYLE = f"""
@@ -452,6 +461,10 @@ class CreatePage(QWidget):
         self.continue_button.setProperty("role", "primary")
         self.continue_button.setEnabled(False)
         self.continue_button.setToolTip("Create at least baseline and flat field first.")
+        # NOTE: once wired to actually emit calibration_ready (see module
+        # docstring's Phase-1 note), this must run the same
+        # check_conversion_gain_matches_baseline() gain-mismatch check
+        # _attempt_load_existing_calibrations() does below, before proceeding.
         layout.addWidget(self.continue_button)
 
     def _open_baseline_dialog(self) -> None:
@@ -560,6 +573,15 @@ class CalibrationScreen(QWidget):
         WelcomePage. Spatial's scale factor is not part of this check:
         load_scale_factor() always falls back to DEFAULT_SCALE_FACTOR
         rather than raising, so it alone missing is never a failure.
+
+        A second, separate check runs once all four artifacts load
+        successfully: check_conversion_gain_matches_baseline() cross-checks
+        the two independently-recorded gain_db values (baseline's and
+        conversion-gain's) against each other, since nothing else in this
+        method compares them directly. If they've drifted apart by more
+        than GAIN_MATCH_TOLERANCE_ABS, this also shows an error dialog and
+        leaves the user on WelcomePage, without building or emitting a
+        CalibrationBundle from the (settings-inconsistent) artifacts.
         '''
 
         try:
@@ -579,6 +601,12 @@ class CalibrationScreen(QWidget):
             show_calibration_error_dialog(
                 self, _NO_EXISTING_CALIBRATIONS_TITLE, _NO_EXISTING_CALIBRATIONS_MESSAGE
             )
+            return
+
+        try:
+            check_conversion_gain_matches_baseline(baseline_record, conversion_gain_record)
+        except SettingsMismatchError:
+            show_calibration_error_dialog(self, _SETTINGS_MISMATCH_TITLE, _SETTINGS_MISMATCH_MESSAGE)
             return
 
         position_calibration, _ = load_scale_factor(

@@ -44,7 +44,7 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QGroupBox, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QGroupBox  # noqa: E402
 
 from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
 from pipeline.analysis import SensorNoiseModel  # noqa: E402
@@ -194,6 +194,60 @@ def _patch_missing_calibration_load(monkeypatch) -> list:
     return error_calls
 
 
+def _patch_mismatched_gain_calibration_load(monkeypatch) -> list:
+    '''
+    Like _patch_successful_calibration_load(), but baseline_record and
+    conversion_gain_record are tagged with gain_db values that differ by
+    more than GAIN_MATCH_TOLERANCE_ABS -- exercises
+    check_conversion_gain_matches_baseline()'s SettingsMismatchError path
+    in _attempt_load_existing_calibrations(). Also patches
+    show_calibration_error_dialog() to record its arguments instead of
+    opening a real modal dialog. Returns the list its calls get appended
+    to, as (title, message) tuples.
+    '''
+    baseline_record = CalibrationRecord(
+        exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+        timestamp=time.time(), source_frame_count=50,
+    )
+    conversion_gain_record = ConversionGainRecord(
+        gain_db=FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2,
+        timestamp=time.time(), n_illumination_levels=5,
+    )
+    baseline_result = SimpleNamespace(
+        baseline=np.full(CANONICAL_SHAPE, 10.0, dtype=np.float64), background_sigma=1.0
+    )
+    flat_field = np.ones(CANONICAL_SHAPE, dtype=np.float64)
+    bad_pixel_mask = np.zeros(CANONICAL_SHAPE, dtype=bool)
+    conversion_gain_result = SimpleNamespace(gain_e_per_adu=2.2)
+
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "load_baseline",
+        lambda path: (baseline_result, baseline_record),
+    )
+    monkeypatch.setattr(
+        calibration_screen_module, "load_flat_field", lambda path: (flat_field, baseline_record)
+    )
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "load_bad_pixel_map",
+        lambda path: (bad_pixel_mask, baseline_record),
+    )
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "load_conversion_gain",
+        lambda path: (conversion_gain_result, conversion_gain_record),
+    )
+
+    error_calls = []
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "show_calibration_error_dialog",
+        lambda parent, title, message: error_calls.append((title, message)),
+    )
+    return error_calls
+
+
 def _make_live_view_widget(qtbot, wavelength_axis=None) -> LiveViewWidget:
     widget = LiveViewWidget(
         calibration_set=_calibration_set(),
@@ -271,6 +325,28 @@ def test_load_existing_calibrations_missing_artifact_shows_error(qtbot, monkeypa
     title, message = error_calls[0]
     assert title == "No Existing Calibrations"
     assert message == "No existing calibrations found. Please create new calibrations."
+
+
+def test_load_existing_calibrations_gain_mismatch_shows_error_and_blocks_ready(
+    qtbot, monkeypatch
+):
+    error_calls = _patch_mismatched_gain_calibration_load(monkeypatch)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    assert received == []
+    assert screen.get_calibration_bundle() is None
+    assert screen._stack.currentWidget() is screen.welcome_page
+    assert len(error_calls) == 1
+    title, message = error_calls[0]
+    assert title == "Calibration Settings Mismatch"
+    assert "different" in message.lower()
+    assert "gain" in message.lower()
 
 
 def test_create_page_has_five_enabled_type_cards_and_no_bad_pixel_option(qtbot):
@@ -794,10 +870,9 @@ class TestAcquisitionSettingsPanel:
         assert widget._exposure_spin.value() == pytest.approx(FIXTURE_EXPOSURE_US)
         assert widget._gain_spin.value() == pytest.approx(FIXTURE_GAIN_DB)
 
-    def test_recalibration_requested_fires_for_confirmed_exposure_drift(self, qtbot, monkeypatch):
+    def test_recalibration_requested_fires_baseline_for_exposure_drift(self, qtbot, monkeypatch):
         monkeypatch.setattr(
-            "pipeline.gui.live_view.QMessageBox.question",
-            lambda *args, **kwargs: QMessageBox.Yes,
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
         )
         widget = _make_live_view_widget(qtbot)
         drifted_exposure_us = FIXTURE_EXPOSURE_US * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 2)
@@ -807,33 +882,26 @@ class TestAcquisitionSettingsPanel:
 
         assert blocker.args == ["baseline"]
 
-    def test_recalibration_requested_not_fired_when_declined(self, qtbot, monkeypatch):
-        monkeypatch.setattr(
-            "pipeline.gui.live_view.QMessageBox.question",
-            lambda *args, **kwargs: QMessageBox.No,
-        )
-        widget = _make_live_view_widget(qtbot)
-        received = []
-        widget.recalibration_requested.connect(received.append)
-        drifted_exposure_us = FIXTURE_EXPOSURE_US * (1 + EXPOSURE_MATCH_TOLERANCE_REL * 2)
-
-        widget._exposure_spin.setValue(drifted_exposure_us)
-
-        assert received == []
-
     def test_recalibration_requested_fires_conversion_gain_for_isolated_drift(
         self, qtbot, monkeypatch
     ):
-        # gain_db is set so it matches baseline_record.gain_db (no baseline
-        # drift) but drifts beyond tolerance from conversion_gain_record's
-        # gain_db -- isolates the conversion-gain-specific prompt/signal
-        # from the baseline one, per the spec's "drift independently" note.
+        # conversion_gain_record.gain_db is chosen within tolerance of
+        # baseline_record.gain_db (FIXTURE_GAIN_DB) so the widget does NOT
+        # start already drifted at construction (see __init__'s own
+        # _recompute_settings_drift() call) -- the spin box is then moved to
+        # a value that stays within tolerance of baseline but drifts beyond
+        # tolerance from conversion_gain_record, isolating the
+        # conversion-gain-specific signal from the baseline one, per the
+        # spec's "drift independently" note. ConversionGainRecord.gain_db
+        # has no widget-range constraint (unlike the gain spin box itself,
+        # whose minimum is 0.0), so it can sit on the opposite side of
+        # FIXTURE_GAIN_DB from the spin box's new value.
         monkeypatch.setattr(
-            "pipeline.gui.live_view.QMessageBox.question",
-            lambda *args, **kwargs: QMessageBox.Yes,
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
         )
         conversion_gain_record = ConversionGainRecord(
-            gain_db=5.0, timestamp=time.time(), n_illumination_levels=5,
+            gain_db=FIXTURE_GAIN_DB - GAIN_MATCH_TOLERANCE_ABS * 0.9,
+            timestamp=time.time(), n_illumination_levels=5,
         )
         widget = LiveViewWidget(
             calibration_set=_calibration_set(),
@@ -844,8 +912,9 @@ class TestAcquisitionSettingsPanel:
             conversion_gain_record=conversion_gain_record,
         )
         qtbot.addWidget(widget)
+        assert widget._settings_drifted is False
 
-        near_baseline_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 0.5
+        near_baseline_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 0.9
         assert not gain_has_drifted(near_baseline_gain_db, FIXTURE_GAIN_DB)
         assert gain_has_drifted(near_baseline_gain_db, conversion_gain_record.gain_db)
 
@@ -853,3 +922,68 @@ class TestAcquisitionSettingsPanel:
             widget._gain_spin.setValue(near_baseline_gain_db)
 
         assert blocker.args == ["conversion_gain"]
+
+    def test_drifted_state_hides_diagnostics_and_overlay_and_warns_once(
+        self, qtbot, monkeypatch
+    ):
+        warning_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning",
+            lambda *args, **kwargs: warning_calls.append(args),
+        )
+        widget = _make_live_view_widget(qtbot)
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+
+        widget._gain_spin.setValue(drifted_gain_db)
+
+        assert widget._settings_drifted is True
+        assert widget._chi_squared_label.text() == "N/A"
+        assert widget._coefficients_label.text() == "N/A"
+        assert widget._zeta_label.text() == "N/A"
+        assert widget._zeta_note_label.text() == ""
+        assert widget._evaluated_at_label.text() == ""
+        assert widget._scatter.isVisible() is False
+        assert widget._error_bars.isVisible() is False
+        assert widget._fit_curve.isVisible() is False
+        # The raw heatmap must keep displaying -- only the fit overlay hides.
+        assert widget._image_item.isVisible() is True
+        assert len(warning_calls) == 1
+
+    def test_drift_popup_and_signal_fire_once_per_episode(self, qtbot, monkeypatch):
+        warning_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning",
+            lambda *args, **kwargs: warning_calls.append(args),
+        )
+        widget = _make_live_view_widget(qtbot)
+        received = []
+        widget.recalibration_requested.connect(received.append)
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+
+        widget._gain_spin.setValue(drifted_gain_db)
+        # Still drifted, just a different drifted value -- no new episode,
+        # so no additional popup/signal.
+        widget._gain_spin.setValue(drifted_gain_db + GAIN_MATCH_TOLERANCE_ABS)
+
+        assert len(warning_calls) == 1
+        assert len(received) == 1
+
+    def test_exiting_drifted_state_restores_diagnostics_and_overlay(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        widget = _make_live_view_widget(qtbot)
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+
+        widget._gain_spin.setValue(drifted_gain_db)
+        assert widget._settings_drifted is True
+
+        widget._gain_spin.setValue(FIXTURE_GAIN_DB)
+
+        assert widget._settings_drifted is False
+        assert widget._chi_squared_label.text() != "N/A"
+        assert widget._coefficients_label.text() != "N/A"
+        assert widget._zeta_label.text() != "N/A"
+        assert widget._scatter.isVisible() is True
+        assert widget._error_bars.isVisible() is True
+        assert widget._fit_curve.isVisible() is True

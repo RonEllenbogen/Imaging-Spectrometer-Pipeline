@@ -39,7 +39,8 @@ from pipeline.calibration.sensor import (
     build_flat_field, save_flat_field, load_flat_field,
     build_bad_pixel_map, save_bad_pixel_map, load_bad_pixel_map,
     ConversionGainRecord, ConversionGainResult,
-    build_conversion_gain, save_conversion_gain, load_conversion_gain,
+    build_conversion_gain, check_conversion_gain_matches_baseline,
+    save_conversion_gain, load_conversion_gain,
     check_saturation, SaturationCheckResult,
     run_baseline_calibration,
     capture_dark_frames, capture_illuminated_frames, finish_flat_field_calibration,
@@ -335,6 +336,12 @@ class TestFlatField:
         with pytest.raises(InvalidFlatFieldError):
             build_flat_field(illuminated, dark)
 
+    def test_build_flat_field_rejects_dark_illuminated_settings_mismatch(self):
+        illuminated = [_frame(_uniform(150), exposure_us=2000.0) for _ in range(3)]
+        dark = [_frame(_uniform(10), exposure_us=3000.0) for _ in range(3)]
+        with pytest.raises(ValueError):
+            build_flat_field(illuminated, dark)
+
     def test_save_load_round_trips(self, tmp_path):
         illuminated = [_frame(_uniform(150)) for _ in range(3)]
         dark = [_frame(_uniform(10)) for _ in range(3)]
@@ -490,6 +497,28 @@ class TestConversionGain:
         assert np.isclose(loaded_result.gain_e_per_adu, result.gain_e_per_adu)
         assert np.allclose(loaded_result.fit.coefficients, result.fit.coefficients)
         assert loaded_record == record
+
+
+class TestCheckConversionGainMatchesBaseline:
+
+    def _conversion_gain_record(self, gain_db: float) -> ConversionGainRecord:
+        return ConversionGainRecord(gain_db=gain_db, timestamp=time.time(), n_illumination_levels=2)
+
+    def test_passes_on_exact_gain_match(self):
+        baseline_record = _record(gain_db=0.0)
+        conversion_gain_record = self._conversion_gain_record(gain_db=0.0)
+        check_conversion_gain_matches_baseline(baseline_record, conversion_gain_record)   # must not raise
+
+    def test_passes_within_tolerance(self):
+        baseline_record = _record(gain_db=0.0)
+        conversion_gain_record = self._conversion_gain_record(gain_db=0.04)   # < GAIN_MATCH_TOLERANCE_ABS
+        check_conversion_gain_matches_baseline(baseline_record, conversion_gain_record)   # must not raise
+
+    def test_raises_on_gain_mismatch_beyond_tolerance(self):
+        baseline_record = _record(gain_db=0.0)
+        conversion_gain_record = self._conversion_gain_record(gain_db=5.0)
+        with pytest.raises(SettingsMismatchError):
+            check_conversion_gain_matches_baseline(baseline_record, conversion_gain_record)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,6 +1036,29 @@ class TestRunSpectralCalibration:
 
             loaded = load_spectral_calibration(path)
             assert np.allclose(loaded.fit.coefficients, result.fit.coefficients)
+        finally:
+            stream.stop()
+
+    def test_rejects_frame_settings_drift_within_batch(self, tmp_path, monkeypatch):
+        # Under normal CameraStream operation every frame in one
+        # collect_n_frames() batch shares identical exposure_us/gain_db
+        # (stamped from the stream's fixed settings at grab time), so the
+        # only way to exercise the drift check is to stub
+        # collect_n_frames() itself with a batch containing a mismatch.
+        drifted_frames = [
+            _frame(_uniform(10), frame_id=0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
+            _frame(_uniform(10), frame_id=1, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
+            _frame(_uniform(10), frame_id=2, exposure_us=FIXTURE_EXPOSURE_US + 500.0, gain_db=FIXTURE_GAIN_DB),
+        ]
+
+        stream = _make_running_stream()
+        monkeypatch.setattr(stream, "collect_n_frames", lambda n: drifted_frames)
+        try:
+            with pytest.raises(ValueError):
+                run_spectral_calibration(
+                    stream, n_frames=3, sensor_calibration=_sensor_calibration_set(),
+                    path=tmp_path / "spectral.npz",
+                )
         finally:
             stream.stop()
 
