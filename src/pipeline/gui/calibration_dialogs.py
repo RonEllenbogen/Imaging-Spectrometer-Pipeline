@@ -22,6 +22,7 @@ top-level screen's page-navigation code.
 # Imports
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -31,12 +32,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from pipeline.gui.live_view import DEFAULT_DEGREE, DEGREE_CHOICES, DEGREE_LABELS
 from pipeline.gui.theme import (
     COLOR_ACCENT,
     COLOR_ACCENT_ALT,
@@ -513,6 +516,221 @@ class SpatialCalibrationDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class SpectralCalibrationDialog(QDialog):
+
+    '''
+    Pixel -> wavelength_nm calibration, offering two mutually exclusive
+    entry points via a mode selector (a QRadioButton pair) at the top of
+    the dialog, each showing its own section of a QStackedWidget below:
+
+    "Capture from Lamp" mirrors BaselineDialog's single-phase capture
+    form (frame count + gain_db), plus a fit-degree selector -- will
+    eventually call calibration/spectral/workflow.py's
+    run_spectral_calibration(camera_stream, n_frames, sensor_calibration,
+    path, degree) against an already-built CalibrationSet.
+
+    "Manual Entry" mirrors SpatialCalibrationDialog's no-camera,
+    direct-value style, but for a variable-length pixel->wavelength_nm
+    polynomial (wavelength_nm = c0 + c1*pixel + c2*pixel^2 + ...,
+    ascending order) plus each coefficient's REQUIRED 1-sigma
+    uncertainty -- see calibration/spectral/calibrate.py's
+    build_manual_spectral_calibration() docstring for why
+    coefficient_sigma can't be optional or defaulted (no fit residual
+    exists to estimate it from). Changing the degree selector rebuilds
+    the coefficient/sigma row list to match.
+
+    Like every other dialog in this file, both modes' accept paths are
+    still UI-only placeholders (see module docstring) -- neither
+    run_spectral_calibration() nor build_manual_spectral_calibration() is
+    actually called yet.
+    '''
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Spectral Calibration")
+        self.setStyleSheet(_DIALOG_STYLE)
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*([MARGIN_DEFAULT] * 4))
+        layout.setSpacing(SPACING_MEDIUM)
+
+        heading = QLabel("Spectral Calibration")
+        heading.setFont(load_bundled_font(14, bold=True))
+        layout.addWidget(heading)
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(SPACING_MEDIUM)
+        self.mode_group = QButtonGroup(self)
+        self.capture_mode_radio = QRadioButton("Capture from Lamp")
+        self.capture_mode_radio.setChecked(True)
+        self.manual_mode_radio = QRadioButton("Manual Entry")
+        self.mode_group.addButton(self.capture_mode_radio)
+        self.mode_group.addButton(self.manual_mode_radio)
+        mode_row.addWidget(self.capture_mode_radio)
+        mode_row.addWidget(self.manual_mode_radio)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        self._mode_stack = QStackedWidget()
+        layout.addWidget(self._mode_stack)
+
+        self._mode_stack.addWidget(self._build_capture_page())
+        self._mode_stack.addWidget(self._build_manual_page())
+
+        self.capture_mode_radio.toggled.connect(self._on_mode_toggled)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.start_button = QPushButton("Start Capture")
+        self.start_button.setProperty("role", "primary")
+        buttons.addButton(self.start_button, QDialogButtonBox.ActionRole)
+        self.save_button = QPushButton("Save")
+        self.save_button.setProperty("role", "primary")
+        buttons.addButton(self.save_button, QDialogButtonBox.ActionRole)
+        self.save_button.setVisible(False)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _build_capture_page(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(SPACING_MEDIUM)
+
+        hint = QLabel(
+            "Captures lamp frames from this project's chosen reference "
+            "lamp -- Argon -- using the curated 751.46-842.46nm window, "
+            "picked roughly symmetric about the Ti:Sapphire laser's "
+            "800nm central wavelength."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        page_layout.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(SPACING_SMALL)
+
+        self.n_frames_spin = QSpinBox()
+        self.n_frames_spin.setRange(2, 1000)
+        self.n_frames_spin.setValue(DEFAULT_N_FRAMES)
+        form.addRow("Number of frames:", self.n_frames_spin)
+
+        self.gain_db_spin = QDoubleSpinBox()
+        self.gain_db_spin.setRange(0.0, 48.0)
+        self.gain_db_spin.setSingleStep(0.1)
+        self.gain_db_spin.setSuffix(" dB")
+        form.addRow("Gain (gain_db):", self.gain_db_spin)
+
+        self.capture_degree_selector = QComboBox()
+        for degree in DEGREE_CHOICES:
+            self.capture_degree_selector.addItem(DEGREE_LABELS[degree], userData=degree)
+        self.capture_degree_selector.setCurrentIndex(DEGREE_CHOICES.index(DEFAULT_DEGREE))
+        form.addRow("Fit degree:", self.capture_degree_selector)
+
+        page_layout.addLayout(form)
+
+        self.status_label = QLabel("Not started.")
+        self.status_label.setProperty("role", "hint")
+        page_layout.addWidget(self.status_label)
+
+        page_layout.addStretch(1)
+        return page
+
+    def _build_manual_page(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(SPACING_MEDIUM)
+
+        hint = QLabel(
+            "Enter a pixel -> wavelength_nm polynomial measured "
+            "independently of this software (e.g. reading off known line "
+            "positions by hand): wavelength_nm = c0 + c1*pixel + "
+            "c2*pixel^2 + ..., ascending order. Each coefficient's "
+            "uncertainty is required -- there is no fit residual here to "
+            "estimate it from."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        page_layout.addWidget(hint)
+
+        degree_row = QHBoxLayout()
+        degree_row.setSpacing(SPACING_SMALL)
+        degree_row.addWidget(QLabel("Polynomial degree:"))
+        self.manual_degree_selector = QComboBox()
+        for degree in DEGREE_CHOICES:
+            self.manual_degree_selector.addItem(DEGREE_LABELS[degree], userData=degree)
+        self.manual_degree_selector.setCurrentIndex(DEGREE_CHOICES.index(DEFAULT_DEGREE))
+        degree_row.addWidget(self.manual_degree_selector)
+        degree_row.addStretch(1)
+        page_layout.addLayout(degree_row)
+
+        self._coefficient_form = QFormLayout()
+        self._coefficient_form.setSpacing(SPACING_SMALL)
+        page_layout.addLayout(self._coefficient_form)
+
+        self._coefficient_rows: list[tuple[QDoubleSpinBox, QDoubleSpinBox]] = []
+        self.manual_degree_selector.currentIndexChanged.connect(self._rebuild_coefficient_rows)
+        self._rebuild_coefficient_rows()
+
+        page_layout.addStretch(1)
+        return page
+
+    def _rebuild_coefficient_rows(self) -> None:
+
+        '''
+        Rebuilds self._coefficient_form to have one (value, sigma) row per
+        coefficient of the currently selected degree -- c0..c(degree),
+        ascending order matching build_manual_spectral_calibration()'s own
+        coefficient convention. Called once at construction and again
+        every time manual_degree_selector's selection changes.
+        '''
+
+        while self._coefficient_form.rowCount():
+            self._coefficient_form.removeRow(0)
+        self._coefficient_rows = []
+
+        degree = self.manual_degree_selector.currentData()
+        for i in range(degree + 1):
+            value_spin = QDoubleSpinBox()
+            value_spin.setRange(-1_000_000.0, 1_000_000.0)
+            value_spin.setDecimals(6)
+
+            sigma_spin = QDoubleSpinBox()
+            sigma_spin.setRange(1e-6, 1_000_000.0)
+            sigma_spin.setDecimals(6)
+            sigma_spin.setValue(1e-6)
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(SPACING_SMALL)
+            row_layout.addWidget(QLabel("value:"))
+            row_layout.addWidget(value_spin)
+            row_layout.addWidget(QLabel("+/- sigma:"))
+            row_layout.addWidget(sigma_spin)
+
+            self._coefficient_form.addRow(f"c{i}:", row)
+            self._coefficient_rows.append((value_spin, sigma_spin))
+
+    def _on_mode_toggled(self, capture_checked: bool) -> None:
+        self._mode_stack.setCurrentIndex(0 if capture_checked else 1)
+        self.start_button.setVisible(capture_checked)
+        self.save_button.setVisible(not capture_checked)
+
+    def coefficients(self) -> list[float]:
+
+        '''Current manual-mode coefficient values, ascending order (c0, c1, ...).'''
+
+        return [value_spin.value() for value_spin, _ in self._coefficient_rows]
+
+    def coefficient_sigma(self) -> list[float]:
+
+        '''Current manual-mode per-coefficient 1-sigma uncertainties, same order as coefficients().'''
+
+        return [sigma_spin.value() for _, sigma_spin in self._coefficient_rows]
+
+
 # Functions
 
 
@@ -575,6 +793,7 @@ __all__ = [
     "FlatFieldDialog",
     "ConversionGainDialog",
     "SpatialCalibrationDialog",
+    "SpectralCalibrationDialog",
     "show_camera_error_dialog",
     "show_calibration_error_dialog",
     "DEFAULT_N_FRAMES",

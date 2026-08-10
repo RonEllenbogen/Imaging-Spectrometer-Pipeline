@@ -7,9 +7,9 @@ ordinary unit tests of its plain, non-Qt presentational helper functions.
 Most of both screens has no real camera/calibration-package/preprocessing/
 analysis call wired in yet (see each module's own docstring), so most of
 these tests only check structure/layout/state transitions -- not behavior,
-e.g. that CreatePage exposes exactly the four enabled type cards plus a
-disabled spectral card, not that clicking "Configure..." actually
-acquires anything; that degree selection changes LiveViewWidget's
+e.g. that CreatePage exposes exactly five enabled type cards (bad-pixel-map
+has no manual "create" option of its own), not that clicking "Configure..."
+actually acquires anything; that degree selection changes LiveViewWidget's
 *displayed* placeholder numbers, not that it triggers a real refit. The
 exception is WelcomePage's "Load Existing Calibrations" flow, which is
 fully wired (see calibration_screen.CalibrationScreen.
@@ -62,10 +62,10 @@ from pipeline.gui.calibration_dialogs import (  # noqa: E402
     ConversionGainDialog,
     FlatFieldDialog,
     SpatialCalibrationDialog,
+    SpectralCalibrationDialog,
 )
 from pipeline.gui.calibration_screen import (  # noqa: E402
     CalibrationScreen,
-    SPECTRAL_UNAVAILABLE_NOTE,
 )
 from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
@@ -273,7 +273,7 @@ def test_load_existing_calibrations_missing_artifact_shows_error(qtbot, monkeypa
     assert message == "No existing calibrations found. Please create new calibrations."
 
 
-def test_create_page_has_four_enabled_type_cards_and_no_bad_pixel_option(qtbot):
+def test_create_page_has_five_enabled_type_cards_and_no_bad_pixel_option(qtbot):
     screen = CalibrationScreen()
     qtbot.addWidget(screen)
     create_page = screen.create_page
@@ -283,17 +283,20 @@ def test_create_page_has_four_enabled_type_cards_and_no_bad_pixel_option(qtbot):
         create_page.flat_field_card,
         create_page.conversion_gain_card,
         create_page.spatial_card,
+        create_page.spectral_card,
     ):
         assert card.action_button.isEnabled()
 
-    assert not create_page.spectral_card.action_button.isEnabled()
     assert not hasattr(create_page, "bad_pixel_card")
 
 
-def test_spectral_card_shows_unavailable_note(qtbot):
+def test_spectral_card_has_real_action_button(qtbot):
     screen = CalibrationScreen()
     qtbot.addWidget(screen)
-    assert screen.create_page.spectral_card.description_label.text() == SPECTRAL_UNAVAILABLE_NOTE
+    card = screen.create_page.spectral_card
+    assert card.action_button.isEnabled()
+    assert card.action_button.text() != "Unavailable"
+    assert card.description_label.text() != ""
 
 
 def test_baseline_dialog_has_n_frames_and_gain_fields(qtbot):
@@ -412,6 +415,84 @@ def test_spatial_dialog_defaults_to_given_scale_factor(qtbot):
     dialog = SpatialCalibrationDialog(1.5)
     qtbot.addWidget(dialog)
     assert dialog.scale_factor_spin.value() == pytest.approx(1.5)
+
+
+def test_spectral_dialog_defaults_to_capture_mode(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.capture_mode_radio.isChecked()
+    assert dialog._mode_stack.currentIndex() == 0
+    # isHidden() (an explicit-hide flag) rather than isVisible() (which
+    # also depends on the top-level dialog having been shown -- always
+    # False here since the test never calls dialog.show()).
+    assert not dialog.start_button.isHidden()
+    assert dialog.save_button.isHidden()
+
+
+def test_spectral_dialog_mode_selector_switches_sections(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.manual_mode_radio.setChecked(True)
+
+    assert dialog._mode_stack.currentIndex() == 1
+    assert not dialog.save_button.isHidden()
+    assert dialog.start_button.isHidden()
+
+    dialog.capture_mode_radio.setChecked(True)
+
+    assert dialog._mode_stack.currentIndex() == 0
+    assert not dialog.start_button.isHidden()
+    assert dialog.save_button.isHidden()
+
+
+def test_spectral_dialog_capture_mode_has_frame_gain_and_degree_fields(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.n_frames_spin.value() > 0
+    assert dialog.gain_db_spin is not None
+    assert dialog.capture_degree_selector.currentData() == DEFAULT_DEGREE
+
+
+def test_spectral_dialog_manual_degree_defaults_to_two_coefficient_rows(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.manual_mode_radio.setChecked(True)
+    assert dialog.manual_degree_selector.currentData() == DEFAULT_DEGREE
+    assert len(dialog._coefficient_rows) == DEFAULT_DEGREE + 1
+
+
+def test_spectral_dialog_manual_degree_change_rebuilds_coefficient_rows(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.manual_mode_radio.setChecked(True)
+
+    quadratic_index = DEGREE_CHOICES.index(2)
+    dialog.manual_degree_selector.setCurrentIndex(quadratic_index)
+    assert len(dialog._coefficient_rows) == 3
+
+    cubic_index = DEGREE_CHOICES.index(3)
+    dialog.manual_degree_selector.setCurrentIndex(cubic_index)
+    assert len(dialog._coefficient_rows) == 4
+
+    linear_index = DEGREE_CHOICES.index(1)
+    dialog.manual_degree_selector.setCurrentIndex(linear_index)
+    assert len(dialog._coefficient_rows) == 2
+
+
+def test_spectral_dialog_manual_getters_return_entered_values(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.manual_mode_radio.setChecked(True)
+
+    values = [780.0, 0.045]
+    sigmas = [0.5, 0.001]
+    for (value_spin, sigma_spin), value, sigma in zip(dialog._coefficient_rows, values, sigmas):
+        value_spin.setValue(value)
+        sigma_spin.setValue(sigma)
+
+    assert dialog.coefficients() == pytest.approx(values)
+    assert dialog.coefficient_sigma() == pytest.approx(sigmas)
 
 
 # ---------------------------------------------------------------------------

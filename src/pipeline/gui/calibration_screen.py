@@ -14,8 +14,9 @@ calibration_artifacts/ on disk yet. A follow-up pass wires:
     capture_dark_frames()/capture_illuminated_frames()/
     finish_flat_field_calibration() (chaining build_bad_pixel_map()+
     save_bad_pixel_map() automatically onto the latter) /
-    run_conversion_gain_calibration(), and calibration/spatial's
-    save_scale_factor().
+    run_conversion_gain_calibration(), calibration/spatial's
+    save_scale_factor(), and calibration/spectral's
+    run_spectral_calibration()/build_manual_spectral_calibration().
   - Camera-connection failures (CameraError and subclasses) to
     calibration_dialogs.show_camera_error_dialog(); calibration-specific
     failures (SettingsMismatchError, InvalidFlatFieldError,
@@ -80,6 +81,7 @@ from pipeline.gui.calibration_dialogs import (
     ConversionGainDialog,
     FlatFieldDialog,
     SpatialCalibrationDialog,
+    SpectralCalibrationDialog,
     show_calibration_error_dialog,
 )
 from pipeline.gui.theme import (
@@ -219,10 +221,11 @@ class CalibrationBundle:
         other fields, a physically valid default always exists -- see
         calibration/spatial/calibrate.py).
     wavelength_axis
-        Always None for now -- calibration/spectral/line_matching.py is an
-        intentional NotImplementedError stub (see calibration_screen's
-        SPECTRAL_UNAVAILABLE_NOTE), so no WavelengthAxis implementation
-        exists yet to construct one from.
+        Always None for now -- calibration/spectral/line_matching.py itself
+        is built, but SpectralCalibrationDialog's accept path is still a
+        UI-only placeholder (see calibration_dialogs.py's module docstring),
+        so no real WavelengthCalibrationResult is built yet to construct
+        one from.
     conversion_gain_record
         The ConversionGainRecord tagging the loaded conversion-gain
         artifact (gain_db/timestamp/n_illumination_levels it was measured
@@ -242,12 +245,6 @@ class CalibrationBundle:
     position_calibration: ScaleFactorPositionCalibration
     wavelength_axis: WavelengthAxis | None = None
     conversion_gain_record: ConversionGainRecord | None = None
-
-
-SPECTRAL_UNAVAILABLE_NOTE = (
-    "Unavailable -- calibration/spectral/line_matching.py is not yet "
-    "implemented (blocked on reference-lamp selection)."
-)
 
 
 class _CalibrationTypeCard(QFrame):
@@ -270,8 +267,11 @@ class _CalibrationTypeCard(QFrame):
         camera-driven types, COLOR_ACCENT_ALT for spatial (see
         calibration_dialogs.SpatialCalibrationDialog's docstring).
     enabled
-        False only for spectral -- renders a greyed-out card with
-        SPECTRAL_UNAVAILABLE_NOTE instead of an action button.
+        False renders a greyed-out card with an "Unavailable" button
+        instead of a real action button. No card currently uses this --
+        all five calibration types now have their own dialog -- but the
+        option is kept for a future calibration type that isn't ready
+        yet.
     '''
 
     def __init__(
@@ -297,7 +297,7 @@ class _CalibrationTypeCard(QFrame):
             title_label.setStyleSheet(f"color: {COLOR_TEXT_DISABLED};")
         layout.addWidget(title_label)
 
-        self.description_label = QLabel(description if enabled else SPECTRAL_UNAVAILABLE_NOTE)
+        self.description_label = QLabel(description if enabled else "Unavailable.")
         self.description_label.setProperty("role", "hint")
         self.description_label.setWordWrap(True)
         layout.addWidget(self.description_label)
@@ -360,9 +360,9 @@ class CreatePage(QWidget):
 
     '''
     Per-type "create new calibration" entry points. Baseline, flat field,
-    conversion gain, and spatial each open their own dialog from
-    calibration_dialogs.py; spectral renders disabled. Bad-pixel-map is
-    intentionally not listed (see module docstring).
+    conversion gain, spatial, and spectral each open their own dialog from
+    calibration_dialogs.py. Bad-pixel-map is intentionally not listed (see
+    module docstring).
     '''
 
     back_requested = Signal()
@@ -435,11 +435,12 @@ class CreatePage(QWidget):
 
         self.spectral_card = _CalibrationTypeCard(
             "Spectral",
-            "",
-            "",
+            "Fits pixel-to-wavelength from an Argon lamp capture, or "
+            "accepts a manually measured polynomial instead.",
+            "Configure...",
             COLOR_ACCENT,
-            enabled=False,
         )
+        self.spectral_card.action_button.clicked.connect(self._open_spectral_dialog)
         cards_row_2.addWidget(self.spectral_card)
 
         cards_row_2.addStretch(1)
@@ -467,6 +468,10 @@ class CreatePage(QWidget):
 
     def _open_spatial_dialog(self) -> None:
         dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR, self)
+        dialog.exec()
+
+    def _open_spectral_dialog(self) -> None:
+        dialog = SpectralCalibrationDialog(self)
         dialog.exec()
 
 
@@ -606,5 +611,4 @@ __all__ = [
     "CalibrationBundle",
     "WelcomePage",
     "CreatePage",
-    "SPECTRAL_UNAVAILABLE_NOTE",
 ]
