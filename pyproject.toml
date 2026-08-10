@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "pypylon",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6", "pyqtgraph"]
+dev = ["pytest", "pytest-qt"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
