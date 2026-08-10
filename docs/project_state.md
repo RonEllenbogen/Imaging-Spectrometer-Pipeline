@@ -454,9 +454,16 @@ flat-field artifact and derives the mask; no camera involved, matching `build_ba
 `spatial` (sets or reports the scale factor via `calibration/spatial/`'s `save_scale_factor()`/
 `load_scale_factor()` — no camera involved either; added later than the other four, see below),
 `conversion-gain` (`--exposure-min-us`/`--exposure-max-us`/`--n-levels` are required CLI arguments with
-no defaults, matching the caller-supplied-not-auto-probed decision in §6), and a bonus `noise-model`
-subcommand that loads a saved baseline + conversion-gain artifact and prints the `SensorNoiseModel` they'd
-produce together.
+no defaults, matching the caller-supplied-not-auto-probed decision in §6), `spectral-capture`/
+`spectral-manual` (two flat subcommands, not one nested one — this file has no nested subparsers
+anywhere, so two top-level commands fit the existing style better; `spectral-capture` wires
+`run_spectral_calibration()` to a real `CameraStream`, loading baseline/flat-field/bad-pixel-map inputs
+the same optional-default way `noise-model` resolves its own inputs; `spectral-manual` takes
+`--coefficients`/`--coefficient-sigma` as `nargs="+"` lists and calls
+`build_manual_spectral_calibration()` -- no camera involved, so it's the one subcommand in this file
+actually exercised end-to-end by its own tests rather than only argument-parsing-tested), and a bonus
+`noise-model` subcommand that loads a saved baseline + conversion-gain artifact and prints the
+`SensorNoiseModel` they'd produce together.
 
 Camera settings come from `configs/default.yaml` via `load_config()`, except `gain_db` — not present in
 the YAML config at all, so it's a required flag on every camera-touching subcommand. Artifacts default to
@@ -534,12 +541,13 @@ their proportions rather than expand into extra space.
 **The calibration screen is not uniform across the five types:**
 - **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
   override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
-- **Spectral** — `line_matching.py` itself is no longer blocked (§3, Argon reference lamp now chosen and
-  built), but the GUI card is still disabled pending its own build pass: a two-mode
-  `SpectralCalibrationDialog` ("Capture from Lamp" mirroring `BaselineDialog`'s single-phase form,
-  "Manual Entry" mirroring `SpatialCalibrationDialog`'s manual-value style but for a variable-length
-  coefficient+sigma list via `build_manual_spectral_calibration()`) plus removing the `CreatePage`
-  card's `SPECTRAL_UNAVAILABLE_NOTE` gating.
+- **Spectral** — like spatial, offers a choice between two flows rather than one, via a two-mode
+  `SpectralCalibrationDialog`: "Capture from Lamp" (mirrors `BaselineDialog`'s single-phase form, uses
+  the curated Argon 751.46-842.46nm window, §3) and "Manual Entry" (mirrors `SpatialCalibrationDialog`'s
+  manual-value style, but for a variable-length coefficient+sigma list, rebuilt per chosen degree, that
+  calls `build_manual_spectral_calibration()`). The `CreatePage` card is enabled like the other four;
+  both dialog modes' accept paths are still UI-only placeholders, same Phase-1 status as every other
+  dialog in this screen.
 - **Bad-pixel-map has no manual "create" option at all** — it runs automatically immediately after every
   flat-field capture (`build_bad_pixel_map()` + `save_bad_pixel_map()` chained onto
   `finish_flat_field_calibration()`), since it's derived purely from the flat field with no camera
@@ -667,7 +675,9 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   chosen, grating-equation geometry supplied, peak-detection + matching search built (with a
   physics-driven synthetic-lamp-image test suite) and verified fast (~0.06s, after fixing an initially
   unvectorized version that took minutes) -- see §3. GUI enablement (`SpectralCalibrationDialog`, both
-  capture and manual-entry modes) and a CLI `spectral` subcommand are still to-do -- see §5.
+  capture and manual-entry modes) and the CLI `spectral-capture`/`spectral-manual` subcommands are also
+  now done -- see §4/§5. Both dialog modes' accept paths remain UI-only placeholders, same as every
+  other calibration dialog, pending the follow-up pass that wires all of them to real build_*() calls.
 - ~~**Conversion gain measurement (e⁻/ADU).**~~ **Done.** New
   `calibration/sensor/conversion_gain.py`: `build_conversion_gain()` takes a
   photon transfer curve sweep -- uniform illumination at *fixed brightness*,
