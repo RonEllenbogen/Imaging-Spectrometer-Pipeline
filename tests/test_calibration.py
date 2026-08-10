@@ -44,7 +44,7 @@ from pipeline.calibration.sensor import (
     run_conversion_gain_calibration,
 )
 from pipeline.calibration.spatial import (
-    ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR,
+    ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR, PIXEL_PITCH_UM,
     ScaleFactorRecord, save_scale_factor, load_scale_factor,
 )
 from pipeline.calibration.spectral import (
@@ -696,14 +696,18 @@ class TestScaleFactorPositionCalibration:
         assert calibration.scale_factor == DEFAULT_SCALE_FACTOR
 
     def test_convert_scales_position_and_sigma(self):
+        # convert() applies PIXEL_PITCH_UM (pixel -> detector-plane distance)
+        # AND scale_factor (detector-plane -> slit-plane distance) -- not
+        # scale_factor alone, see calibrate.py's module docstring.
         calibration = ScaleFactorPositionCalibration(scale_factor=2.0)
         x0 = np.array([1.0, 2.0, 3.0])
         sigma_x0 = np.array([0.1, 0.2, 0.3])
 
         converted_x0, converted_sigma = calibration.convert(x0, sigma_x0)
 
-        assert np.array_equal(converted_x0, x0 * 2.0)
-        assert np.array_equal(converted_sigma, sigma_x0 * 2.0)
+        combined_factor = PIXEL_PITCH_UM * 2.0
+        assert np.array_equal(converted_x0, x0 * combined_factor)
+        assert np.array_equal(converted_sigma, sigma_x0 * combined_factor)
 
     def test_rejects_non_positive_scale_factor(self):
         with pytest.raises(ValueError):

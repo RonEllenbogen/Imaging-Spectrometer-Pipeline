@@ -307,20 +307,38 @@ may start with `"record__"` (reserved for record fields), enforced with a `Value
 **`spatial/` is a fixed scale factor, not a per-point calibration.** Superseding the original design
 sketched in `docs/project_handover.md` §5 (a `SpatialCalibrationSession` built from translation-stage
 measurements) — decided out of scope for this project. Pixel→physical-position conversion at the
-spectrometer's slit is the ratio of the imaging spectrometer's two relay-lens focal lengths (f1/f2),
-which measures the relay optics' magnification (camera pixel pitch alone only converts to distance AT
-THE DETECTOR, not at the slit). `DEFAULT_SCALE_FACTOR = 1.5` in `calibrate.py`. No uncertainty is
-tracked on the scale factor: the lenses' focal lengths are known precisely, and the only real error
+spectrometer's slit needs TWO multiplicative steps, both required: `PIXEL_PITCH_UM` (a fixed sensor
+hardware spec, a2A1920-51gmBAS datasheet, 3.45 -- config-driven via `configs/default.yaml`'s
+`camera.pixel_pitch_um`, the same way `canonical_shape`/`pixel_format` are, since it's a hardware fact
+about whatever camera is connected, not a per-session measurement) converts a pixel-index displacement
+to distance AT THE DETECTOR; `scale_factor` (the ratio of the imaging spectrometer's two relay-lens
+focal lengths, f1/f2, measuring the relay optics' magnification) then converts that detector-plane
+distance to the slit-plane distance where the physically meaningful spatial chirp actually lives.
+`DEFAULT_SCALE_FACTOR = 1.5` in `calibrate.py`. No uncertainty is tracked on either factor: the pixel
+pitch is a fixed datasheet spec, the lenses' focal lengths are known precisely, and the only real error
 source (misalignment, incorrect component spacing) manifests as blur/aberration in the image, not a
-quantifiable scale-factor uncertainty. `ScaleFactorPositionCalibration.convert()` implements
-`analysis.interfaces.PositionCalibration` directly, scaling both `x0` and `sigma_x0` by the same
-factor. The GUI can enter a manually better-measured value, which `io.py` persists (tagged `source=
-"manual"` vs. `"default"` via `ScaleFactorRecord`) and reuses in future sessions.
+quantifiable uncertainty on either quantity. `ScaleFactorPositionCalibration.convert()` implements
+`analysis.interfaces.PositionCalibration` directly, scaling both `x0` and `sigma_x0` by
+`PIXEL_PITCH_UM * scale_factor`, and returns the result in **microns** (matching `PIXEL_PITCH_UM`'s own
+unit -- a deliberate choice so the unit is self-evident from the code rather than an implicit mm
+conversion buried in the calibration math; converting to mm for a human-readable display is the
+caller's/GUI's job). The GUI can enter a manually better-measured `scale_factor`, which `io.py` persists
+(tagged `source="manual"` vs. `"default"` via `ScaleFactorRecord`) and reuses in future sessions --
+`PIXEL_PITCH_UM` has no equivalent manual-override path, since remeasuring a camera's own pixel pitch
+isn't a realistic user action the way remeasuring relay-lens magnification is.
 `load_scale_factor()` is the one `load_*()` in this package that does NOT raise `FileNotFoundError` on
 a missing file -- it falls back to `DEFAULT_SCALE_FACTOR`, since (unlike a baseline or flat field) the
 scale factor always has a physically valid default; a fresh instrument with no saved override is the
 expected common case, not an error. `spatial/session.py`, from the original design, was deleted as no
 longer needed.
+
+**Bug fixed during GUI review**: `convert()` originally applied `scale_factor` alone directly to the raw
+pixel index, skipping the `PIXEL_PITCH_UM` step entirely -- present in this file's own design rationale
+from the start (pixel pitch alone being insufficient was always documented) but never actually wired
+into the formula. Caught by inspecting the live-view GUI's physical-position axis against known hardware
+numbers (1200 spatial pixels x 3.45 um/pixel = 4140 um at the detector; x 1.5 scale factor = 6210 um /
+6.21 mm at the slit) rather than by a test, since every existing test only checked *relative* scaling
+behavior (e.g. "does doubling scale_factor double the output"), never an absolute real-world value.
 
 **`shared/fitting.py`/`shared/result.py` generalize `analysis/dispersion_fitting.py`'s total-least-
 squares machinery** (`TotalLeastSquaresFit` via `scipy.odr`) to generic x/y naming (`PolynomialFitter`
@@ -648,14 +666,17 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   independently re-verified (diffs read in full, suite re-run) rather than trusting
   the initial report.
 - **Build the GUI** per the design recorded in §5. Nothing started in code yet.
-- **`analysis/`: proper internal uncertainty on ζ for degree > 1.** Currently only
-  `coefficient_sigma` (marginal, per-coefficient) is stored; a statistically sound
-  uncertainty on `zeta(wavelength_nm)` needs the fit's full coefficient covariance
-  matrix (`scipy.odr`'s `cov_beta` × `res_var`, not currently kept) propagated through
-  ζ's derivative formula. Surfaced while designing the GUI's live/extended-measurement
-  degree > 1 display (§5); belongs in `analysis/dispersion_fitting.py` +
-  `analysis/results.py`, not `calibration/shared/`'s separate copy of the same fitting
-  machinery. Not required before a first GUI version — external (empirical)
-  uncertainty alone is the agreed interim for degree > 1 until this is built.
+- **`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
+  degree > 1.** Currently only `coefficient_sigma` (marginal, per-coefficient) is
+  stored; a statistically sound uncertainty on `zeta(wavelength_nm)` needs the fit's
+  full coefficient covariance matrix (`scipy.odr`'s `cov_beta` × `res_var`, not
+  currently kept) propagated through ζ's derivative formula. Belongs in
+  `analysis/dispersion_fitting.py` + `analysis/results.py`, not `calibration/shared/`'s
+  separate copy of the same fitting machinery. Confirmed still open, explicitly not
+  being built as part of the GUI's Phase 1 build: live view's degree > 1 side panel
+  shows "uncertainty not available" (correct given this gap -- a single frame has no
+  cross-shot scatter to fall back on the way extended measurement will), and extended
+  measurement's degree > 1 combination (§5) is limited to external/empirical
+  uncertainty only until this exists.
 - **Monte Carlo / bootstrap uncertainty validation** for `analysis/`
   (optional, time permitting) — see centroid uncertainty note in §2.
