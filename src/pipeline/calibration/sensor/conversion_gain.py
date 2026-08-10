@@ -35,9 +35,10 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.acquisition import FrameData
-from ..exceptions import InvalidConversionGainError
+from ..exceptions import InvalidConversionGainError, SettingsMismatchError
 from ..shared.fitting import PolynomialFitter, TotalLeastSquaresFit
 from ..shared.io import save_artifact, load_artifact
+from ..shared.metadata import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS
 from ..shared.result import PolynomialFitResult
 from .saturation import check_saturation
 
@@ -252,6 +253,52 @@ def build_conversion_gain(
     return ConversionGainResult(fit=fit), record
 
 
+def check_conversion_gain_matches_baseline(
+    baseline_record: CalibrationRecord, conversion_gain_record: ConversionGainRecord
+) -> None:
+
+    '''
+    Checks that a loaded baseline and a loaded conversion-gain artifact
+    were captured at the same gain_db.
+
+    A ConversionGainRecord has no exposure_us to compare against
+    CalibrationRecord's -- exposure is the swept variable in a
+    conversion-gain measurement, not a fixed setting (see
+    ConversionGainRecord's own docstring), so only gain_db is checked
+    here.
+
+    Unlike build_flat_field()'s dark/illuminated check and
+    run_spectral_calibration()'s N-frame check (both of which compare
+    frames captured back-to-back in one session and require exact
+    equality), this compares two independently-built artifacts that may
+    come from different sessions entirely -- so it reuses
+    check_settings_match()'s existing GAIN_MATCH_TOLERANCE_ABS tolerance
+    rather than requiring exact equality.
+
+    Parameters
+    ----------
+    baseline_record
+        The CalibrationRecord a loaded baseline artifact was tagged with.
+    conversion_gain_record
+        The ConversionGainRecord a loaded conversion-gain artifact was
+        tagged with.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    SettingsMismatchError
+        If gain_db differs between the two records by more than
+        GAIN_MATCH_TOLERANCE_ABS.
+    '''
+
+    gain_diff_abs = abs(baseline_record.gain_db - conversion_gain_record.gain_db)
+    if gain_diff_abs > GAIN_MATCH_TOLERANCE_ABS:
+        raise SettingsMismatchError("gain_db", baseline_record.gain_db, conversion_gain_record.gain_db)
+
+
 def save_conversion_gain(path: str | Path, result: ConversionGainResult, record: ConversionGainRecord) -> None:
 
     '''
@@ -328,6 +375,7 @@ def load_conversion_gain(path: str | Path) -> tuple[ConversionGainResult, Conver
 
 __all__ = [
     "ConversionGainRecord", "ConversionGainResult",
-    "build_conversion_gain", "save_conversion_gain", "load_conversion_gain",
+    "build_conversion_gain", "check_conversion_gain_matches_baseline",
+    "save_conversion_gain", "load_conversion_gain",
     "MIN_FRAMES_PER_LEVEL", "MIN_ILLUMINATION_LEVELS",
 ]

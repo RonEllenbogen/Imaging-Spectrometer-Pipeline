@@ -95,9 +95,24 @@ def run_spectral_calibration(
     RuntimeError, CameraError
         Propagated from CameraStream.collect_n_frames() if camera_stream
         isn't running, or dies while collecting.
+    ValueError
+        If the collected frames don't all share identical exposure_us/
+        gain_db -- a lamp calibration batch is captured back-to-back in
+        one session, so any drift between frames indicates a setup
+        problem, not something to average over.
     '''
 
     frames = camera_stream.collect_n_frames(n_frames)
+    reference_exposure_us = frames[0].exposure_us
+    reference_gain_db = frames[0].gain_db
+    for frame in frames:
+        if frame.exposure_us != reference_exposure_us or frame.gain_db != reference_gain_db:
+            raise ValueError(
+                f"frame {frame.frame_id} has exposure_us={frame.exposure_us}, "
+                f"gain_db={frame.gain_db}, but the first collected frame had "
+                f"exposure_us={reference_exposure_us}, gain_db={reference_gain_db} -- "
+                f"all lamp frames in one batch must share identical settings"
+            )
     processed_images = [
         run_preprocessing(frame, sensor_calibration)[0].image for frame in frames
     ]

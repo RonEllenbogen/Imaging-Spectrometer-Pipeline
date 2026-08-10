@@ -69,7 +69,9 @@ def build_flat_field(
         source is a setup problem (illumination too bright, exposure too
         long) that should be fixed, not routed around.
     ValueError
-        Propagated from build_baseline() if frame settings are inconsistent.
+        Propagated from build_baseline() if frame settings are inconsistent
+        within either phase, or raised directly here if the dark phase's
+        exposure_us/gain_db don't exactly match the illuminated phase's.
     '''
 
     for frame in illuminated_frames:
@@ -82,12 +84,19 @@ def build_flat_field(
             )
 
     illuminated_result, illum_record = build_baseline(illuminated_frames)
-    dark_result, _ = build_baseline(dark_frames)
+    dark_result, dark_record = build_baseline(dark_frames)
     # Reuses build_baseline() purely as a frame-averaging helper here --
     # its measured background_sigma isn't physically meaningful for a
     # flat-field artifact, so both results' background_sigma is discarded.
     # One side effect: this now inherits build_baseline()'s 2-frame
     # minimum per phase (was 1), since averaging is delegated to it.
+
+    if illum_record.exposure_us != dark_record.exposure_us or illum_record.gain_db != dark_record.gain_db:
+        raise ValueError(
+            f"dark and illuminated frames must share identical settings -- "
+            f"illuminated exposure_us={illum_record.exposure_us}, gain_db={illum_record.gain_db}; "
+            f"dark exposure_us={dark_record.exposure_us}, gain_db={dark_record.gain_db}"
+        )
 
     dark_subtracted = np.clip(illuminated_result.baseline - dark_result.baseline, 0, None)
 
