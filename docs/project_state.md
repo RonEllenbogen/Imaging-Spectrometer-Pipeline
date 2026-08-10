@@ -9,6 +9,31 @@ deliberate cuts) — it is not maintained going forward. Consult it for that
 historical detail; consult this file for where things currently stand and
 what's next.
 
+## 0. Current focus (as of 2026-08-10)
+
+A real calibration session is in progress on the lab PC (Windows), driven entirely through the CLI
+(§4) — baseline, flat-field, bad-pixel-map, conversion-gain, spectral-capture, in that order (spatial
+is a manual value entry, not part of this session). A published guide walks through the exact commands
+and physical setup for each step; ask the user for the link if it's needed again, since artifact URLs
+aren't recorded in this repo.
+
+The repo is pushed to a **public** GitHub remote (`origin` = `RonEllenbogen/Imaging-Spectrometer-
+Pipeline`) — the tooling-mention policy documented in `CLAUDE.md`'s "Conventions" section applies to
+everything that reaches it: commit messages, PR text, code comments, docs (see that section for the
+exact restricted wordlist and which two files are exempt — this file is not one of them, so don't repeat
+the list here either). Before any future push, sweep unpushed commit messages *and* diff content for
+restricted-list matches first (`git log --format="%B" origin/main..HEAD`, `git diff origin/main..HEAD`)
+— this has caught real violations before, including auto-generated merge-commit messages that embedded a
+background task's internal branch name. Local git identity may need one-off `GIT_AUTHOR_NAME`/
+`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` env vars on a commit if the machine's
+hostname-based auto-detection fails — never `git config`, and never `git rebase -i` for history fixes
+(use `git reset --soft`/`--hard` + replay, or `git filter-branch --msg-filter` restricted to the unpushed
+range, for anything not yet pushed).
+
+`pyproject.toml` now declares real dependencies (previously empty — see §4/CLAUDE.md) so `pip install -e
+.` works on a fresh checkout; verify this still holds before telling anyone to rely on it, since it was
+only tested via a throwaway venv, not a real second machine, until this lab session confirms it for real.
+
 ---
 
 ## 1. Status by package
@@ -22,7 +47,7 @@ what's next.
 | `calibration/spectral/` | Complete, tested (synthetic only) — `line_matching.py` now built (Argon lamp), see §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
 | `cli/` | Calibration subcommands complete, import/argparse-tested — real hardware paths unverified — see §4 |
-| `gui/` | Designed in detail, not built — see §5 |
+| `gui/` | Phase-1 visual skeleton built and tested (offscreen), not wired to real acquisition/analysis calls — see §5 |
 | `main.py` | Not started |
 
 ---
@@ -514,17 +539,79 @@ rule on `baseline`/`flat-field`'s new flags, and confirming `conversion-gain` do
 `--exposure-us`) — the CLI previously had no dedicated test file at all; the "argparse-tested" status in
 this section's own history was verified manually via `--help`, not via committed tests.
 
-No hardware-connected code path has actually been exercised against a real camera yet — everything above
-was verified via imports, argparse `--help`, the CLI's own new test file, and the existing synthetic-only
-test suite.
+No hardware-connected code path had been exercised against a real camera as of this section's last
+rewrite — everything above was verified via imports, argparse `--help`, the CLI's own new test file, and
+the existing synthetic-only test suite. **A real lab session against the actual camera is now in
+progress** (§0) — update this paragraph with what that session actually found once it's done, rather than
+leaving this claim stale.
+
+`pyproject.toml` (previously empty) now declares `numpy`/`scipy`/`pyyaml`/`pypylon` as real install
+dependencies, so `pip install -e .` alone is enough to run this CLI on a fresh checkout — no more
+installing each dependency by hand first. `PySide6`/`pyqtgraph` (gui extra) and `pytest`/`pytest-qt` (dev
+extra) are optional, so a CLI-only checkout doesn't need to install Qt at all.
 
 ---
 
-## 5. `gui/` — designed in detail, not built
+## 5. `gui/` — Phase-1 visual skeleton built
 
-Nothing in code yet. Extensively designed in discussion first, the same way `calibration/spectral/` and
-`spatial/` were before being built — recorded here in full so a future implementation pass (or session)
-has the actual decisions, not just the fact that a GUI is planned.
+Extensively designed in discussion first (recorded in full below, still the reference for *why* things
+are shaped the way they are), then actually built as a real, tested Phase-1 skeleton — not "nothing in
+code yet" any more, though still not wired to real acquisition/analysis calls end-to-end (each file's own
+"PHASE 1" module docstring says exactly what is/isn't real in that file).
+
+Built as:
+
+```
+src/pipeline/gui/
+├── theme.py                Shared dark-palette color/spacing/font constants + load_bundled_font()
+├── assets/fonts/            Bundled Latin Modern Roman .otf files (OFL-licensed)
+├── calibration_screen.py    CalibrationScreen (WelcomePage -> CreatePage), CalibrationBundle
+├── calibration_dialogs.py   BaselineDialog, FlatFieldDialog, ConversionGainDialog,
+│                            SpatialCalibrationDialog, SpectralCalibrationDialog, error dialogs
+└── live_view.py             LiveViewWidget (scatter/fit/heatmap + strip chart + side panel) plus
+                             several pure/non-Qt helper functions
+```
+
+`tests/test_gui.py` covers both screens as pytest-qt offscreen smoke tests (structure/state-transition
+checks, not real acquisition behavior) plus ordinary unit tests for the pure helper functions.
+`scripts/demo_live_view.py` opens both screens as real interactive windows in one run
+(`python scripts/demo_live_view.py`), or saves offscreen screenshots of both
+(`QT_QPA_PLATFORM=offscreen python scripts/demo_live_view.py --screenshot`).
+
+**WelcomePage's "Load Existing Calibrations" is the one flow already fully wired end-to-end**, not a
+placeholder: it loads baseline/flat-field/bad-pixel-map/conversion-gain/scale-factor from
+`calibration_artifacts/` for real, builds a `CalibrationBundle`, and emits `calibration_ready` — on
+failure (any required artifact missing) it shows "No existing calibrations found. Please create new
+calibrations." and stays on `WelcomePage`. Every dialog's accept path (create-new-calibration flows) and
+`LiveViewWidget`'s update loop are still Phase-1 placeholder UI, not wired to real
+`build_*()`/`analyze_shot()` calls yet.
+
+**Exposure/gain consistency between calibration and live view, now built** (the gap: nothing used to
+record what exposure/gain a calibration was captured under anywhere the live-view screen could see it,
+so a live setting drifting from the calibrated one would silently produce wrong results):
+- `BaselineDialog`/`FlatFieldDialog` gained an Auto/Manual exposure choice (`QComboBox`,
+  `EXPOSURE_MODE_AUTO`/`EXPOSURE_MODE_MANUAL` in `calibration_dialogs.py`), mirroring the CLI's
+  `--auto-exposure`/`--exposure-us` pair (§4). Auto: `exposure_us_spin` disabled (real auto-exposure
+  convergence decides it at capture time), `gain_db_spin` reset to 0.0 as a starting suggestion,
+  re-applied every time Auto is reselected. Manual: `exposure_us_spin` enabled, gain left alone.
+  `auto_exposure()`/`exposure_us()` getters mirror `args.auto_exposure`/`args.exposure_us`'s semantics
+  exactly (`None` = "let auto-exposure or the config default decide").
+- `CalibrationBundle` gained `conversion_gain_record: ConversionGainRecord | None = None`, populated by
+  `_attempt_load_existing_calibrations()` — previously only the derived `gain_e_per_adu` float was kept,
+  discarding the `gain_db` the sweep was actually measured at.
+- `LiveViewWidget` gained an "Acquisition Settings" `QGroupBox` (exposure_us/gain_db spin boxes) at the
+  top of the side panel, pre-filled from `calibration_set.baseline_record`, plus a new constructor
+  parameter `conversion_gain_record: ConversionGainRecord | None = None`. Editing either field is
+  skeleton-only (no real `CameraStream` reconfiguration yet) but the drift check itself is real:
+  `exposure_has_drifted()`/`gain_has_drifted()` (pure, non-Qt, reusing
+  `calibration.shared.metadata.EXPOSURE_MATCH_TOLERANCE_REL`/`GAIN_MATCH_TOLERANCE_ABS` exactly — the
+  same tolerances `check_settings_match()` enforces at the preprocessing layer) compare the entered value
+  against `baseline_record` (exposure and gain) and independently against `conversion_gain_record`'s
+  `gain_db` (if supplied), since the two artifacts can drift apart from each other. On drift, a
+  `QMessageBox` prompt names the specific artifact and both values, asking to recalibrate; confirming
+  emits a new `recalibration_requested = Signal(str)` (`"baseline"` or `"conversion_gain"`) — deliberately
+  left unconnected, since `gui/app.py` doesn't exist yet to receive it (same not-yet-wired treatment as
+  `_extended_measurement_button`).
 
 **Overall structure.** On launch: choose between loading existing calibration artifacts, or creating new
 ones (per-type — the user picks which one, not an all-or-nothing choice). Calibration and live view are
@@ -788,7 +875,18 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   passed, 17 skipped after this change. Built in a dispatched pass, reviewed and
   independently re-verified (diffs read in full, suite re-run) rather than trusting
   the initial report.
-- **Build the GUI** per the design recorded in §5. Nothing started in code yet.
+- ~~**Build the GUI** per the design recorded in §5.~~ **Phase-1 skeleton done**, both screens, tested
+  and screenshotted (§5). Real wiring to `build_*()`/`analyze_shot()` calls is the remaining work,
+  tracked in the more specific items below (fixed layout, manual ROI entry, the fit-curve item just
+  below) rather than as one big remaining task.
+- **GUI live view: fit curve doesn't actually change shape with the selected degree.** Confirmed by
+  reading the code (not yet fixed): `_populate_placeholder_data()` builds `_fit_curve` from a single
+  fixed "true" trend function (`true_centroid_px`), completely independent of `self._current_degree` —
+  changing the Fit Degree dropdown only updates the side-panel numbers (`_placeholder_fits[degree]`), not
+  the drawn line. Consistent with this file's documented Phase-1 scope ("does not trigger any real
+  refit"), but will read as a bug to anyone testing the dropdown before the real fit is wired in. Belongs
+  with the future "wire up real `analyze_shot()` calls" pass, not a standalone patch, since it needs an
+  actual per-degree fit to plot rather than another placeholder.
 - **GUI: fixed (non-responsive) layout across all pages.** Currently the calibration screen and live
   view both reflow on window resize (stretch factors, expanding layouts) — needs a pass to make every
   page hold a fixed layout tuned for its default window size regardless of resizing. See §5.

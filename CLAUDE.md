@@ -39,8 +39,12 @@ export SPECTROMETER_HARDWARE_TESTS=1
 python3 -m pytest
 ```
 
-There is no configured lint/format/build step (`pyproject.toml`, `requirements.txt` are currently
-empty placeholders) — don't assume `ruff`/`black`/`mypy` are wired up unless you check first.
+`pyproject.toml` declares real install dependencies (`numpy`/`scipy`/`pyyaml`/`pypylon` as core,
+`PySide6`/`pyqtgraph` under the `gui` extra, `pytest`/`pytest-qt` under `dev`) so `pip install -e .` works
+end-to-end on a fresh checkout — it was an empty placeholder earlier in the project and is not to be
+reverted to that state. There is still no configured lint/format step (no `ruff`/`black`/`mypy`) —
+don't assume one is wired up unless you check first. `requirements.txt` remains an empty placeholder;
+`pyproject.toml` is the real source of truth for dependencies.
 
 ## Architecture
 
