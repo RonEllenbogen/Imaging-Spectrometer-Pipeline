@@ -181,6 +181,50 @@ def test_baseline_dialog_has_n_frames_and_gain_fields(qtbot):
     assert dialog.start_button is not None
 
 
+def test_baseline_dialog_defaults_to_auto_exposure(qtbot):
+    dialog = BaselineDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.auto_exposure() is True
+    assert dialog.exposure_us() is None
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+
+
+def test_baseline_dialog_manual_exposure_enables_field_and_getters(qtbot):
+    dialog = BaselineDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+
+    assert dialog.exposure_us_spin.isEnabled()
+    assert dialog.auto_exposure() is False
+
+    dialog.exposure_us_spin.setValue(5000.0)
+    assert dialog.exposure_us() == pytest.approx(5000.0)
+
+
+def test_baseline_dialog_manual_does_not_reset_gain(qtbot):
+    dialog = BaselineDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+    dialog.gain_db_spin.setValue(12.5)
+    dialog.exposure_us_spin.setValue(5000.0)
+
+    assert dialog.gain_db_spin.value() == pytest.approx(12.5)
+
+
+def test_baseline_dialog_switching_back_to_auto_resets_gain(qtbot):
+    dialog = BaselineDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+    dialog.gain_db_spin.setValue(12.5)
+
+    dialog.exposure_mode_combo.setCurrentText("Auto")
+
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.exposure_us() is None
+
+
 def test_flat_field_dialog_two_phase_sequence(qtbot):
     dialog = FlatFieldDialog()
     qtbot.addWidget(dialog)
@@ -195,6 +239,40 @@ def test_flat_field_dialog_two_phase_sequence(qtbot):
     dialog._advance_phase()
     assert dialog._phase == dialog.PHASE_FINISHING
     assert "automatically" in dialog.status_label.text()
+
+
+def test_flat_field_dialog_defaults_to_auto_exposure(qtbot):
+    dialog = FlatFieldDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.auto_exposure() is True
+    assert dialog.exposure_us() is None
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+
+
+def test_flat_field_dialog_manual_exposure_enables_field_and_getters(qtbot):
+    dialog = FlatFieldDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+
+    assert dialog.exposure_us_spin.isEnabled()
+    assert dialog.auto_exposure() is False
+
+    dialog.exposure_us_spin.setValue(3500.0)
+    assert dialog.exposure_us() == pytest.approx(3500.0)
+
+
+def test_flat_field_dialog_switching_back_to_auto_resets_gain(qtbot):
+    dialog = FlatFieldDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+    dialog.gain_db_spin.setValue(8.0)
+
+    dialog.exposure_mode_combo.setCurrentText("Auto")
+
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.exposure_us() is None
 
 
 def test_conversion_gain_dialog_has_all_required_fields(qtbot):
