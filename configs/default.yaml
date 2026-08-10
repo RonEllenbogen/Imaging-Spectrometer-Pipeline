@@ -9,7 +9,10 @@ camera:
   timeout: 100000 #ms. Time we give camera to acquire an image before raising an error. Set it equal to 10 times the exposure_time by default.
   pixel_format: "Mono8" # The bit depth of frames captured by the sensor. Sensor in theory supports 8, 10, and 12-bit output.
   canonical_shape: [1200, 1920] # (spatial axis, spectral). The shape of frames captured by the sensor.
-  
+  pixel_pitch_um: 3.45 # Sensor pixel pitch, in microns -- a2A1920-51gmBAS datasheet spec. Converts a
+                       # pixel-index displacement to a physical distance AT THE DETECTOR; calibration/spatial/
+                       # then applies the relay-optics scale factor on top of this to get distance at the slit.
+
 preprocessing:
   # Define interval on spatial axis beyond which values are set to 0. Important for reducing bias on centroids, however likely not critical
   # Leave as entire spatial axis for now, once I have taken some real images can refine these bounds
