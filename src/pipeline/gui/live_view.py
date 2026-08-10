@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -38,6 +39,7 @@ from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
 from pipeline.preprocessing import CalibrationSet
 
+from pipeline.gui.formatting import format_value_with_uncertainty
 from pipeline.gui.theme import (
     COLOR_ACCENT as ACCENT_COLOR,
     COLOR_BACKGROUND as BACKGROUND_COLOR,
@@ -62,6 +64,19 @@ STRIP_CHART_WINDOW_SECONDS = 60.0
 
 SIDE_PANEL_WIDTH = 300
 
+# calibration/spatial/calibrate.py's ScaleFactorPositionCalibration.convert()
+# deliberately returns microns (matching PIXEL_PITCH_UM's own unit -- see
+# that module's docstring), not millimeters -- this widget's y-axis/heatmap
+# display in mm, so every convert() call site divides by this before
+# display (see _convert_to_mm()).
+MICRONS_PER_MM = 1000.0
+
+# Spectral-column center used for the degree > 1 placeholder's "evaluated
+# at" note (n_cols / 2 from _populate_placeholder_data()'s fake 1920-column
+# frame) -- a fixed illustrative placeholder, like the rest of
+# _PlaceholderFit, not derived from any real per-frame column range.
+EVALUATED_AT_COLUMN = 960.0
+
 # Classes
 
 @dataclass(frozen=True)
@@ -74,6 +89,10 @@ class _PlaceholderFit:
     reduced_chi_squared: float
     zeta_value: float
     zeta_sigma: float | None   # None => "uncertainty not available" note (degree > 1)
+    # x-value (pixel column) the placeholder zeta_value was evaluated at --
+    # only meaningful when zeta_sigma is None (degree > 1); see
+    # evaluated_at_text() and the "Evaluated At:" side-panel row.
+    evaluated_at_column: float | None = None
 
 
 class LiveViewWidget(QWidget):
@@ -177,13 +196,14 @@ class LiveViewWidget(QWidget):
 
         plot_widget = pg.PlotWidget()
         self._main_plot = plot_widget.getPlotItem()
-        self._main_plot.setLabel("left", "Physical position (mm)")
+        self._main_plot.setLabel("left", "Physical Position (mm)")
         self._main_plot.setLabel("bottom", self._x_axis_label())
         self._main_plot.showGrid(x=True, y=True, alpha=0.3)
         self._style_plot_axes(self._main_plot)
 
         # Heatmap first, so the scatter/fit curve render on top of it.
         self._image_item = pg.ImageItem()
+        self._image_item.setColorMap(pg.colormap.get("viridis"))
         self._main_plot.addItem(self._image_item)
 
         self._fit_curve = pg.PlotDataItem(pen=pg.mkPen(color=ACCENT_COLOR, width=2))
@@ -204,7 +224,7 @@ class LiveViewWidget(QWidget):
 
         plot_widget = pg.PlotWidget()
         self._strip_plot = plot_widget.getPlotItem()
-        self._strip_plot.setLabel("left", "zeta")
+        self._strip_plot.setLabel("left", "Spatial Dispersion")
         self._strip_plot.setLabel("bottom", "Time (s ago)")
         self._strip_plot.showGrid(x=True, y=True, alpha=0.3)
         self._style_plot_axes(self._strip_plot)
@@ -257,46 +277,64 @@ class LiveViewWidget(QWidget):
 
     def _build_degree_selector_group(self) -> QGroupBox:
 
-        group = QGroupBox("Fit degree")
+        group = QGroupBox("Fit Degree")
         group.setFont(load_bundled_font(10))
+        group.setStyleSheet(_group_box_stylesheet())
         layout = QVBoxLayout(group)
 
         self._degree_selector = QComboBox()
         self._degree_selector.setFont(load_bundled_font(10))
+        self._degree_selector.setStyleSheet(_combo_box_stylesheet())
         for degree in DEGREE_CHOICES:
             self._degree_selector.addItem(DEGREE_LABELS[degree], userData=degree)
         self._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(DEFAULT_DEGREE))
         self._degree_selector.currentIndexChanged.connect(self._on_degree_changed)
         layout.addWidget(self._degree_selector)
 
+        # Polynomial-form formula, kept in sync with the degree selector by
+        # _on_degree_changed() -- see fit_formula_html().
+        self._formula_label = QLabel(fit_formula_html(DEFAULT_DEGREE, self._wavelength_axis))
+        self._formula_label.setTextFormat(Qt.RichText)
+        self._formula_label.setWordWrap(True)
+        self._formula_label.setFont(load_bundled_font(10))
+        layout.addWidget(self._formula_label)
+
         return group
 
     def _build_fit_diagnostics_group(self) -> QGroupBox:
 
-        group = QGroupBox("Fit diagnostics")
+        group = QGroupBox("Fit Diagnostics")
         group.setFont(load_bundled_font(10))
+        group.setStyleSheet(_group_box_stylesheet())
         form = QFormLayout(group)
 
         label_font = load_bundled_font(10)
 
         self._chi_squared_label = QLabel("--")
         self._coefficients_label = QLabel("--")
+        self._coefficients_label.setTextFormat(Qt.RichText)
         self._coefficients_label.setWordWrap(True)
         self._zeta_label = QLabel("--")
+        self._zeta_label.setWordWrap(True)
         self._zeta_note_label = QLabel("")
         self._zeta_note_label.setWordWrap(True)
         self._zeta_note_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-style: italic;")
+        # Degree > 1 only -- the x-value spatial dispersion's placeholder
+        # value was evaluated at (see _update_fit_panel()/evaluated_at_text()).
+        self._evaluated_at_label = QLabel("")
+        self._evaluated_at_label.setWordWrap(True)
 
         for label in (
             self._chi_squared_label, self._coefficients_label,
-            self._zeta_label, self._zeta_note_label,
+            self._zeta_label, self._zeta_note_label, self._evaluated_at_label,
         ):
             label.setFont(label_font)
 
-        form.addRow("Reduced chi-squared:", self._chi_squared_label)
+        form.addRow("Reduced Chi-Squared:", self._chi_squared_label)
         form.addRow("Coefficients:", self._coefficients_label)
-        form.addRow("Zeta:", self._zeta_label)
+        form.addRow("Spatial Dispersion:", self._zeta_label)
         form.addRow("", self._zeta_note_label)
+        form.addRow("Evaluated At:", self._evaluated_at_label)
 
         return group
 
@@ -323,7 +361,7 @@ class LiveViewWidget(QWidget):
         columns = np.arange(200, 1720, 12)
         x_values = self._placeholder_x_values(columns)
         centroid_px = true_centroid_px(columns) + rng.normal(scale=3.0, size=columns.shape)
-        y_values, y_sigma = self._position_calibration.convert(
+        y_values, y_sigma = self._convert_to_mm(
             centroid_px, np.full_like(centroid_px, 3.0)
         )
         x_sigma = (
@@ -343,7 +381,7 @@ class LiveViewWidget(QWidget):
         fit_columns = columns.min() + (fit_x - x_values.min()) / (
             x_values.max() - x_values.min()
         ) * (columns.max() - columns.min())
-        fit_y, _ = self._position_calibration.convert(
+        fit_y, _ = self._convert_to_mm(
             true_centroid_px(fit_columns), np.zeros_like(fit_columns)
         )
         self._fit_curve.setData(x=fit_x, y=fit_y)
@@ -359,7 +397,7 @@ class LiveViewWidget(QWidget):
 
         self._image_item.setImage(image)
         x0, x1 = self._heatmap_x_extent(first_column=0, last_column=n_cols - 1)
-        y0, y1 = self._position_calibration.convert(
+        y0, y1 = self._convert_to_mm(
             np.array([0.0, float(n_rows)]), np.array([0.0, 0.0])
         )[0]
         self._image_item.setRect(
@@ -399,20 +437,25 @@ class LiveViewWidget(QWidget):
         self._chi_squared_label.setText(f"{fit.reduced_chi_squared:.3f}")
 
         coeff_lines = [
-            f"c{i} = {c:.4g} +/- {s:.2g}"
+            f"c<sub>{i}</sub> = {format_value_with_uncertainty(c, s)}"
             for i, (c, s) in enumerate(zip(fit.coefficients, fit.coefficient_sigma))
         ]
-        self._coefficients_label.setText("\n".join(coeff_lines))
+        self._coefficients_label.setText("<br>".join(coeff_lines))
+
+        self._formula_label.setText(fit_formula_html(degree, self._wavelength_axis))
 
         if fit.zeta_sigma is not None:
-            self._zeta_label.setText(f"{fit.zeta_value:.4g} +/- {fit.zeta_sigma:.2g}")
+            self._zeta_label.setText(format_value_with_uncertainty(fit.zeta_value, fit.zeta_sigma))
             self._zeta_note_label.setText("")
+            self._evaluated_at_label.setText("")
         else:
             self._zeta_label.setText(f"{fit.zeta_value:.4g} (no uncertainty)")
+            self._evaluated_at_label.setText(
+                evaluated_at_text(fit.evaluated_at_column, self._wavelength_axis)
+            )
             self._zeta_note_label.setText(
                 "Uncertainty not available for degree > 1 in live view "
-                "(evaluated at this frame's median x-value; no internal "
-                "covariance-based estimate exists yet)."
+                "(no internal covariance-based estimate exists yet)."
             )
 
     # -- pure-ish helpers (presentational only, no camera/analysis calls) --
@@ -427,6 +470,21 @@ class LiveViewWidget(QWidget):
 
     def _heatmap_x_extent(self, first_column: int, last_column: int) -> tuple[float, float]:
         return heatmap_x_extent(self._wavelength_axis, first_column, last_column)
+
+    def _convert_to_mm(
+        self, x0: np.ndarray, sigma_x0: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+
+        '''
+        position_calibration.convert() returns microns (see
+        calibration/spatial/calibrate.py's module docstring) -- every
+        on-screen y-axis/heatmap call site goes through this instead of
+        calling convert() directly, so the widget's "(mm)"-labeled axis
+        always actually reads in mm.
+        '''
+
+        y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
+        return y0 / MICRONS_PER_MM, sigma_y0 / MICRONS_PER_MM
 
     @staticmethod
     def _build_placeholder_fits() -> dict[int, _PlaceholderFit]:
@@ -456,6 +514,7 @@ class LiveViewWidget(QWidget):
                 reduced_chi_squared=0.98,
                 zeta_value=1.62e-3,
                 zeta_sigma=None,
+                evaluated_at_column=EVALUATED_AT_COLUMN,
             ),
             3: _PlaceholderFit(
                 coefficients=(0.01, 1.5e-3, 2.8e-7, -4.0e-10),
@@ -463,6 +522,7 @@ class LiveViewWidget(QWidget):
                 reduced_chi_squared=0.97,
                 zeta_value=1.58e-3,
                 zeta_sigma=None,
+                evaluated_at_column=EVALUATED_AT_COLUMN,
             ),
         }
 
@@ -480,7 +540,7 @@ def wavelength_axis_label(wavelength_axis: WavelengthAxis | None) -> str:
 
     if wavelength_axis is not None:
         return "Wavelength (nm)"
-    return "Pixel column (wavelength calibration not yet available)"
+    return "Pixel Column (wavelength calibration not yet available)"
 
 
 def heatmap_x_extent(
@@ -515,12 +575,104 @@ def heatmap_x_extent(
     return float(endpoints[0]), float(endpoints[1])
 
 
+def evaluated_at_text(column: float, wavelength_axis: WavelengthAxis | None) -> str:
+
+    '''
+    Value shown in the degree > 1 side-panel's "Evaluated At:" row --
+    the x-value the placeholder spatial-dispersion figure was evaluated
+    at, converted to wavelength when a WavelengthAxis exists (matching
+    this module's existing pixel/wavelength fallback convention), else
+    left as a raw pixel-column index.
+
+    Parameters
+    ----------
+    column
+        Pixel-column index the value was evaluated at.
+    wavelength_axis
+        Supplies wavelength_nm(pixel), or None for the pixel-column
+        fallback.
+
+    Returns
+    -------
+    str
+        e.g. "532.4 nm" or "Pixel column 960".
+    '''
+
+    if wavelength_axis is not None:
+        wavelength_nm = float(wavelength_axis.wavelength_nm(np.array([column]))[0])
+        return f"{wavelength_nm:.1f} nm"
+    return f"Pixel column {round(column):d}"
+
+
+def fit_formula_html(degree: int, wavelength_axis: WavelengthAxis | None) -> str:
+
+    '''
+    Rich-text (HTML) polynomial-form formula for the given fit degree,
+    e.g. "x<sub>0</sub>(λ) = c<sub>0</sub> + c<sub>1</sub>λ" for
+    degree 1, with real sub/superscripts for QLabel's built-in rich-text
+    support (see LiveViewWidget's degree-selector group, which keeps this
+    in sync with the currently selected degree). Uses "column" in place
+    of "λ" when no WavelengthAxis exists yet, matching this module's
+    existing pixel/wavelength fallback convention.
+
+    Parameters
+    ----------
+    degree
+        Polynomial degree (1, 2, or 3 -- see DEGREE_CHOICES).
+    wavelength_axis
+        Supplies wavelength_nm(pixel), or None for the pixel-column
+        fallback.
+
+    Returns
+    -------
+    str
+        HTML fragment suitable for a QLabel with rich text enabled.
+    '''
+
+    variable = "λ" if wavelength_axis is not None else "column"
+    # A single-letter variable (lambda) reads fine multiplied directly
+    # against its coefficient ("c1λ"); a word-length fallback
+    # ("column") needs a visible multiplication dot or it reads as one
+    # run-together word ("c1column").
+    separator = "" if len(variable) == 1 else "·"
+
+    terms = ["c<sub>0</sub>"]
+    for power in range(1, degree + 1):
+        power_part = variable if power == 1 else f"{variable}<sup>{power}</sup>"
+        terms.append(f"c<sub>{power}</sub>{separator}{power_part}")
+
+    return f"x<sub>0</sub>({variable}) = " + " + ".join(terms)
+
+
+def _group_box_stylesheet() -> str:
+
+    '''
+    Explicit background/text-color styling for a QGroupBox -- the
+    top-level widget's setStyleSheet() (see _build_ui()) doesn't reliably
+    cascade into QGroupBox/QComboBox on every platform, leaving them a
+    visibly different color from the rest of the page.
+    '''
+
+    return f"QGroupBox {{ background-color: {BACKGROUND_COLOR}; color: {FOREGROUND_COLOR}; }}"
+
+
+def _combo_box_stylesheet() -> str:
+
+    '''See _group_box_stylesheet() -- same rationale, for QComboBox.'''
+
+    return f"QComboBox {{ background-color: {BACKGROUND_COLOR}; color: {FOREGROUND_COLOR}; }}"
+
+
 __all__ = [
     "LiveViewWidget",
     "wavelength_axis_label",
     "heatmap_x_extent",
+    "evaluated_at_text",
+    "fit_formula_html",
     "DEGREE_CHOICES",
     "DEGREE_LABELS",
     "DEFAULT_DEGREE",
     "STRIP_CHART_WINDOW_SECONDS",
+    "MICRONS_PER_MM",
+    "EVALUATED_AT_COLUMN",
 ]

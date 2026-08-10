@@ -78,12 +78,16 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    parser.add_argument(
+        "--degree", type=int, default=1, choices=(1, 2, 3),
+        help="Fit degree to select before the screenshot is taken (default: 1).",
+    )
     args = parser.parse_args()
 
     # Imported here, not at module level, so this script can be imported
     # (e.g. by a test) without requiring a QApplication to exist yet.
     from PySide6.QtWidgets import QApplication
-    from pipeline.gui.live_view import LiveViewWidget
+    from pipeline.gui.live_view import DEGREE_CHOICES, LiveViewWidget
 
     app = QApplication.instance() or QApplication([])
 
@@ -95,6 +99,7 @@ def main() -> None:
         camera_stream=build_placeholder_camera_stream(),
     )
     widget.resize(args.width, args.height)
+    widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(args.degree))
 
     pixmap = widget.grab()
     args.output.parent.mkdir(parents=True, exist_ok=True)
