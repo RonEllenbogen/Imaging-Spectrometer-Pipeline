@@ -108,6 +108,7 @@ def main() -> None:
         position_calibration=ScaleFactorPositionCalibration(),
         wavelength_axis=None,   # the expected v1 state -- see module docstring
         camera_stream=build_placeholder_camera_stream(),
+        conversion_gain_record=None,   # no conversion-gain artifact loaded in this demo
     )
     live_view.setWindowTitle("Live View")
     live_view.resize(args.width, args.height)
