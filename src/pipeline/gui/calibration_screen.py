@@ -5,18 +5,10 @@ creating new ones, per calibration type (not all-or-nothing), then hands
 off the resulting calibration objects to whatever opens the main window
 next (see CalibrationScreen's class docstring for the hand-off contract).
 
-PHASE 1 (VISUAL SKELETON) NOTE: this module currently lays out and styles
-every screen/page/card described below with placeholder/dummy data. No
-camera or calibration package call is made anywhere in this file yet --
-CreatePage's cards open the real dialogs from calibration_dialogs.py, and
-LoadPage's rows show static placeholder status, but nothing acquires a
-frame, builds an artifact, or touches calibration_artifacts/ on disk. A
-follow-up pass wires:
-  - LoadPage's "Browse"/row logic to calibration/sensor's load_baseline()/
-    load_flat_field()/load_bad_pixel_map()/load_conversion_gain() and
-    calibration/spatial's load_scale_factor(), plus constructing a real
-    SensorNoiseModel from the loaded baseline + conversion-gain (see
-    cli/calibration.py's _cmd_noise_model for the exact call sequence).
+PHASE 1 (VISUAL SKELETON) NOTE: CreatePage's cards open the real dialogs
+from calibration_dialogs.py, but those dialogs' own accept-paths are still
+placeholder -- nothing acquires a frame, builds an artifact, or touches
+calibration_artifacts/ on disk yet. A follow-up pass wires:
   - CreatePage's dialog accept-paths to cli/calibration.py's
     build_camera_stream() + calibration/sensor's run_baseline_calibration()/
     capture_dark_frames()/capture_illuminated_frames()/
@@ -31,6 +23,17 @@ follow-up pass wires:
     calibration_dialogs.show_calibration_error_dialog(), leaving the
     originating dialog open so the user can retry.
 
+WelcomePage's "Load Existing Calibrations" flow is fully wired, by
+contrast: clicking it immediately attempts to load every artifact from
+DEFAULT_ARTIFACT_DIR (baseline, flat field, bad-pixel map, conversion
+gain, spatial scale factor) via CalibrationScreen._attempt_load_existing_
+calibrations(), with no intermediate review page. Success builds a
+CalibrationBundle and emits calibration_ready right away; failure (any of
+baseline/flat-field/bad-pixel-map/conversion-gain missing -- spatial's
+scale factor always falls back to a physically valid default, so it alone
+missing doesn't count) shows an error dialog and leaves the user on
+WelcomePage.
+
 Bad-pixel-map is deliberately absent from CreatePage's card list -- it has
 no manual "create new" entry point anywhere in this screen (see
 calibration_dialogs.FlatFieldDialog's docstring).
@@ -40,7 +43,7 @@ calibration_dialogs.FlatFieldDialog's docstring).
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -53,12 +56,30 @@ from PySide6.QtWidgets import (
 )
 
 from pipeline.analysis import SensorNoiseModel, WavelengthAxis
-from pipeline.calibration.spatial import DEFAULT_SCALE_FACTOR, ScaleFactorPositionCalibration
+from pipeline.calibration.sensor import (
+    load_bad_pixel_map,
+    load_baseline,
+    load_conversion_gain,
+    load_flat_field,
+)
+from pipeline.calibration.spatial import (
+    DEFAULT_SCALE_FACTOR,
+    ScaleFactorPositionCalibration,
+    load_scale_factor,
+)
+from pipeline.cli.calibration import (
+    DEFAULT_ARTIFACT_DIR,
+    DEFAULT_BAD_PIXEL_MAP_FILENAME,
+    DEFAULT_BASELINE_FILENAME,
+    DEFAULT_CONVERSION_GAIN_FILENAME,
+    DEFAULT_FLAT_FIELD_FILENAME,
+)
 from pipeline.gui.calibration_dialogs import (
     BaselineDialog,
     ConversionGainDialog,
     FlatFieldDialog,
     SpatialCalibrationDialog,
+    show_calibration_error_dialog,
 )
 from pipeline.gui.theme import (
     COLOR_ACCENT,
@@ -83,18 +104,17 @@ from pipeline.preprocessing.preprocessing_pipeline import CalibrationSet
 # Constants
 
 _PAGE_WELCOME = 0
-_PAGE_LOAD = 1
-_PAGE_CREATE = 2
+_PAGE_CREATE = 1
 
-# Placeholder rows shown on LoadPage: (display name, artifact description).
-# Status/paths are dummy data in Phase 1 -- see module docstring.
-_LOAD_ROWS = [
-    ("Baseline", "background_sigma + per-pixel dark offset"),
-    ("Flat field", "PRNU correction"),
-    ("Bad-pixel map", "dead/hot pixel mask"),
-    ("Conversion gain", "gain_e_per_adu"),
-    ("Spatial scale factor", "pixel -> physical position"),
-]
+# Spatial's scale factor has no filename constant in cli/calibration.py
+# (that module only ever built the four camera-driven artifacts) -- named
+# here to match its sibling DEFAULT_*_FILENAME constants imported above.
+_DEFAULT_SCALE_FACTOR_FILENAME = "scale_factor.npz"
+
+_NO_EXISTING_CALIBRATIONS_TITLE = "No Existing Calibrations"
+_NO_EXISTING_CALIBRATIONS_MESSAGE = (
+    "No existing calibrations found. Please create new calibrations."
+)
 
 _SCREEN_STYLE = f"""
 QWidget#CalibrationScreen {{
@@ -176,8 +196,9 @@ class CalibrationBundle:
     '''
     Everything CalibrationScreen hands off once the user is done loading
     or creating calibrations. Retrieve it either by connecting to
-    CalibrationScreen.calibration_ready (emitted once, when the user
-    clicks "Continue to Main Window") or by calling
+    CalibrationScreen.calibration_ready (emitted once, either immediately
+    after a successful automatic load from WelcomePage or when the user
+    clicks "Continue to Main Window" on CreatePage) or by calling
     CalibrationScreen.get_calibration_bundle() afterward -- both give the
     same object.
 
@@ -292,16 +313,14 @@ class WelcomePage(QWidget):
         layout.setSpacing(SPACING_LARGE)
         layout.addStretch(1)
 
-        title = QLabel("Spectrometer Calibration")
+        title = QLabel("Spatial Chirp Diagnostic - Imaging Spectrometer")
         title.setFont(load_bundled_font(22, bold=True))
+        title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel(
-            "Load calibration artifacts from a previous session, or create "
-            "new ones before starting acquisition."
-        )
+        subtitle = QLabel("LPAG - Ron Ellenbogen")
         subtitle.setProperty("role", "subtitle")
-        subtitle.setWordWrap(True)
+        subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
 
         button_row = QHBoxLayout()
@@ -321,93 +340,6 @@ class WelcomePage(QWidget):
 
         layout.addLayout(button_row)
         layout.addStretch(2)
-
-
-class LoadPage(QWidget):
-
-    '''
-    Lists the five loadable calibration artifacts (baseline, flat field,
-    bad-pixel mask, conversion gain, scale factor) with per-row status and
-    a browse action, plus a summary of the resulting SensorNoiseModel.
-    Phase 1: all status/values are placeholder dummy data (see module
-    docstring) -- rows do not yet call any load_*() function.
-    '''
-
-    back_requested = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(SPACING_LARGE, SPACING_LARGE, SPACING_LARGE, SPACING_LARGE)
-        layout.setSpacing(SPACING_MEDIUM)
-
-        back_button = QPushButton("< Back")
-        back_button.setProperty("role", "nav")
-        back_button.clicked.connect(self.back_requested)
-        layout.addWidget(back_button)
-
-        title = QLabel("Load Existing Calibrations")
-        title.setFont(load_bundled_font(18, bold=True))
-        layout.addWidget(title)
-
-        subtitle = QLabel("From calibration_artifacts/ (default location).")
-        subtitle.setProperty("role", "subtitle")
-        layout.addWidget(subtitle)
-
-        for name, description in _LOAD_ROWS:
-            layout.addWidget(self._build_row(name, description))
-
-        layout.addSpacing(SPACING_SMALL)
-
-        summary = QFrame()
-        summary.setProperty("role", "row")
-        summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(
-            SPACING_MEDIUM, SPACING_MEDIUM, SPACING_MEDIUM, SPACING_MEDIUM
-        )
-        summary_heading = QLabel("Sensor Noise Model")
-        summary_heading.setFont(load_bundled_font(12, bold=True))
-        summary_layout.addWidget(summary_heading)
-        self.noise_model_label = QLabel("gain_e_per_adu: --      background_sigma: --")
-        self.noise_model_label.setProperty("role", "hint")
-        summary_layout.addWidget(self.noise_model_label)
-        layout.addWidget(summary)
-
-        layout.addStretch(1)
-
-        self.continue_button = QPushButton("Continue to Main Window")
-        self.continue_button.setProperty("role", "primary")
-        self.continue_button.setEnabled(False)
-        self.continue_button.setToolTip("Load at least baseline and flat field first.")
-        layout.addWidget(self.continue_button)
-
-    def _build_row(self, name: str, description: str) -> QFrame:
-        row = QFrame()
-        row.setProperty("role", "row")
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(
-            SPACING_MEDIUM, SPACING_SMALL, SPACING_MEDIUM, SPACING_SMALL
-        )
-        row_layout.setSpacing(SPACING_MEDIUM)
-
-        text_col = QVBoxLayout()
-        name_label = QLabel(name)
-        name_label.setFont(load_bundled_font(11, bold=True))
-        text_col.addWidget(name_label)
-        desc_label = QLabel(description)
-        desc_label.setProperty("role", "hint")
-        text_col.addWidget(desc_label)
-        row_layout.addLayout(text_col, stretch=1)
-
-        status_label = QLabel("Not loaded")
-        status_label.setStyleSheet(f"color: {COLOR_TEXT_DISABLED};")
-        row_layout.addWidget(status_label)
-
-        browse_button = QPushButton("Browse...")
-        row_layout.addWidget(browse_button)
-
-        return row
 
 
 class CreatePage(QWidget):
@@ -436,12 +368,6 @@ class CreatePage(QWidget):
         title = QLabel("Create New Calibrations")
         title.setFont(load_bundled_font(18, bold=True))
         layout.addWidget(title)
-
-        subtitle = QLabel(
-            "Each type is created independently -- pick as many as you need."
-        )
-        subtitle.setProperty("role", "subtitle")
-        layout.addWidget(subtitle)
 
         cards_row_1 = QHBoxLayout()
         cards_row_1.setSpacing(SPACING_MEDIUM)
@@ -534,23 +460,27 @@ class CalibrationScreen(QWidget):
 
     '''
     Top-level calibration screen -- the first thing shown on launch.
-    Owns page navigation between WelcomePage, LoadPage, and CreatePage.
+    Owns page navigation between WelcomePage and CreatePage, plus the
+    "load existing calibrations" flow triggered from WelcomePage (which
+    has no page of its own -- see below).
 
     Hand-off contract for whatever opens the main window next
     -----------------------------------------------------------
-    Once the user finishes (loads existing artifacts, or creates whatever
-    new calibrations they wanted) and clicks "Continue to Main Window" on
-    either LoadPage or CreatePage, this screen emits `calibration_ready`
-    exactly once, carrying a CalibrationBundle. A caller that would rather
-    poll than connect to the signal can call get_calibration_bundle()
-    afterward -- it returns the same object, or None if the user hasn't
-    reached "Continue" yet.
+    This screen emits `calibration_ready` exactly once, carrying a
+    CalibrationBundle, either:
+      - immediately, if WelcomePage's "Load Existing Calibrations" finds
+        every required artifact in DEFAULT_ARTIFACT_DIR and loads
+        successfully (see _attempt_load_existing_calibrations()), or
+      - when the user clicks "Continue to Main Window" on CreatePage
+        after creating whatever new calibrations they wanted.
+    A caller that would rather poll than connect to the signal can call
+    get_calibration_bundle() afterward -- it returns the same object, or
+    None if neither path above has completed yet.
 
-    PHASE 1: get_calibration_bundle() always returns None right now, and
-    calibration_ready is never emitted -- both continue buttons are
-    disabled placeholders (see LoadPage/CreatePage). Wiring them up is a
-    follow-up pass, once real load_*()/build_*() calls replace the dummy
-    data described in this module's docstring.
+    PHASE 1: CreatePage's "Continue to Main Window" is still a disabled
+    placeholder (see CreatePage) -- wiring it up is a follow-up pass, once
+    real build_*() calls replace CreatePage's dialogs' placeholder accept
+    paths (see module docstring). The load path above is fully wired.
     '''
 
     calibration_ready = Signal(object)
@@ -569,19 +499,14 @@ class CalibrationScreen(QWidget):
         outer_layout.addWidget(self._stack)
 
         self.welcome_page = WelcomePage()
-        self.load_page = LoadPage()
         self.create_page = CreatePage()
 
         self._stack.addWidget(self.welcome_page)
-        self._stack.addWidget(self.load_page)
         self._stack.addWidget(self.create_page)
 
-        self.welcome_page.load_requested.connect(lambda: self._stack.setCurrentIndex(_PAGE_LOAD))
+        self.welcome_page.load_requested.connect(self._attempt_load_existing_calibrations)
         self.welcome_page.create_requested.connect(
             lambda: self._stack.setCurrentIndex(_PAGE_CREATE)
-        )
-        self.load_page.back_requested.connect(
-            lambda: self._stack.setCurrentIndex(_PAGE_WELCOME)
         )
         self.create_page.back_requested.connect(
             lambda: self._stack.setCurrentIndex(_PAGE_WELCOME)
@@ -597,12 +522,74 @@ class CalibrationScreen(QWidget):
 
         return self._bundle
 
+    def _attempt_load_existing_calibrations(self) -> None:
+
+        '''
+        Handler for WelcomePage.load_requested: loads every calibration
+        artifact from DEFAULT_ARTIFACT_DIR immediately, with no
+        intermediate review page -- reuses each subpackage's own
+        load_*() function (the same calls cli/calibration.py's
+        _cmd_noise_model sequences) rather than duplicating any loading
+        logic here.
+
+        On success, builds a CalibrationBundle (constructing a
+        SensorNoiseModel from the loaded baseline + conversion gain,
+        exactly as _cmd_noise_model does) and emits calibration_ready.
+
+        On failure -- baseline, flat field, bad-pixel map, or conversion
+        gain missing -- shows an error dialog and leaves the user on
+        WelcomePage. Spatial's scale factor is not part of this check:
+        load_scale_factor() always falls back to DEFAULT_SCALE_FACTOR
+        rather than raising, so it alone missing is never a failure.
+        '''
+
+        try:
+            baseline_result, baseline_record = load_baseline(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_BASELINE_FILENAME
+            )
+            flat_field, flat_field_record = load_flat_field(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_FLAT_FIELD_FILENAME
+            )
+            bad_pixel_mask, _ = load_bad_pixel_map(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_BAD_PIXEL_MAP_FILENAME
+            )
+            conversion_gain_result, _ = load_conversion_gain(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME
+            )
+        except FileNotFoundError:
+            show_calibration_error_dialog(
+                self, _NO_EXISTING_CALIBRATIONS_TITLE, _NO_EXISTING_CALIBRATIONS_MESSAGE
+            )
+            return
+
+        position_calibration, _ = load_scale_factor(
+            DEFAULT_ARTIFACT_DIR / _DEFAULT_SCALE_FACTOR_FILENAME
+        )
+
+        calibration_set = CalibrationSet(
+            baseline=baseline_result.baseline,
+            baseline_record=baseline_record,
+            flat_field=flat_field,
+            flat_field_record=flat_field_record,
+            bad_pixel_mask=bad_pixel_mask,
+            background_sigma=baseline_result.background_sigma,
+        )
+        noise_model = SensorNoiseModel(
+            gain_e_per_adu=conversion_gain_result.gain_e_per_adu,
+            background_sigma=baseline_result.background_sigma,
+        )
+        self._bundle = CalibrationBundle(
+            calibration_set=calibration_set,
+            noise_model=noise_model,
+            position_calibration=position_calibration,
+        )
+        self.calibration_ready.emit(self._bundle)
+
 
 __all__ = [
     "CalibrationScreen",
     "CalibrationBundle",
     "WelcomePage",
-    "LoadPage",
     "CreatePage",
     "SPECTRAL_UNAVAILABLE_NOTE",
 ]

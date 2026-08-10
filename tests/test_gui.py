@@ -4,16 +4,21 @@ calibration_dialogs.py's Phase-1 visual skeleton, and live_view.py's
 Phase-1 visual skeleton, as widget-layer smoke tests plus (for live_view.py)
 ordinary unit tests of its plain, non-Qt presentational helper functions.
 
-Neither screen has any real camera/calibration-package/preprocessing/
-analysis call wired in yet (see each module's own docstring), so these
-tests only check structure/layout/state transitions -- not behavior, e.g.
-that CreatePage exposes exactly the four enabled type cards plus a
+Most of both screens has no real camera/calibration-package/preprocessing/
+analysis call wired in yet (see each module's own docstring), so most of
+these tests only check structure/layout/state transitions -- not behavior,
+e.g. that CreatePage exposes exactly the four enabled type cards plus a
 disabled spectral card, not that clicking "Configure..." actually
 acquires anything; that degree selection changes LiveViewWidget's
-*displayed* placeholder numbers, not that it triggers a real refit. A
-follow-up pass adds real-logic tests (automatic bad-pixel-map chaining,
-error-dialog paths, the QTimer-driven update loop) once each is wired,
-using mocked calibration/camera calls rather than a real camera.
+*displayed* placeholder numbers, not that it triggers a real refit. The
+exception is WelcomePage's "Load Existing Calibrations" flow, which is
+fully wired (see calibration_screen.CalibrationScreen.
+_attempt_load_existing_calibrations()) -- its tests mock calibration_
+screen's load_*()/show_calibration_error_dialog() calls rather than
+touching a real calibration_artifacts/ directory or camera. A follow-up
+pass adds the remaining real-logic tests (automatic bad-pixel-map
+chaining on CreatePage, error-dialog paths there, the QTimer-driven
+update loop) once each is wired, using the same mocked-call convention.
 
 PySide6/pyqtgraph/pytest-qt are local-only dependencies (see CLAUDE.md --
 pyproject.toml/requirements.txt are deliberately left empty), so this
@@ -26,6 +31,7 @@ hardware-only tests.
 
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -43,6 +49,7 @@ from pipeline.analysis import SensorNoiseModel  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
+import pipeline.gui.calibration_screen as calibration_screen_module  # noqa: E402
 from pipeline.gui.calibration_dialogs import (  # noqa: E402
     BaselineDialog,
     ConversionGainDialog,
@@ -52,7 +59,6 @@ from pipeline.gui.calibration_dialogs import (  # noqa: E402
 from pipeline.gui.calibration_screen import (  # noqa: E402
     CalibrationScreen,
     SPECTRAL_UNAVAILABLE_NOTE,
-    _LOAD_ROWS,
 )
 from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
@@ -107,6 +113,72 @@ def _camera_stream() -> CameraStream:
     )
 
 
+def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, SimpleNamespace, ScaleFactorPositionCalibration]:
+    '''
+    Patches calibration_screen's load_baseline()/load_flat_field()/
+    load_bad_pixel_map()/load_conversion_gain()/load_scale_factor() calls
+    to all succeed with synthetic data, mirroring _calibration_set() above.
+    Returns (baseline_result, conversion_gain_result, position_calibration)
+    so callers can assert the returned CalibrationBundle was actually built
+    from these values.
+    '''
+    record = CalibrationRecord(
+        exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+        timestamp=time.time(), source_frame_count=50,
+    )
+    baseline_result = SimpleNamespace(
+        baseline=np.full(CANONICAL_SHAPE, 10.0, dtype=np.float64), background_sigma=1.0
+    )
+    flat_field = np.ones(CANONICAL_SHAPE, dtype=np.float64)
+    bad_pixel_mask = np.zeros(CANONICAL_SHAPE, dtype=bool)
+    conversion_gain_result = SimpleNamespace(gain_e_per_adu=2.2)
+    position_calibration = ScaleFactorPositionCalibration()
+
+    monkeypatch.setattr(
+        calibration_screen_module, "load_baseline", lambda path: (baseline_result, record)
+    )
+    monkeypatch.setattr(
+        calibration_screen_module, "load_flat_field", lambda path: (flat_field, record)
+    )
+    monkeypatch.setattr(
+        calibration_screen_module, "load_bad_pixel_map", lambda path: (bad_pixel_mask, record)
+    )
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "load_conversion_gain",
+        lambda path: (conversion_gain_result, record),
+    )
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "load_scale_factor",
+        lambda path: (position_calibration, object()),
+    )
+    return baseline_result, conversion_gain_result, position_calibration
+
+
+def _patch_missing_calibration_load(monkeypatch) -> list:
+    '''
+    Patches every load_*() call calibration_screen makes to raise
+    FileNotFoundError, and show_calibration_error_dialog() to record its
+    arguments instead of opening a real modal dialog. Returns the list
+    show_calibration_error_dialog() calls get appended to, as
+    (title, message) tuples.
+    '''
+    def _raise_missing(path):
+        raise FileNotFoundError(path)
+
+    for name in ("load_baseline", "load_flat_field", "load_bad_pixel_map", "load_conversion_gain"):
+        monkeypatch.setattr(calibration_screen_module, name, _raise_missing)
+
+    error_calls = []
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "show_calibration_error_dialog",
+        lambda parent, title, message: error_calls.append((title, message)),
+    )
+    return error_calls
+
+
 def _make_live_view_widget(qtbot, wavelength_axis=None) -> LiveViewWidget:
     widget = LiveViewWidget(
         calibration_set=_calibration_set(),
@@ -127,27 +199,63 @@ def test_calibration_screen_launches(qtbot):
     screen = CalibrationScreen()
     qtbot.addWidget(screen)
     assert screen.welcome_page is not None
-    assert screen.load_page is not None
     assert screen.create_page is not None
     assert screen.get_calibration_bundle() is None
 
 
-def test_welcome_page_navigates_to_load_and_create(qtbot):
+def test_welcome_page_create_requested_navigates_to_create_page(qtbot):
     screen = CalibrationScreen()
     qtbot.addWidget(screen)
-
-    screen.welcome_page.load_requested.emit()
-    assert screen._stack.currentWidget() is screen.load_page
 
     screen.welcome_page.create_requested.emit()
     assert screen._stack.currentWidget() is screen.create_page
 
 
-def test_load_page_lists_five_artifact_rows(qtbot):
+def test_load_existing_calibrations_success_emits_calibration_ready(qtbot, monkeypatch):
+    baseline_result, conversion_gain_result, position_calibration = (
+        _patch_successful_calibration_load(monkeypatch)
+    )
     screen = CalibrationScreen()
     qtbot.addWidget(screen)
-    assert len(_LOAD_ROWS) == 5
-    assert not screen.load_page.continue_button.isEnabled()
+
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    # No intermediate review page -- the hand-off happens immediately,
+    # in place, without ever leaving WelcomePage.
+    assert screen._stack.currentWidget() is screen.welcome_page
+
+    assert len(received) == 1
+    bundle = received[0]
+    assert bundle is screen.get_calibration_bundle()
+    assert bundle.calibration_set.background_sigma == pytest.approx(
+        baseline_result.background_sigma
+    )
+    assert bundle.noise_model.gain_e_per_adu == pytest.approx(
+        conversion_gain_result.gain_e_per_adu
+    )
+    assert bundle.position_calibration is position_calibration
+
+
+def test_load_existing_calibrations_missing_artifact_shows_error(qtbot, monkeypatch):
+    error_calls = _patch_missing_calibration_load(monkeypatch)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    assert received == []
+    assert screen.get_calibration_bundle() is None
+    assert screen._stack.currentWidget() is screen.welcome_page
+    assert len(error_calls) == 1
+    title, message = error_calls[0]
+    assert title == "No Existing Calibrations"
+    assert message == "No existing calibrations found. Please create new calibrations."
 
 
 def test_create_page_has_four_enabled_type_cards_and_no_bad_pixel_option(qtbot):
