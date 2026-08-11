@@ -683,21 +683,23 @@ their proportions rather than expand into extra space.
   because a single number overwritten 5 times a second doesn't show the trend the live view's whole
   stated purpose depends on (watching how upstream laser adjustments affect dispersion in real time).
 
-**The degree > 1 uncertainty gap** (real, currently-missing statistics, not a UI question). ζ(λ) is an
-exactly linear function of the fit coefficients, so a *proper* uncertainty on it needs the coefficients'
-full covariance matrix, not just their marginal `coefficient_sigma` (the diagonal). `scipy.odr`'s result
-already exposes this (`cov_beta`, combined with `res_var` = `reduced_chi_squared`) but
-`TotalLeastSquaresFit` currently discards it. The real fix belongs in `analysis/dispersion_fitting.py` +
-`analysis/results.py` (`SpatialDispersionFitResult` gaining a stored covariance matrix and a
-`sigma_zeta(wavelength_nm)` method) — NOT `calibration/shared/`'s structurally-separate copy of the same
-machinery (§3), since the GUI's live/extended-measurement path runs through `analyze_shot()` →
-`analysis/`, not calibration's. Scoped as its own follow-on task (see §6), not required before the GUI's
-first version.
+**The degree > 1 uncertainty gap — now closed at the statistics layer (§6).** ζ(λ) is an exactly linear
+function of the fit coefficients, so a *proper* uncertainty on it needs the coefficients' full covariance
+matrix, not just their marginal `coefficient_sigma` (the diagonal). `SpatialDispersionFitResult` now
+carries `coefficient_covariance` (`scipy.odr`'s `cov_beta × res_var`) and a `sigma_zeta(wavelength_nm)`
+method implementing the exact propagation, built in `analysis/dispersion_fitting.py` +
+`analysis/results.py` — NOT `calibration/shared/`'s structurally-separate copy of the same machinery
+(§3), since the GUI's live/extended-measurement path runs through `analyze_shot()` → `analysis/`, not
+calibration's. What's still missing is the GUI wiring itself (below and elsewhere in this section) —
+`_placeholder_fits`/`_populate_placeholder_data()` don't call `sigma_zeta()` yet, so the interim
+"external-only" decision immediately below is still what the current skeleton actually shows.
 
-**Interim decision for degree > 1, until that's built**: report only the *external* (empirical,
-cross-shot-scatter) uncertainty for extended measurements at degree > 1, with an explicit caveat note
-displayed next to it in the GUI stating it only accounts for external uncertainty — rather than
-fabricating an internal number that isn't statistically sound yet.
+**Interim decision for degree > 1, still in effect until the GUI is wired to real `sigma_zeta()` calls**:
+report only the *external* (empirical, cross-shot-scatter) uncertainty for extended measurements at
+degree > 1, with an explicit caveat note displayed next to it in the GUI stating it only accounts for
+external uncertainty — rather than fabricating an internal number. This is no longer because the internal
+number is statistically unsound (it now is sound, see above) but simply because the GUI doesn't call it
+yet; revisit this caveat note once that wiring happens.
 
 **Extended measurement:**
 - User picks a number of frames, optionally overriding exposure/other camera parameters — which forces
@@ -903,17 +905,23 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   (`preprocessing/steps/roi.py`'s row bounds, `signal_threshold.py`'s per-column SNR gate) per-axis when
   entered; falls back to the existing automatic mechanism for any axis left blank. Needs a "Reset ROI"
   button restoring the automatic default, for when the user wants to undo a manual entry.
-- **`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
-  degree > 1.** Currently only `coefficient_sigma` (marginal, per-coefficient) is
-  stored; a statistically sound uncertainty on `zeta(wavelength_nm)` needs the fit's
-  full coefficient covariance matrix (`scipy.odr`'s `cov_beta` × `res_var`, not
-  currently kept) propagated through ζ's derivative formula. Belongs in
-  `analysis/dispersion_fitting.py` + `analysis/results.py`, not `calibration/shared/`'s
-  separate copy of the same fitting machinery. Confirmed still open, explicitly not
-  being built as part of the GUI's Phase 1 build: live view's degree > 1 side panel
-  shows "uncertainty not available" (correct given this gap -- a single frame has no
-  cross-shot scatter to fall back on the way extended measurement will), and extended
-  measurement's degree > 1 combination (§5) is limited to external/empirical
-  uncertainty only until this exists.
+- ~~**`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
+  degree > 1.**~~ **Done.** `SpatialDispersionFitResult` gained a `coefficient_covariance`
+  field (the full (degree+1, degree+1) matrix, not just `coefficient_sigma`'s diagonal)
+  and a `sigma_zeta(wavelength_nm)` method. Since ζ(λ) = Σ k·c_k·λ^(k-1) is an *exact*
+  linear function of the coefficients c (not an approximation), its variance is exactly
+  `g(λ)ᵀ · coefficient_covariance · g(λ)` where `g_k(λ) = k·λ^(k-1)` (k ≥ 1, `g_0 = 0`) --
+  standard linear error propagation, applied exactly rather than as a first-order
+  approximation. `TotalLeastSquaresFit` now populates `coefficient_covariance` as
+  `scipy.odr`'s `cov_beta × res_var` (`cov_beta` alone is normalized -- this is the same
+  scaling `odr` already applies internally to get `sd_beta` from `cov_beta`'s diagonal,
+  just kept for the full matrix instead of collapsed to it). Collapses to the existing
+  `coefficient_sigma[1]` at degree == 1 (verified by test, since `g = (0, 1)` there and
+  cross terms vanish). Built in `analysis/dispersion_fitting.py` + `analysis/results.py`
+  only, not `calibration/shared/`'s separate copy of the fitting machinery, per the
+  no-cross-dependency rule. The GUI wiring pass still pending in §5 (live view's degree
+  > 1 side panel, extended measurement's degree > 1 combination) can now report a real
+  internal uncertainty instead of "uncertainty not available" -- that wiring itself is
+  unchanged/still pending, only the missing statistics underneath it are now built.
 - **Monte Carlo / bootstrap uncertainty validation** for `analysis/`
   (optional, time permitting) — see centroid uncertainty note in §2.
