@@ -1220,9 +1220,8 @@ class TestExtendedMeasurementScreenSmoke:
         assert widget._roi_control is not None
         assert widget._degree_selector.count() == len(DEGREE_CHOICES)
         assert widget._n_shots_label.text() != ""
-        assert widget._zeta_combined_label.text() != ""
-        assert widget._sigma_internal_label.text() != ""
-        assert widget._sigma_external_label.text() != ""
+        assert widget._spatial_dispersion_label.text() != ""
+        assert widget._reduced_chi_squared_label.text() != ""
         assert widget._back_button is not None
 
     def test_run_button_updates_n_shots_label(self, qtbot):
@@ -1242,6 +1241,29 @@ class TestExtendedMeasurementScreenSmoke:
         widget = _make_extended_measurement_widget(qtbot)
         widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
         assert widget._degree_note_label.text() != ""
+
+    def test_evaluate_at_row_hidden_for_degree_one_shown_for_degree_gt_one(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert widget._combined_result_form.isRowVisible(widget._evaluated_at_spin) is False
+        assert widget._combined_result_form.isRowVisible(widget._evaluated_at_label) is False
+
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+        assert widget._combined_result_form.isRowVisible(widget._evaluated_at_spin) is True
+        assert widget._combined_result_form.isRowVisible(widget._evaluated_at_label) is True
+        assert widget._evaluated_at_label.text() != ""
+
+    def test_editing_evaluate_at_updates_readout_and_survives_degree_roundtrip(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+        widget._evaluated_at_spin.setValue(500.0)
+        assert "500" in widget._evaluated_at_label.text()
+
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(3))
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+        assert widget._evaluated_at_spin.value() == pytest.approx(500.0)
 
     def test_back_button_emits_signal(self, qtbot):
         widget = _make_extended_measurement_widget(qtbot)
@@ -1275,9 +1297,8 @@ class TestExtendedMeasurementAcquisitionSettingsPanel:
 
         assert widget._settings_drifted is True
         assert widget._n_shots_label.text() == "N/A"
-        assert widget._zeta_combined_label.text() == "N/A"
-        assert widget._sigma_internal_label.text() == "N/A"
-        assert widget._sigma_external_label.text() == "N/A"
+        assert widget._spatial_dispersion_label.text() == "N/A"
+        assert widget._reduced_chi_squared_label.text() == "N/A"
         assert widget._degree_note_label.text() == ""
         assert widget._scatter.isVisible() is False
         assert widget._error_bars.isVisible() is False
@@ -1302,9 +1323,8 @@ class TestExtendedMeasurementAcquisitionSettingsPanel:
 
         assert widget._settings_drifted is False
         assert widget._n_shots_label.text() != "N/A"
-        assert widget._zeta_combined_label.text() != "N/A"
-        assert widget._sigma_internal_label.text() != "N/A"
-        assert widget._sigma_external_label.text() != "N/A"
+        assert widget._spatial_dispersion_label.text() != "N/A"
+        assert widget._reduced_chi_squared_label.text() != "N/A"
         assert widget._scatter.isVisible() is True
         assert widget._error_bars.isVisible() is True
         assert widget._fit_curve.isVisible() is True

@@ -69,9 +69,11 @@ from pipeline.gui.live_view import (
     DEFAULT_DEGREE,
     DEGREE_CHOICES,
     DEGREE_LABELS,
+    EVALUATED_AT_COLUMN,
     FIT_CURVE_COLOR,
     FIT_CURVE_WIDTH,
     SIDE_PANEL_WIDTH,
+    evaluated_at_text,
     exposure_has_drifted,
     fit_formula_html,
     gain_has_drifted,
@@ -115,28 +117,44 @@ class _PlaceholderCombinedResult:
 
     '''
     Bundles one degree's worth of fake Combined Result side-panel numbers
-    for the skeleton -- shaped like analysis.results.
+    for the skeleton. n_shots/zeta_combined/sigma_zeta_combined are
+    shaped like the reporting subset of analysis.results.
     CombinedSpatialDispersionResult, but never constructed from a real
-    combine_shots() call. Illustrative of typical real-world zeta
-    magnitudes only; deliberately NOT required to be numerically
-    consistent with the fake scatter/fit/residual data drawn in
-    _generate_placeholder_data() (same justification live_view.py's
-    _PlaceholderFit docstring already gives for its own placeholder
-    numbers -- both are placeholders for different parts of the layout,
-    not one coherent fake dataset).
+    combine_shots() call. sigma_internal/sigma_external themselves are
+    deliberately NOT surfaced here -- they're intermediate quantities
+    combine_shots() uses internally to pick sigma_zeta_combined (the
+    larger of the two), not numbers a user needs reported directly.
+    reduced_chi_squared is a natural inverse-variance-combination
+    consistency statistic (the same weighted per-shot scatter
+    combine_shots() already computes en route to sigma_external, divided
+    by (n_shots - 1) rather than folded into a sigma) that
+    CombinedSpatialDispersionResult doesn't expose as a field yet --
+    adding one there is a follow-up for whenever this panel is wired to
+    a real combine_shots() call, not something this Phase 1 GUI pass
+    needs to do.
+
+    Illustrative of typical real-world zeta magnitudes only; deliberately
+    NOT required to be numerically consistent with the fake scatter/fit/
+    residual data drawn in _generate_placeholder_data() (same
+    justification live_view.py's _PlaceholderFit docstring already gives
+    for its own placeholder numbers).
     '''
 
     n_shots: int
     zeta_combined: float
-    sigma_internal: float
-    sigma_external: float
     sigma_zeta_combined: float
-    # None for degree 1 (a real combine_shots() call combines the linear
-    # zeta across shots directly -- docs/project_state.md #19/#20); a
-    # caveat string for degree > 1, where the combined central value is
-    # only meaningful as each shot's zeta(wavelength_ref) combined
-    # afterward, not a joint fit (docs/project_state.md #5's "Extended
-    # measurement" notes) -- see _build_combined_result_group().
+    reduced_chi_squared: float
+    # Pixel-column reference point the combination was evaluated at --
+    # None for degree 1 (zeta is a single number independent of
+    # wavelength, so "evaluated at" doesn't apply -- docs/project_state.
+    # md #19/#20: combine_shots() combines the linear zeta directly). For
+    # degree > 1, this mirrors self._evaluated_at_spin's value: each
+    # shot's own zeta(wavelength_ref) is evaluated first (well-defined at
+    # any degree), then those scalars are combined the same way linear
+    # zeta is (docs/project_state.md #5's "Extended measurement" notes)
+    # -- NOT a combined polynomial fit, which analysis/combination.py
+    # deliberately keeps per-shot-only at degree > 1.
+    evaluated_at_column: float | None = None
     degree_note: str | None = None
 
 
@@ -481,9 +499,9 @@ class ExtendedMeasurementScreen(QWidget):
         '''
 
         self._n_shots_label.setText("N/A")
-        self._zeta_combined_label.setText("N/A")
-        self._sigma_internal_label.setText("N/A")
-        self._sigma_external_label.setText("N/A")
+        self._spatial_dispersion_label.setText("N/A")
+        self._reduced_chi_squared_label.setText("N/A")
+        self._evaluated_at_label.setText("")
         self._degree_note_label.setText("")
 
         self._scatter.setVisible(False)
@@ -544,34 +562,60 @@ class ExtendedMeasurementScreen(QWidget):
 
     def _build_combined_result_group(self) -> QGroupBox:
 
-        '''This screen's analogue of LiveViewWidget's "Fit Diagnostics" group.'''
+        '''
+        This screen's analogue of LiveViewWidget's "Fit Diagnostics"
+        group. "Evaluate At"/"Evaluated At" are only shown for degree > 1
+        (toggled in _update_combined_result_panel()) -- degree 1's
+        spatial dispersion is a single number independent of wavelength,
+        so a reference point doesn't apply to it (see
+        _PlaceholderCombinedResult's docstring). sigma_internal/
+        sigma_external are deliberately not surfaced as their own rows --
+        same rationale.
+        '''
 
         group = QGroupBox("Combined Result")
         group.setFont(load_bundled_font(10))
         group.setStyleSheet(group_box_stylesheet())
         form = QFormLayout(group)
+        self._combined_result_form = form
 
         label_font = load_bundled_font(10)
 
         self._n_shots_label = QLabel("--")
-        self._zeta_combined_label = QLabel("--")
-        self._zeta_combined_label.setWordWrap(True)
-        self._sigma_internal_label = QLabel("--")
-        self._sigma_external_label = QLabel("--")
+        self._spatial_dispersion_label = QLabel("--")
+        self._spatial_dispersion_label.setWordWrap(True)
+        self._reduced_chi_squared_label = QLabel("--")
+
+        self._evaluated_at_spin = QDoubleSpinBox()
+        self._evaluated_at_spin.setRange(0.0, float(CANONICAL_SHAPE[SPECTRAL_AXIS] - 1))
+        self._evaluated_at_spin.setDecimals(1)
+        self._evaluated_at_spin.setValue(EVALUATED_AT_COLUMN)
+        self._evaluated_at_spin.setSuffix(" px")
+        self._evaluated_at_spin.setToolTip(
+            "Pixel column each shot's spatial dispersion is evaluated at "
+            "before combining across shots (degree > 1 only)."
+        )
+        self._evaluated_at_spin.valueChanged.connect(self._on_evaluated_at_changed)
+
+        self._evaluated_at_label = QLabel("")
+        self._evaluated_at_label.setWordWrap(True)
+
         self._degree_note_label = QLabel("")
         self._degree_note_label.setWordWrap(True)
         self._degree_note_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-style: italic;")
 
-        for label in (
-            self._n_shots_label, self._zeta_combined_label,
-            self._sigma_internal_label, self._sigma_external_label, self._degree_note_label,
+        for widget in (
+            self._n_shots_label, self._spatial_dispersion_label,
+            self._reduced_chi_squared_label, self._evaluated_at_spin,
+            self._evaluated_at_label, self._degree_note_label,
         ):
-            label.setFont(label_font)
+            widget.setFont(label_font)
 
         form.addRow("N Shots:", self._n_shots_label)
-        form.addRow("ζ Combined:", self._zeta_combined_label)
-        form.addRow("σ Internal:", self._sigma_internal_label)
-        form.addRow("σ External:", self._sigma_external_label)
+        form.addRow("Spatial Dispersion:", self._spatial_dispersion_label)
+        form.addRow("Reduced Chi-Squared:", self._reduced_chi_squared_label)
+        form.addRow("Evaluate At:", self._evaluated_at_spin)
+        form.addRow("Evaluated At:", self._evaluated_at_label)
         form.addRow("", self._degree_note_label)
 
         return group
@@ -744,15 +788,39 @@ class ExtendedMeasurementScreen(QWidget):
         result = self._placeholder_combined_results[degree]
 
         self._n_shots_label.setText(str(result.n_shots))
-        self._zeta_combined_label.setText(
+        self._spatial_dispersion_label.setText(
             format_value_with_uncertainty(result.zeta_combined, result.sigma_zeta_combined)
         )
-        self._sigma_internal_label.setText(f"{result.sigma_internal:.4g}")
-        self._sigma_external_label.setText(f"{result.sigma_external:.4g}")
+        self._reduced_chi_squared_label.setText(f"{result.reduced_chi_squared:.3f}")
 
         self._formula_label.setText(fit_formula_html(degree, self._wavelength_axis))
 
+        # "Evaluate At"/"Evaluated At" only apply at degree > 1 -- see
+        # _PlaceholderCombinedResult's docstring. Deliberately does NOT
+        # reset self._evaluated_at_spin's value here: switching degrees
+        # (or re-running) should not stomp a reference point the user
+        # already typed in -- only its visibility and the readout text
+        # tracking it change.
+        has_reference_point = result.evaluated_at_column is not None
+        self._combined_result_form.setRowVisible(self._evaluated_at_spin, has_reference_point)
+        self._combined_result_form.setRowVisible(self._evaluated_at_label, has_reference_point)
+        self._evaluated_at_label.setText(
+            evaluated_at_text(self._evaluated_at_spin.value(), self._wavelength_axis)
+            if has_reference_point else ""
+        )
+
         self._degree_note_label.setText(result.degree_note or "")
+
+    def _on_evaluated_at_changed(self, column: float) -> None:
+
+        '''
+        SKELETON (see module docstring): only updates the "Evaluated At"
+        readout to reflect the newly-entered reference point -- does not
+        re-run combine_shots() at that column. Real wiring would
+        re-evaluate each shot's zeta(wavelength_ref) there and recombine.
+        '''
+
+        self._evaluated_at_label.setText(evaluated_at_text(column, self._wavelength_axis))
 
     # -- pure-ish helpers (presentational only, no camera/analysis calls) --
 
@@ -791,8 +859,8 @@ class ExtendedMeasurementScreen(QWidget):
         real combine_shots() result exists. Only degree 1 has a real
         combine_shots()-shaped meaning (analysis/combination.py combines
         the linear zeta across shots by design); degree > 1 entries carry
-        an explicit degree_note caveat -- see docs/project_state.md #5's
-        "Extended measurement" notes.
+        an evaluated_at_column and an explicit degree_note caveat -- see
+        docs/project_state.md #5's "Extended measurement" notes.
 
         Deliberately NOT derived from (and not numerically consistent
         with) the fake scatter/fit-curve/residual data built in
@@ -800,37 +868,34 @@ class ExtendedMeasurementScreen(QWidget):
         docstring.
         '''
 
+        degree_note = (
+            "Degree > 1: each shot's spatial dispersion is evaluated at "
+            "the reference point above, then those values are combined "
+            "-- not a joint polynomial fit across shots."
+        )
+
         return {
             1: _PlaceholderCombinedResult(
                 n_shots=n_shots,
                 zeta_combined=1.6e-3,
-                sigma_internal=2.1e-5,
-                sigma_external=1.8e-5,
                 sigma_zeta_combined=2.1e-5,
+                reduced_chi_squared=1.05,
             ),
             2: _PlaceholderCombinedResult(
                 n_shots=n_shots,
                 zeta_combined=1.62e-3,
-                sigma_internal=3.4e-5,
-                sigma_external=4.0e-5,
                 sigma_zeta_combined=4.0e-5,
-                degree_note=(
-                    "Degree > 1 combination is evaluated per-shot at a "
-                    "reference wavelength/column, not a joint fit -- see "
-                    "docs/project_state.md."
-                ),
+                reduced_chi_squared=1.12,
+                evaluated_at_column=EVALUATED_AT_COLUMN,
+                degree_note=degree_note,
             ),
             3: _PlaceholderCombinedResult(
                 n_shots=n_shots,
                 zeta_combined=1.58e-3,
-                sigma_internal=4.1e-5,
-                sigma_external=5.2e-5,
                 sigma_zeta_combined=5.2e-5,
-                degree_note=(
-                    "Degree > 1 combination is evaluated per-shot at a "
-                    "reference wavelength/column, not a joint fit -- see "
-                    "docs/project_state.md."
-                ),
+                reduced_chi_squared=1.18,
+                evaluated_at_column=EVALUATED_AT_COLUMN,
+                degree_note=degree_note,
             ),
         }
 
