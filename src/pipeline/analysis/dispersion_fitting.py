@@ -111,6 +111,10 @@ class TotalLeastSquaresFit:
         coefficients = result.beta
         coefficient_sigma = result.sd_beta
         reduced_chi_squared = result.res_var
+        # result.cov_beta is normalized -- scipy.odr's own sd_beta is
+        # sqrt(diag(cov_beta) * res_var), so the real covariance matrix
+        # needs the same res_var scaling applied across the whole matrix.
+        coefficient_covariance = result.cov_beta * reduced_chi_squared
 
         x0_fit = np.polynomial.polynomial.polyval(wavelength_nm, coefficients)
         residuals = x0 - x0_fit
@@ -125,6 +129,7 @@ class TotalLeastSquaresFit:
             degree=degree,
             coefficients=coefficients,
             coefficient_sigma=coefficient_sigma,
+            coefficient_covariance=coefficient_covariance,
             reduced_chi_squared=float(reduced_chi_squared),
             residuals=residuals,
             normalized_residuals=normalized_residuals,

@@ -64,7 +64,8 @@ class ScaleFactorPositionCalibration:
     project's spatial calibration is a single known (or user-measured)
     ratio on top of a fixed hardware pixel pitch, not a pixel->position
     mapping built from a translation-stage measurement session (see
-    module docstring).
+    module docstring). to_pixels() is the inverse of convert(), used by
+    the GUI's manual ROI entry.
 
     Parameters
     ----------
@@ -95,6 +96,20 @@ class ScaleFactorPositionCalibration:
 
         combined_factor = PIXEL_PITCH_UM * self.scale_factor
         return combined_factor * x0, combined_factor * sigma_x0
+
+    def to_pixels(self, physical_position_um: np.ndarray) -> np.ndarray:
+
+        '''
+        Inverse of convert(): physical position (microns, at the slit
+        plane) back to a pixel-index position (at the detector). No
+        uncertainty term -- unlike convert(), this exists only for the
+        GUI's manual ROI entry (gui/live_view.py, gui/roi_control.py), where
+        the input is an exact user-entered bound, not a measurement with
+        its own sigma.
+        '''
+
+        combined_factor = PIXEL_PITCH_UM * self.scale_factor
+        return physical_position_um / combined_factor
 
 
 # Functions

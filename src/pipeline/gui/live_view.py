@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pipeline.acquisition import CameraStream
+from pipeline.acquisition import CameraStream, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
 from pipeline.analysis import SensorNoiseModel
 from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.sensor import ConversionGainRecord
@@ -56,7 +56,8 @@ from pipeline.calibration.shared import EXPOSURE_MATCH_TOLERANCE_REL, GAIN_MATCH
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
 from pipeline.preprocessing import CalibrationSet
 
-from pipeline.gui.formatting import format_value_with_uncertainty
+from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM, microns_to_mm
+from pipeline.gui.roi_control import SpatialROIControl
 from pipeline.gui.theme import (
     COLOR_ACCENT as ACCENT_COLOR,
     COLOR_BACKGROUND as BACKGROUND_COLOR,
@@ -80,13 +81,6 @@ DEFAULT_DEGREE = 1
 STRIP_CHART_WINDOW_SECONDS = 60.0
 
 SIDE_PANEL_WIDTH = 300
-
-# calibration/spatial/calibrate.py's ScaleFactorPositionCalibration.convert()
-# deliberately returns microns (matching PIXEL_PITCH_UM's own unit -- see
-# that module's docstring), not millimeters -- this widget's y-axis/heatmap
-# display in mm, so every convert() call site divides by this before
-# display (see _convert_to_mm()).
-MICRONS_PER_MM = 1000.0
 
 # Spectral-column center used for the degree > 1 placeholder's "evaluated
 # at" note (n_cols / 2 from _populate_placeholder_data()'s fake 1920-column
@@ -353,6 +347,7 @@ class LiveViewWidget(QWidget):
         # is a precondition for trusting the fit diagnostics below it,
         # not a peer of them.
         layout.addWidget(self._build_acquisition_settings_group())
+        layout.addWidget(self._build_spatial_roi_group())
         layout.addWidget(self._build_degree_selector_group())
         layout.addWidget(self._build_fit_diagnostics_group())
         layout.addStretch(1)
@@ -369,7 +364,8 @@ class LiveViewWidget(QWidget):
             "Not yet implemented -- placeholder for a future extended-"
             "measurement / N-shot combination workflow. When built, "
             "overriding exposure/gain there must trigger the same "
-            "recalibration prompt as the Acquisition Settings panel."
+            "recalibration prompt as the Acquisition Settings panel. The "
+            "Spatial ROI group above is already reusable there, unmodified."
         )
         # Deliberately left unconnected: building the feature itself is a
         # non-goal of this phase (see module docstring).
@@ -421,6 +417,14 @@ class LiveViewWidget(QWidget):
         form.addRow("Gain:", self._gain_spin)
 
         return group
+
+    def _build_spatial_roi_group(self) -> QGroupBox:
+
+        self._roi_control = SpatialROIControl(
+            self._position_calibration, CANONICAL_SHAPE[SPATIAL_AXIS]
+        )
+        self._roi_control.roi_changed.connect(self._on_roi_changed)
+        return self._roi_control
 
     # -- acquisition settings drift detection ----------------------------
 
@@ -616,10 +620,30 @@ class LiveViewWidget(QWidget):
     def _populate_placeholder_data(self) -> None:
 
         self._placeholder_fits = self._build_placeholder_fits()
+        self._generate_placeholder_data()
+
+        self._update_strip_chart_placeholder(self._placeholder_rng)
+        self._update_fit_panel(DEFAULT_DEGREE)
+
+        self._apply_roi_bounds(*self._roi_control.roi_bounds_mm())
+
+    def _generate_placeholder_data(self) -> None:
+
+        '''
+        Builds the full-range fake scatter/fit-curve/heatmap arrays and
+        stashes them as instance attributes, without touching any
+        pyqtgraph item -- _apply_roi_bounds() is what actually crops and
+        renders them, so it can be re-run on its own (e.g. every time
+        self._roi_control's roi_changed fires) without re-seeding the RNG
+        and drawing a new random dataset each time.
+        '''
 
         rng = np.random.default_rng(seed=0)
 
-        n_rows, n_cols = 1200, 1920
+        n_rows, n_cols = CANONICAL_SHAPE[SPATIAL_AXIS], CANONICAL_SHAPE[SPECTRAL_AXIS]
+        self._placeholder_n_rows = n_rows
+        self._placeholder_n_cols = n_cols
+
         # A single fake "true" beam-centroid trend (in raw spatial pixels,
         # as a function of spectral column), shared by the heatmap and the
         # scatter/fit-curve so the picture is at least internally
@@ -634,19 +658,14 @@ class LiveViewWidget(QWidget):
         columns = np.arange(200, 1720, 12)
         x_values = self._placeholder_x_values(columns)
         centroid_px = true_centroid_px(columns) + rng.normal(scale=3.0, size=columns.shape)
-        y_values, y_sigma = self._convert_to_mm(
-            centroid_px, np.full_like(centroid_px, 3.0)
-        )
         x_sigma = (
             np.full_like(x_values, 0.4) if self._wavelength_axis is not None else None
         )
 
-        self._scatter.setData(x=x_values, y=y_values)
-        error_kwargs = dict(x=x_values, y=y_values, top=y_sigma, bottom=y_sigma)
-        if x_sigma is not None:
-            error_kwargs["left"] = x_sigma
-            error_kwargs["right"] = x_sigma
-        self._error_bars.setData(**error_kwargs)
+        self._placeholder_columns = columns
+        self._placeholder_x_values_arr = x_values
+        self._placeholder_centroid_px = centroid_px
+        self._placeholder_x_sigma = x_sigma
 
         # -- fit-curve overlay (drawn from the same fake "true" trend, --
         # -- not from _placeholder_fits -- see docstring above) ---------
@@ -654,10 +673,13 @@ class LiveViewWidget(QWidget):
         fit_columns = columns.min() + (fit_x - x_values.min()) / (
             x_values.max() - x_values.min()
         ) * (columns.max() - columns.min())
-        fit_y, _ = self._convert_to_mm(
+        fit_y_full, _ = self._convert_to_mm(
             true_centroid_px(fit_columns), np.zeros_like(fit_columns)
         )
-        self._fit_curve.setData(x=fit_x, y=fit_y)
+
+        self._placeholder_fit_x = fit_x
+        self._placeholder_fit_columns = fit_columns
+        self._placeholder_fit_y_full = fit_y_full
 
         # -- fake raw-preprocessed-frame heatmap, standing in for -------
         # -- ProcessedFrame.image, using the same beam-centroid trend ---
@@ -668,7 +690,11 @@ class LiveViewWidget(QWidget):
         image = image + rng.normal(scale=5, size=image.shape)
         image = np.clip(image, 0, None).astype(np.float32)
 
-        self._image_item.setImage(image)
+        self._placeholder_image_full = image
+
+        # setRect()'s extent depends only on the (fixed) frame shape and
+        # wavelength axis, never on the current ROI, so it's computed
+        # once here rather than on every _apply_roi_bounds() call.
         x0, x1 = self._heatmap_x_extent(first_column=0, last_column=n_cols - 1)
         y0, y1 = self._convert_to_mm(
             np.array([0.0, float(n_rows)]), np.array([0.0, 0.0])
@@ -677,8 +703,57 @@ class LiveViewWidget(QWidget):
             min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
         )
 
-        self._update_strip_chart_placeholder(rng)
-        self._update_fit_panel(DEFAULT_DEGREE)
+        # Kept for _update_strip_chart_placeholder() to continue the same
+        # random stream _populate_placeholder_data() threads it through,
+        # rather than resetting to a fresh seed=0 generator and changing
+        # the strip chart's random values.
+        self._placeholder_rng = rng
+
+    def _apply_roi_bounds(self, min_mm: float, max_mm: float) -> None:
+
+        '''
+        Crops the fake scatter/error-bars/fit-curve/heatmap to
+        [min_mm, max_mm] and renders them -- the real system's analogue of
+        preprocessing/steps/roi.py's apply_roi() zeroing rows outside the
+        spatial ROI (no valid centroid there), so out-of-window scatter/
+        fit points are dropped entirely rather than merely clipped from
+        view. Callable both at startup (_populate_placeholder_data()) and
+        on every self._roi_control.roi_changed signal (_on_roi_changed()).
+        '''
+
+        y_values, y_sigma = self._convert_to_mm(
+            self._placeholder_centroid_px,
+            np.full_like(self._placeholder_centroid_px, 3.0),
+        )
+        keep = (y_values >= min_mm) & (y_values <= max_mm)
+
+        x_values = self._placeholder_x_values_arr
+        self._scatter.setData(x=x_values[keep], y=y_values[keep])
+        error_kwargs = dict(
+            x=x_values[keep], y=y_values[keep], top=y_sigma[keep], bottom=y_sigma[keep]
+        )
+        if self._placeholder_x_sigma is not None:
+            error_kwargs["left"] = self._placeholder_x_sigma[keep]
+            error_kwargs["right"] = self._placeholder_x_sigma[keep]
+        self._error_bars.setData(**error_kwargs)
+
+        fit_y_full = self._placeholder_fit_y_full
+        keep_fit = (fit_y_full >= min_mm) & (fit_y_full <= max_mm)
+        self._fit_curve.setData(
+            x=self._placeholder_fit_x[keep_fit], y=fit_y_full[keep_fit]
+        )
+
+        row_min_px, row_max_px = self._roi_control.roi_bounds_px()
+        masked_image = self._placeholder_image_full.copy()
+        masked_image[:row_min_px, :] = 0
+        masked_image[row_max_px:, :] = 0
+        self._image_item.setImage(masked_image)
+
+        self._main_plot.setYRange(min_mm, max_mm, padding=0)
+
+    def _on_roi_changed(self, min_mm: float, max_mm: float) -> None:
+
+        self._apply_roi_bounds(min_mm, max_mm)
 
     def _update_strip_chart_placeholder(self, rng: np.random.Generator) -> None:
 
@@ -757,7 +832,7 @@ class LiveViewWidget(QWidget):
         '''
 
         y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
-        return y0 / MICRONS_PER_MM, sigma_y0 / MICRONS_PER_MM
+        return microns_to_mm(y0), microns_to_mm(sigma_y0)
 
     @staticmethod
     def _build_placeholder_fits() -> dict[int, _PlaceholderFit]:
