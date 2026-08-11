@@ -241,6 +241,7 @@ class TestSpatialDispersionFitResult:
             degree=1,
             coefficients=np.array([10.0, 0.5]),
             coefficient_sigma=np.array([0.1, 0.01]),
+            coefficient_covariance=np.diag([0.1, 0.01]) ** 2,
             reduced_chi_squared=1.0,
             residuals=np.zeros(3),
             normalized_residuals=np.zeros(3),
@@ -255,6 +256,7 @@ class TestSpatialDispersionFitResult:
             degree=2,
             coefficients=np.array([10.0, 0.5, 2.0]),
             coefficient_sigma=np.array([0.1, 0.01, 0.01]),
+            coefficient_covariance=np.diag([0.1, 0.01, 0.01]) ** 2,
             reduced_chi_squared=1.0,
             residuals=np.zeros(3),
             normalized_residuals=np.zeros(3),
@@ -262,12 +264,60 @@ class TestSpatialDispersionFitResult:
         wavelength_nm = np.array([0.0, 1.0, 2.0])
         assert np.allclose(result.zeta(wavelength_nm), 0.5 + 4.0 * wavelength_nm)
 
+    def test_linear_sigma_zeta_matches_coefficient_sigma(self):
+        # At degree 1, zeta = c1 alone -- sigma_zeta should collapse to
+        # coefficient_sigma[1] exactly, with no dependence on wavelength.
+        coefficient_sigma = np.array([0.2, 0.03])
+        result = SpatialDispersionFitResult(
+            degree=1,
+            coefficients=np.array([10.0, 0.5]),
+            coefficient_sigma=coefficient_sigma,
+            coefficient_covariance=np.diag(coefficient_sigma ** 2),
+            reduced_chi_squared=1.0,
+            residuals=np.zeros(3),
+            normalized_residuals=np.zeros(3),
+        )
+        wavelength_nm = np.array([0.0, 10.0, 100.0])
+        assert np.allclose(result.sigma_zeta(wavelength_nm), coefficient_sigma[1])
+
+    def test_quadratic_sigma_zeta_uses_full_covariance(self):
+        # zeta(lambda) = c1 + 2*c2*lambda, so
+        # Var[zeta] = Var[c1] + 4*lambda^2*Var[c2] + 4*lambda*Cov[c1, c2].
+        # Off-diagonal covariance is nonzero here specifically to check
+        # that sigma_zeta uses the full matrix, not just its diagonal.
+        var_c1, var_c2, cov_c1_c2 = 0.04, 0.0009, 0.002
+        coefficient_covariance = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, var_c1, cov_c1_c2],
+            [0.0, cov_c1_c2, var_c2],
+        ])
+        result = SpatialDispersionFitResult(
+            degree=2,
+            coefficients=np.array([10.0, 0.5, 2.0]),
+            coefficient_sigma=np.sqrt(np.diag(coefficient_covariance)),
+            coefficient_covariance=coefficient_covariance,
+            reduced_chi_squared=1.0,
+            residuals=np.zeros(3),
+            normalized_residuals=np.zeros(3),
+        )
+        wavelength_nm = np.array([0.0, 5.0, 10.0])
+        expected = np.sqrt(
+            var_c1 + 4 * wavelength_nm ** 2 * var_c2 + 4 * wavelength_nm * cov_c1_c2
+        )
+        assert np.allclose(result.sigma_zeta(wavelength_nm), expected)
+        # At lambda=0, cross-terms vanish -- sigma_zeta must NOT just
+        # report sqrt(var_c1) here if it (incorrectly) ignored covariance
+        # at other wavelengths, so this confirms the varying part above
+        # rather than repeating it.
+        assert result.sigma_zeta(0.0) == pytest.approx(np.sqrt(var_c1))
+
     def test_degree_coefficient_length_mismatch_raises(self):
         with pytest.raises(ValueError):
             SpatialDispersionFitResult(
                 degree=1,
                 coefficients=np.array([1.0, 2.0, 3.0]),
                 coefficient_sigma=np.array([0.1, 0.1, 0.1]),
+                coefficient_covariance=np.eye(3),
                 reduced_chi_squared=1.0,
                 residuals=np.zeros(3),
                 normalized_residuals=np.zeros(3),
@@ -279,6 +329,19 @@ class TestSpatialDispersionFitResult:
                 degree=0,
                 coefficients=np.array([1.0]),
                 coefficient_sigma=np.array([0.1]),
+                coefficient_covariance=np.eye(1),
+                reduced_chi_squared=1.0,
+                residuals=np.zeros(3),
+                normalized_residuals=np.zeros(3),
+            )
+
+    def test_coefficient_covariance_shape_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            SpatialDispersionFitResult(
+                degree=1,
+                coefficients=np.array([1.0, 2.0]),
+                coefficient_sigma=np.array([0.1, 0.1]),
+                coefficient_covariance=np.eye(3),
                 reduced_chi_squared=1.0,
                 residuals=np.zeros(3),
                 normalized_residuals=np.zeros(3),
@@ -291,7 +354,9 @@ class TestShotAnalysisResultImmutability:
         centroids = CentroidResult(columns=np.arange(3), x0=np.zeros(3), sigma_x0=np.ones(3))
         fit = SpatialDispersionFitResult(
             degree=1, coefficients=np.array([0.0, 1.0]),
-            coefficient_sigma=np.array([0.1, 0.1]), reduced_chi_squared=1.0,
+            coefficient_sigma=np.array([0.1, 0.1]),
+            coefficient_covariance=np.diag([0.1, 0.1]) ** 2,
+            reduced_chi_squared=1.0,
             residuals=np.zeros(3), normalized_residuals=np.zeros(3),
         )
         result = ShotAnalysisResult(frame_id=0, centroids=centroids, fits={1: fit})
@@ -323,6 +388,16 @@ class TestTotalLeastSquaresFit:
         assert isinstance(result, SpatialDispersionFitResult)
         assert result.coefficients[1] == pytest.approx(true_slope, abs=5 * result.coefficient_sigma[1])
         assert result.reduced_chi_squared < 3.0   # generous -- single noisy realization
+
+        # coefficient_covariance's diagonal must reproduce coefficient_sigma
+        # (scipy.odr's own sd_beta = sqrt(diag(cov_beta) * res_var)), and
+        # sigma_zeta must collapse to coefficient_sigma[1] at degree 1.
+        assert np.allclose(
+            np.sqrt(np.diag(result.coefficient_covariance)), result.coefficient_sigma
+        )
+        assert result.sigma_zeta(wavelength_nm) == pytest.approx(
+            np.full(n, result.coefficient_sigma[1])
+        )
 
     def test_insufficient_data_raises(self):
         wavelength_nm = np.array([1.0])

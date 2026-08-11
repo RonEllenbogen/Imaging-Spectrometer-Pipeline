@@ -72,7 +72,17 @@ class SpatialDispersionFitResult:
         Fitted coefficients, ascending order (c0, c1, c2, ...), length
         degree + 1.
     coefficient_sigma
-        1-sigma uncertainty on each coefficient, same length/order.
+        1-sigma uncertainty on each coefficient (the covariance matrix's
+        diagonal, marginalized over the others), same length/order.
+    coefficient_covariance
+        Full (degree + 1, degree + 1) covariance matrix of the fitted
+        coefficients -- scipy.odr's cov_beta scaled by res_var (see
+        reduced_chi_squared below), since cov_beta alone is normalized and
+        not yet the real covariance. Needed for sigma_zeta: zeta(lambda) is
+        an exact linear combination of the coefficients, so its variance
+        depends on their covariances, not just their individual variances
+        (coefficient_sigma's diagonal alone is only enough at degree == 1,
+        where zeta is a single coefficient with no cross-terms).
     reduced_chi_squared
         scipy.odr's residual variance -- the errors-in-both-variables
         generalization of reduced chi-squared; ~1 indicates a fit
@@ -87,6 +97,7 @@ class SpatialDispersionFitResult:
     degree: int
     coefficients: np.ndarray
     coefficient_sigma: np.ndarray
+    coefficient_covariance: np.ndarray
     reduced_chi_squared: float
     residuals: np.ndarray
     normalized_residuals: np.ndarray
@@ -104,13 +115,19 @@ class SpatialDispersionFitResult:
                 f"expected {self.degree + 1} coefficients for degree {self.degree}, "
                 f"got {self.coefficients.shape[0]}"
             )
+        n = self.coefficients.shape[0]
+        if self.coefficient_covariance.shape != (n, n):
+            raise ValueError(
+                f"expected coefficient_covariance shape ({n}, {n}), got "
+                f"{self.coefficient_covariance.shape}"
+            )
         if self.residuals.shape != self.normalized_residuals.shape:
             raise ValueError(
                 "residuals and normalized_residuals must have the same shape, got "
                 f"{self.residuals.shape}, {self.normalized_residuals.shape}"
             )
         for array in (
-            self.coefficients, self.coefficient_sigma,
+            self.coefficients, self.coefficient_sigma, self.coefficient_covariance,
             self.residuals, self.normalized_residuals,
         ):
             array.flags.writeable = False
@@ -126,6 +143,31 @@ class SpatialDispersionFitResult:
 
         derivative_coefficients = np.polynomial.polynomial.polyder(self.coefficients)
         return np.polynomial.polynomial.polyval(wavelength_nm, derivative_coefficients)
+
+    def sigma_zeta(self, wavelength_nm: np.ndarray) -> np.ndarray:
+
+        '''
+        1-sigma uncertainty on zeta(wavelength_nm), propagated from the
+        fit's full coefficient_covariance rather than just the marginal
+        coefficient_sigma -- see coefficient_covariance's docstring above
+        for why the marginal alone isn't enough once degree > 1.
+
+        zeta(lambda) = sum_{k=1}^{degree} k * c_k * lambda^(k-1) is an
+        exact linear function of the coefficients c, i.e. zeta(lambda) =
+        g(lambda) @ c with g_k(lambda) = k * lambda^(k-1) (k >= 1) and
+        g_0(lambda) = 0. So, exactly (not just to first order):
+
+            Var[zeta(lambda)] = g(lambda) @ coefficient_covariance @ g(lambda)
+
+        Collapses to coefficient_sigma[1] at degree == 1, where g = (0, 1)
+        and the formula reduces to sqrt(coefficient_covariance[1, 1]).
+        '''
+
+        wavelength_nm = np.asarray(wavelength_nm, dtype=float)
+        powers = np.arange(self.coefficients.shape[0])
+        gradient = powers * wavelength_nm[..., np.newaxis] ** np.maximum(powers - 1, 0)
+        variance = np.einsum("...i,ij,...j->...", gradient, self.coefficient_covariance, gradient)
+        return np.sqrt(variance)
 
 
 @dataclass(frozen=True, slots=True)
