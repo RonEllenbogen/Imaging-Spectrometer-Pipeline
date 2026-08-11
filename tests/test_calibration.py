@@ -1178,6 +1178,18 @@ def _sensor_calibration_set() -> CalibrationSet:
 
 class TestRunSpectralCalibration:
 
+    def _stub_geometric_tilt(self) -> GeometricTiltResult:
+        '''A minimal, valid GeometricTiltResult -- SyntheticBackend's smooth Gaussian
+        beam profile has no discrete lines for the real build_geometric_tilt() to find,
+        so wiring tests that aren't specifically about geometric tilt itself stub it
+        the same way match_lines() is already stubbed below.'''
+        return GeometricTiltResult(
+            row_shift=np.zeros(CANONICAL_SHAPE[0]), reference_row=CANONICAL_SHAPE[0] // 2,
+            residual_slope_columns=np.array([100.0, 900.0]),
+            residual_slope_values=np.array([0.0, 0.0]),
+            record=_record(),
+        )
+
     def test_wiring_with_stubbed_line_matching(self, tmp_path, monkeypatch):
         pixel = np.linspace(0, 1900, 10)
         wavelength_nm = 400.0 + 0.5 * pixel
@@ -1188,16 +1200,24 @@ class TestRunSpectralCalibration:
             "pipeline.calibration.spectral.workflow.match_lines",
             lambda image: (pixel, wavelength_nm, sigma_pixel, sigma_wavelength_nm),
         )
+        stub_tilt = self._stub_geometric_tilt()
+        monkeypatch.setattr(
+            "pipeline.calibration.spectral.workflow.build_geometric_tilt",
+            lambda frames: stub_tilt,
+        )
 
         stream = _make_running_stream()
         try:
             path = tmp_path / "spectral.npz"
-            result = run_spectral_calibration(
+            tilt_path = tmp_path / "geometric_tilt.npz"
+            result, tilt_result = run_spectral_calibration(
                 stream, n_frames=3, sensor_calibration=_sensor_calibration_set(),
-                path=path, degree=1,
+                path=path, geometric_tilt_path=tilt_path, degree=1,
             )
 
             assert path.exists()
+            assert tilt_path.exists()
+            assert tilt_result is stub_tilt
             assert result.record.source_frame_count == 3
 
             loaded = load_spectral_calibration(path)
@@ -1211,6 +1231,8 @@ class TestRunSpectralCalibration:
         # (stamped from the stream's fixed settings at grab time), so the
         # only way to exercise the drift check is to stub
         # collect_n_frames() itself with a batch containing a mismatch.
+        # The drift check runs before build_geometric_tilt(), so no need to
+        # stub that here.
         drifted_frames = [
             _frame(_uniform(10), frame_id=0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
             _frame(_uniform(10), frame_id=1, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
@@ -1223,23 +1245,24 @@ class TestRunSpectralCalibration:
             with pytest.raises(ValueError):
                 run_spectral_calibration(
                     stream, n_frames=3, sensor_calibration=_sensor_calibration_set(),
-                    path=tmp_path / "spectral.npz",
+                    path=tmp_path / "spectral.npz", geometric_tilt_path=tmp_path / "geometric_tilt.npz",
                 )
         finally:
             stream.stop()
 
     def test_propagates_line_matching_error_for_non_line_like_signal(self, tmp_path):
         # SyntheticBackend's frames are a smooth Gaussian beam profile, not
-        # discrete spectral lines -- real match_lines() correctly finds no
-        # matchable peaks in one and raises, exercising the real (now
-        # implemented) match_lines() through the full workflow wiring
-        # rather than a monkeypatched stand-in.
+        # discrete spectral lines -- build_geometric_tilt() (real, not
+        # stubbed here) correctly finds no usable lines in one and raises
+        # LineMatchingError before match_lines() is ever reached, exercising
+        # the real geometric-tilt line detection through the full workflow
+        # wiring rather than a monkeypatched stand-in.
         stream = _make_running_stream()
         try:
             with pytest.raises(LineMatchingError):
                 run_spectral_calibration(
                     stream, n_frames=1, sensor_calibration=_sensor_calibration_set(),
-                    path=tmp_path / "spectral.npz",
+                    path=tmp_path / "spectral.npz", geometric_tilt_path=tmp_path / "geometric_tilt.npz",
                 )
         finally:
             stream.stop()

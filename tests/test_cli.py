@@ -313,6 +313,7 @@ class TestSpectralCaptureArgumentParsing:
             "--flat-field", "custom_flat.npz",
             "--bad-pixel-map", "custom_mask.npz",
             "--path", str(tmp_path / "spectral.npz"),
+            "--geometric-tilt-path", str(tmp_path / "tilt.npz"),
         ])
 
         assert captured["gain_db"] == 2.5
@@ -321,6 +322,7 @@ class TestSpectralCaptureArgumentParsing:
         assert captured["baseline"] == "custom_baseline.npz"
         assert captured["flat_field"] == "custom_flat.npz"
         assert captured["bad_pixel_map"] == "custom_mask.npz"
+        assert captured["geometric_tilt_path"] == str(tmp_path / "tilt.npz")
 
     def test_defaults(self, monkeypatch):
         captured = {}
@@ -334,6 +336,7 @@ class TestSpectralCaptureArgumentParsing:
         assert captured["flat_field"] is None
         assert captured["bad_pixel_map"] is None
         assert captured["path"] is None
+        assert captured["geometric_tilt_path"] is None
         assert captured["auto_exposure"] is True
         assert captured["exposure_us"] is None
 
@@ -390,10 +393,13 @@ class TestSpectralCapturePathResolution:
             recorded["auto_exposure"] = auto_exposure
             return FakeStream()
 
-        def fake_run_spectral_calibration(stream, n_frames, sensor_calibration, path, degree=1):
+        def fake_run_spectral_calibration(
+            stream, n_frames, sensor_calibration, path, geometric_tilt_path, degree=1,
+        ):
             recorded["n_frames"] = n_frames
             recorded["degree"] = degree
             recorded["path"] = path
+            recorded["geometric_tilt_path"] = geometric_tilt_path
             recorded["sensor_calibration"] = sensor_calibration
 
         monkeypatch.setattr(cli, "load_baseline", fake_load_baseline)
@@ -415,6 +421,7 @@ class TestSpectralCapturePathResolution:
         assert recorded["flat_field_path"] == tmp_path / cli.DEFAULT_FLAT_FIELD_FILENAME
         assert recorded["bad_pixel_map_path"] == tmp_path / cli.DEFAULT_BAD_PIXEL_MAP_FILENAME
         assert recorded["path"] == tmp_path / cli.DEFAULT_SPECTRAL_FILENAME
+        assert recorded["geometric_tilt_path"] == tmp_path / cli.DEFAULT_GEOMETRIC_TILT_FILENAME
         assert recorded["n_frames"] == cli.DEFAULT_N_FRAMES
         assert recorded["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
         assert recorded["sensor_calibration"].background_sigma == 1.0
@@ -431,4 +438,19 @@ class TestSpectralCapturePathResolution:
 
         assert recorded["baseline_path"] == custom_baseline
         assert recorded["flat_field_path"] == Path(cli.DEFAULT_ARTIFACT_DIR) / cli.DEFAULT_FLAT_FIELD_FILENAME
+        assert recorded["geometric_tilt_path"] == (
+            Path(cli.DEFAULT_ARTIFACT_DIR) / cli.DEFAULT_GEOMETRIC_TILT_FILENAME
+        )
         assert recorded["stream_started"] is True
+
+    def test_explicit_geometric_tilt_path_overrides_default(self, monkeypatch, tmp_path):
+        recorded = {}
+        self._patch_collaborators(monkeypatch, recorded)
+
+        custom_tilt = tmp_path / "my_tilt.npz"
+        cli.main([
+            "spectral-capture", "--gain-db", "1.0", "--auto-exposure",
+            "--geometric-tilt-path", str(custom_tilt),
+        ])
+
+        assert recorded["geometric_tilt_path"] == custom_tilt

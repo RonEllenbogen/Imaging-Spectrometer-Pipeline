@@ -12,6 +12,20 @@ any other science frame. This mirrors calibration/sensor/workflow.py's
 existing pattern of the caller sequencing already-built pieces, rather
 than this module loading anything from a hardcoded path.
 
+Geometric tilt (calibration/spectral/geometric_tilt.py) is the one
+artifact this function builds itself, from the very same raw lamp frames,
+rather than requiring the caller to supply it -- unlike baseline/flat-
+field/bad-pixel-map, it needs nothing but a lamp exposure to build (no
+separate physical setup), so there's no reason to make the caller run a
+second capture session for it. It's built from the raw frames (before
+run_preprocessing() -- build_geometric_tilt() does its own per-line
+background handling and doesn't need baseline/flat-field applied first),
+then folded into sensor_calibration for every run_preprocessing() call
+below, so the averaged image line_matching.py's match_lines() sees is
+already tilt-corrected: without that, match_lines()'s peak detection
+would be working on row-tilt-smeared (broadened, less resolved) lines,
+per scripts/measure_spectrometer_tilt.py's own exploratory findings.
+
 Each captured frame is preprocessed individually via run_preprocessing()
 (not averaged first as raw frames the way build_baseline() averages
 background frames) -- run_preprocessing() only accepts one raw FrameData
@@ -39,6 +53,7 @@ from match_lines()) until that module is filled in.
 # pipeline.preprocessing here at module scope would be circular.
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from pathlib import Path
@@ -50,6 +65,7 @@ from pipeline.acquisition import CameraStream
 
 from ..shared.metadata import CalibrationRecord
 from .calibrate import calibrate_spectral, WavelengthCalibrationResult
+from .geometric_tilt import build_geometric_tilt, save_geometric_tilt, GeometricTiltResult
 from .io import save_spectral_calibration
 from .line_matching import match_lines
 
@@ -69,14 +85,18 @@ def run_spectral_calibration(
     n_frames: int,
     sensor_calibration: CalibrationSet,
     path: str | Path,
+    geometric_tilt_path: str | Path,
     degree: int = 1,
-) -> WavelengthCalibrationResult:
+) -> tuple[WavelengthCalibrationResult, GeometricTiltResult]:
 
     '''
     Acquires n_frames lamp frames from an already-running camera_stream,
-    preprocesses and averages them, matches spectral lines, fits
-    pixel->wavelength_nm, and saves the result to path -- all in one call,
-    since spectral calibration is single-phase.
+    builds a geometric tilt calibration from them, preprocesses and
+    averages them (tilt-corrected), matches spectral lines, fits
+    pixel->wavelength_nm, and saves both results -- all in one call, since
+    spectral calibration is single-phase (see module docstring for why
+    geometric tilt is folded in here rather than requiring a separate
+    caller-driven step).
 
     Parameters
     ----------
@@ -88,16 +108,21 @@ def run_spectral_calibration(
         Number of lamp frames to capture and average before line-matching.
     sensor_calibration
         The already-built baseline/flat-field/bad-pixel-map artifacts to
-        preprocess each captured lamp frame with.
+        preprocess each captured lamp frame with -- its geometric_tilt
+        field is ignored/overwritten with the one built here, so it need
+        not (and normally won't yet) have one set.
     path
         Where to save the resulting spectral calibration artifact.
+    geometric_tilt_path
+        Where to save the geometric tilt calibration built from the same
+        captured frames.
     degree
         Polynomial degree for the pixel->wavelength_nm fit -- see
         calibrate.calibrate_spectral().
 
     Returns
     -------
-    WavelengthCalibrationResult
+    tuple[WavelengthCalibrationResult, GeometricTiltResult]
 
     Raises
     ------
@@ -111,6 +136,10 @@ def run_spectral_calibration(
         gain_db -- a lamp calibration batch is captured back-to-back in
         one session, so any drift between frames indicates a setup
         problem, not something to average over.
+    LineMatchingError
+        Propagated from build_geometric_tilt() (too few usable lines to
+        build the tilt calibration) or match_lines() (too few peaks
+        matched against the reference wavelength list).
     '''
 
     from pipeline.preprocessing import run_preprocessing   # see module docstring's import note
@@ -126,8 +155,13 @@ def run_spectral_calibration(
                 f"exposure_us={reference_exposure_us}, gain_db={reference_gain_db} -- "
                 f"all lamp frames in one batch must share identical settings"
             )
+
+    tilt_result = build_geometric_tilt(frames)
+    save_geometric_tilt(geometric_tilt_path, tilt_result)
+    calibration_with_tilt = dataclasses.replace(sensor_calibration, geometric_tilt=tilt_result)
+
     processed_images = [
-        run_preprocessing(frame, sensor_calibration)[0].image for frame in frames
+        run_preprocessing(frame, calibration_with_tilt)[0].image for frame in frames
     ]
     averaged_image = np.mean(processed_images, axis=0)
 
@@ -144,8 +178,11 @@ def run_spectral_calibration(
         pixel, wavelength_nm, sigma_pixel, sigma_wavelength_nm, record, degree=degree,
     )
     save_spectral_calibration(path, result)
-    logger.info("spectral calibration complete: %d frames -> %s", n_frames, path)
-    return result
+    logger.info(
+        "spectral calibration complete: %d frames -> %s (geometric tilt -> %s)",
+        n_frames, path, geometric_tilt_path,
+    )
+    return result, tilt_result
 
 
 __all__ = ["run_spectral_calibration"]

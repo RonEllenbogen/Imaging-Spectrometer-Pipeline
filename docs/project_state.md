@@ -12,10 +12,16 @@ what's next.
 ## 0. Current focus (as of 2026-08-10)
 
 A real calibration session is in progress on the lab PC (Windows), driven entirely through the CLI
-(§4) — baseline, flat-field, bad-pixel-map, conversion-gain, spectral-capture, in that order (spatial
-is a manual value entry, not part of this session). A published guide walks through the exact commands
-and physical setup for each step; ask the user for the link if it's needed again, since artifact URLs
-aren't recorded in this repo.
+(§4) — baseline, flat-field, bad-pixel-map, conversion-gain, spectral-capture (geometric tilt is now
+built and saved automatically as part of this step, from the same lamp frames -- see §3/§4), in that
+order (spatial is a manual value entry, not part of this session), followed by a **second** `baseline`
+run at whatever exposure/gain the actual spatial-chirp measurement will use (likely very different from
+the lamp-calibration settings above -- `run_preprocessing()`'s `check_settings_match()` will reject a
+baseline tagged with the wrong settings, so this second capture is required, not optional, and should be
+saved to a different path than the first). A published guide walks through the exact commands and
+physical setup for each step; ask the user for the link if it's needed again, since artifact URLs aren't
+recorded in this repo -- it predates geometric tilt's CLI integration and should be checked/updated to
+include it.
 
 The repo is pushed to a **public** GitHub remote (`origin` = `RonEllenbogen/Imaging-Spectrometer-
 Pipeline`) — the tooling-mention policy documented in `CLAUDE.md`'s "Conventions" section applies to
@@ -452,19 +458,50 @@ derivations (θ_m(800nm)≈−12.8°, full 1920-column sensor spans ~108nm).
 - `spectral/io.py` — persists a `WavelengthCalibrationResult` via `shared/io.py`'s extended multi-array
   support; `degree`/`reduced_chi_squared` (scalars belonging to the fit, not to `CalibrationRecord`)
   are packed as 0-d arrays alongside the fit's coefficient/residual arrays.
+- **`spectral/geometric_tilt.py`** (new) — `build_geometric_tilt(frames, gain_e_per_adu=..., background_sigma=..., fitter=...)`
+  measures the spectrometer's row-dependent geometric tilt (a shared, non-monotonic, wavelength-
+  independent column shift found across every detected lamp line -- productionizes
+  `scripts/measure_spectrometer_tilt.py`'s exploratory analysis). Auto-detects usable lines via
+  `scipy.signal.find_peaks` on the column-summed spectrum (no wavelength/reference-line matching needed
+  -- unlike `line_matching.py`, this only needs positional fiducials), fits each one's row-vs-centroid
+  trace, and returns a `GeometricTiltResult` (dominant shared `row_shift` array + a sparser per-column
+  `residual_slope_columns`/`residual_slope_values` term, consumed via `column_shift()`). Raises
+  `LineMatchingError` (reused from `line_matching.py`'s error, not duplicated) if fewer than
+  `MIN_LINES_REQUIRED` (3) lines are detected. Duplicates analysis/centroiding.py's intensity-weighted-
+  centroid-plus-Thompson-Larson-Webb formula locally rather than importing it (`calibration/` must not
+  depend on `analysis/`, same rule `shared/fitting.py` follows) -- accepts plain
+  `gain_e_per_adu`/`background_sigma` floats rather than a `SensorNoiseModel` for the same reason.
+  `save_geometric_tilt()`/`load_geometric_tilt()` persist it via `shared/io.py`. Applied by
+  `preprocessing/steps/geometric_tilt.py`'s `apply_geometric_tilt_correction()` (a resample via
+  `scipy.ndimage.map_coordinates`, not just an intensity correction -- the one preprocessing step that
+  warps rather than rescales/masks pixel values, with the noise-correlation and bad-pixel-interpolation
+  caveats that implies, documented in its own module docstring), wired into `CalibrationSet` as an
+  optional `geometric_tilt: GeometricTiltResult | None = None` field (`None` = skipped, so every
+  pre-existing `CalibrationSet` construction site keeps working unchanged) and applied in
+  `run_preprocessing()`'s correction order right after bad-pixel masking, before signal-threshold
+  masking.
 - `spectral/workflow.py`'s `run_spectral_calibration()` — fully wired: acquires `n_frames` lamp frames,
-  preprocesses each individually via a caller-supplied `CalibrationSet` (dark/baseline subtraction,
-  flat-field division, bad-pixel masking -- the full existing preprocessing pipeline, needed because a
-  lamp frame is preprocessed the same as any other science frame), averages the N preprocessed images
-  for better line-detection SNR, then calls `match_lines()` → `calibrate_spectral()` → save. Frames are
-  preprocessed individually and averaged afterward, NOT averaged as raw frames first the way
-  `build_baseline()` averages background frames -- averaging raw lamp frames before dark/flat-field
-  correction would reintroduce the DSNU-contamination problem `build_flat_field()` avoids by
+  builds a `GeometricTiltResult` from those same raw frames (before any other preprocessing --
+  `build_geometric_tilt()` does its own per-line background handling) and saves it to a caller-supplied
+  `geometric_tilt_path`, then preprocesses each frame individually via a caller-supplied `CalibrationSet`
+  (dark/baseline subtraction, flat-field division, bad-pixel masking, and now the tilt correction just
+  built -- the full existing preprocessing pipeline, needed because a lamp frame is preprocessed the
+  same as any other science frame), averages the N preprocessed images for better line-detection SNR,
+  then calls `match_lines()` → `calibrate_spectral()` → save. Geometric tilt is built here rather than
+  requiring a separate caller-driven capture, since (unlike baseline/flat-field/bad-pixel-map) it needs
+  nothing but a lamp exposure -- no reason to make the caller run a second physical setup for it; tilt-
+  correcting the averaged image before `match_lines()` also matters for line-detection quality, since an
+  un-corrected image's lines are row-tilt-smeared (broadened, less resolved) when collapsed to a 1D
+  spectrum. Frames are preprocessed individually and averaged afterward, NOT averaged as raw frames first
+  the way `build_baseline()` averages background frames -- averaging raw lamp frames before dark/flat-
+  field correction would reintroduce the DSNU-contamination problem `build_flat_field()` avoids by
   dark-subtracting before normalizing. Mirrors `calibration/sensor/workflow.py`'s pattern of the caller
   supplying already-built pieces rather than this module loading anything from a hardcoded path. Now
-  runs end-to-end against a real lamp frame; `tests/test_calibration.py` covers both the full wiring
-  (monkeypatched `match_lines()`) and a real-`match_lines()` case (a `SyntheticBackend` frame's smooth
-  Gaussian beam profile correctly has no matchable line peaks, raising `LineMatchingError`).
+  returns `tuple[WavelengthCalibrationResult, GeometricTiltResult]` (was just the former). Now runs
+  end-to-end against a real lamp frame; `tests/test_calibration.py` covers both the full wiring
+  (monkeypatched `match_lines()` and `build_geometric_tilt()`) and a real-detection case (a
+  `SyntheticBackend` frame's smooth Gaussian beam profile correctly has no usable lines for either
+  `build_geometric_tilt()` or `match_lines()`, raising `LineMatchingError`).
 
 ---
 
@@ -483,7 +520,12 @@ no defaults, matching the caller-supplied-not-auto-probed decision in §6), `spe
 `spectral-manual` (two flat subcommands, not one nested one — this file has no nested subparsers
 anywhere, so two top-level commands fit the existing style better; `spectral-capture` wires
 `run_spectral_calibration()` to a real `CameraStream`, loading baseline/flat-field/bad-pixel-map inputs
-the same optional-default way `noise-model` resolves its own inputs; `spectral-manual` takes
+the same optional-default way `noise-model` resolves its own inputs, plus a `--geometric-tilt-path`
+flag (default `calibration_artifacts/geometric_tilt.npz`, same `--output-dir`-relative-path rules as
+every other artifact flag) for where the geometric tilt calibration `run_spectral_calibration()` now
+builds automatically gets saved -- there is no separate `geometric-tilt` subcommand, since it needs
+nothing but the same lamp frames `spectral-capture` already captures, see §3;
+`spectral-manual` takes
 `--coefficients`/`--coefficient-sigma` as `nargs="+"` lists and calls
 `build_manual_spectral_calibration()` -- no camera involved, so it's the one subcommand in this file
 actually exercised end-to-end by its own tests rather than only argument-parsing-tested), and a bonus

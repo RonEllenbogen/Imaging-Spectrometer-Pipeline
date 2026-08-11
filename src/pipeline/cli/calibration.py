@@ -57,6 +57,10 @@ DEFAULT_CONVERSION_GAIN_FILENAME = "conversion_gain.npz"
 # _DEFAULT_SCALE_FACTOR_FILENAME constant predates this and is left as-is.
 DEFAULT_SCALE_FACTOR_FILENAME = "scale_factor.npz"
 DEFAULT_SPECTRAL_FILENAME = "spectral.npz"
+# Built automatically as part of `spectral-capture`, from the same lamp
+# frames -- see calibration/spectral/workflow.py's run_spectral_calibration()
+# module docstring for why it isn't its own separate subcommand.
+DEFAULT_GEOMETRIC_TILT_FILENAME = "geometric_tilt.npz"
 DEFAULT_N_FRAMES = 50
 DEFAULT_SPECTRAL_DEGREE = 1
 
@@ -341,6 +345,9 @@ def _cmd_noise_model(args: argparse.Namespace) -> None:
 
 def _cmd_spectral_capture(args: argparse.Namespace) -> None:
     path = resolve_artifact_path(args.output_dir, args.path, DEFAULT_SPECTRAL_FILENAME)
+    geometric_tilt_path = resolve_artifact_path(
+        args.output_dir, args.geometric_tilt_path, DEFAULT_GEOMETRIC_TILT_FILENAME
+    )
     if args.baseline is None:
         baseline_path = resolve_artifact_path(
             args.output_dir, None, DEFAULT_BASELINE_FILENAME
@@ -378,7 +385,8 @@ def _cmd_spectral_capture(args: argparse.Namespace) -> None:
     stream.start()
     try:
         run_spectral_calibration(
-            stream, args.n_frames, sensor_calibration, path, degree=args.degree,
+            stream, args.n_frames, sensor_calibration, path, geometric_tilt_path,
+            degree=args.degree,
         )
     finally:
         if stream.is_running:
@@ -592,6 +600,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"Bad-pixel-map artifact to preprocess lamp frames with (default: "
             f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_BAD_PIXEL_MAP_FILENAME})."
+        ),
+    )
+    spectral_capture_parser.add_argument(
+        "--geometric-tilt-path",
+        default=None,
+        dest="geometric_tilt_path",
+        help=(
+            "Where to save the geometric tilt calibration built from the same lamp frames "
+            f"(default: {DEFAULT_ARTIFACT_DIR}/{DEFAULT_GEOMETRIC_TILT_FILENAME}) -- see "
+            "--output-dir for relative-path rules."
         ),
     )
     spectral_capture_parser.set_defaults(func=_cmd_spectral_capture)
