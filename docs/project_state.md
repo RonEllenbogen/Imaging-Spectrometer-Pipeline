@@ -899,12 +899,37 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   layer of this codebase's own (rejecting nonsensical combinations, clearer
   error messages, etc.). Noted for a future pass once more of the real
   input surfaces (dialogs, CLI flags) exist to validate.
-- **GUI live view: manual ROI entry.** Add fields on the live-view screen for the user to manually enter
-  min/max bounds on both axes (spatial ROI rows, spectral-column signal-threshold range) based on what
-  they see in the live feed, overriding the automatic mechanisms currently in place
-  (`preprocessing/steps/roi.py`'s row bounds, `signal_threshold.py`'s per-column SNR gate) per-axis when
-  entered; falls back to the existing automatic mechanism for any axis left blank. Needs a "Reset ROI"
-  button restoring the automatic default, for when the user wants to undo a manual entry.
+- ~~**GUI live view: manual ROI entry -- spatial axis.**~~ **Done.** New
+  `gui/roi_control.py`: `SpatialROIControl(QGroupBox)`, a self-contained widget
+  (deliberately no dependency on `live_view.py`, so a future Extended Measurement
+  dialog can embed it too) with min/max `QDoubleSpinBox` fields in mm (matching
+  the live-view plot's y-axis units), a "Reset to Full Range" button, and inline
+  validation (`min >= max` is rejected with an error label, reverting to the last
+  valid pair). Session default is the full spatial extent. `roi_bounds_px()`
+  converts back to pixel-row bounds via a new inverse method,
+  `calibration/spatial/calibrate.py`'s `ScaleFactorPositionCalibration.to_pixels()`
+  -- shaped exactly like `preprocessing/steps/roi.py`'s `apply_roi()`/
+  `run_preprocessing()`'s `roi_bounds` parameter, ready for whenever real camera
+  wiring happens (not yet -- see below). Wired into `live_view.py`'s side panel;
+  entering new bounds narrows the plot's y-axis to exactly `[min, max]`
+  (`setYRange(..., padding=0)`, which also disables pyqtgraph's autorange on that
+  axis) and crops the placeholder scatter/fit-curve/heatmap to match, zeroing
+  heatmap rows outside the window rather than resizing the image -- mirroring
+  `apply_roi()`'s real zero-not-crop behavior for visual consistency, even though
+  this whole widget still only drives the Phase-1 placeholder data (`live_view.py`
+  has no real camera/`analyze_shot()` calls yet at all, per its own module
+  docstring -- wiring this control to a real per-frame `roi_bounds` argument is
+  part of that larger, still-pending "wire GUI to real backend" pass, not this
+  item). Spectral-column signal-threshold range entry (the other half of the
+  original combined to-do item below) is still open.
+- **GUI live view: manual ROI entry -- spectral axis.** Add a field on the
+  live-view screen for the user to manually enter a min/max spectral-column
+  range, based on what they see in the live feed, overriding the automatic
+  per-column SNR gate currently in place (`preprocessing/steps/signal_threshold.py`).
+  Falls back to the automatic mechanism when left at its full-range default,
+  same UX pattern as the spatial control just built above (which this should
+  probably reuse the shape of, e.g. a sibling `SpectralROIControl` or a shared
+  base, rather than a from-scratch design).
 - ~~**`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
   degree > 1.**~~ **Done.** `SpatialDispersionFitResult` gained a `coefficient_covariance`
   field (the full (degree+1, degree+1) matrix, not just `coefficient_sigma`'s diagonal)

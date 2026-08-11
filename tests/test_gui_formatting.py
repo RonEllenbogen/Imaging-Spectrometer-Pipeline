@@ -8,7 +8,11 @@ this module needs no PySide6/pyqtgraph/pytest-qt and always runs.
 
 import pytest
 
-from pipeline.gui.formatting import format_value_with_uncertainty
+from pipeline.gui.formatting import (
+    format_value_with_uncertainty,
+    microns_to_mm,
+    mm_to_microns,
+)
 
 # Constants
 
@@ -93,3 +97,15 @@ class TestInvalidInputs:
     def test_non_finite_value_raises(self):
         with pytest.raises(ValueError):
             format_value_with_uncertainty(float("inf"), 0.1)
+
+
+class TestMicronsMmConversion:
+
+    def test_microns_to_mm_known_value(self):
+        assert microns_to_mm(1000.0) == 1.0
+
+    def test_mm_to_microns_known_value(self):
+        assert mm_to_microns(1.0) == 1000.0
+
+    def test_round_trip(self):
+        assert mm_to_microns(microns_to_mm(2345.0)) == 2345.0

@@ -742,6 +742,18 @@ class TestScaleFactorPositionCalibration:
         assert np.array_equal(converted_x0, x0 * combined_factor)
         assert np.array_equal(converted_sigma, sigma_x0 * combined_factor)
 
+    def test_to_pixels_is_inverse_of_convert(self):
+        # Non-default scale_factor so this isn't accidentally only
+        # correct for DEFAULT_SCALE_FACTOR.
+        calibration = ScaleFactorPositionCalibration(scale_factor=1.8)
+        x0 = np.array([0.0, 100.0, 599.5, 1199.0])
+        sigma_x0 = np.zeros_like(x0)
+
+        physical_position_um, _ = calibration.convert(x0, sigma_x0)
+        round_tripped = calibration.to_pixels(physical_position_um)
+
+        np.testing.assert_allclose(round_tripped, x0)
+
     def test_rejects_non_positive_scale_factor(self):
         with pytest.raises(ValueError):
             ScaleFactorPositionCalibration(scale_factor=0.0)

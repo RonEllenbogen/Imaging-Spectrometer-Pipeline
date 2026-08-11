@@ -55,6 +55,7 @@ from pipeline.calibration.shared import (  # noqa: E402
     GAIN_MATCH_TOLERANCE_ABS,
 )
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
+from pipeline.calibration.spatial.calibrate import PIXEL_PITCH_UM  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 import pipeline.gui.calibration_screen as calibration_screen_module  # noqa: E402
 from pipeline.gui.calibration_dialogs import (  # noqa: E402
@@ -84,6 +85,7 @@ from pipeline.gui.live_view import (  # noqa: E402
     heatmap_x_extent,
     wavelength_axis_label,
 )
+from pipeline.gui.roi_control import SpatialROIControl  # noqa: E402
 
 # Constants
 
@@ -1028,3 +1030,119 @@ class TestAcquisitionSettingsPanel:
         assert widget._scatter.isVisible() is True
         assert widget._error_bars.isVisible() is True
         assert widget._fit_curve.isVisible() is True
+
+
+# ---------------------------------------------------------------------------
+# roi_control.py -- SpatialROIControl (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestSpatialROIControl:
+
+    def _make_widget(self, qtbot, scale_factor: float = 1.5, n_rows: int = 1000) -> SpatialROIControl:
+        widget = SpatialROIControl(
+            position_calibration=ScaleFactorPositionCalibration(scale_factor=scale_factor),
+            n_rows=n_rows,
+        )
+        qtbot.addWidget(widget)
+        # error_label.isVisible() below reflects real on-screen visibility,
+        # not just the internal setVisible() flag -- requires the widget
+        # to actually be shown, matching TestLiveViewWidgetSmoke's convention.
+        widget.show()
+        qtbot.waitExposed(widget)
+        return widget
+
+    def test_default_construction_spans_full_range(self, qtbot):
+        scale_factor, n_rows = 1.5, 1000
+        widget = self._make_widget(qtbot, scale_factor=scale_factor, n_rows=n_rows)
+
+        expected_extent_mm = (PIXEL_PITCH_UM * scale_factor * n_rows) / MICRONS_PER_MM
+
+        min_mm, max_mm = widget.roi_bounds_mm()
+        assert min_mm == pytest.approx(0.0)
+        assert max_mm == pytest.approx(expected_extent_mm)
+
+    def test_valid_change_updates_bounds_and_emits_signal(self, qtbot):
+        widget = self._make_widget(qtbot)
+        received = []
+        widget.roi_changed.connect(lambda min_mm, max_mm: received.append((min_mm, max_mm)))
+
+        widget._min_spin.setValue(1.0)
+
+        assert widget.roi_bounds_mm()[0] == pytest.approx(1.0)
+        assert len(received) == 1
+        assert received[0][0] == pytest.approx(1.0)
+        assert received[0][1] == pytest.approx(widget._max_spin.value())
+
+    def test_invalid_change_shows_error_and_reverts_without_emitting(self, qtbot):
+        widget = self._make_widget(qtbot)
+        last_valid = widget._last_valid_bounds
+        received = []
+        widget.roi_changed.connect(lambda min_mm, max_mm: received.append((min_mm, max_mm)))
+
+        current_max = widget._max_spin.value()
+        widget._min_spin.setValue(current_max)
+
+        assert widget._error_label.isVisible() is True
+        assert received == []
+        assert widget.roi_bounds_mm() == pytest.approx(last_valid)
+
+    def test_reset_button_restores_full_range_and_emits_signal(self, qtbot):
+        widget = self._make_widget(qtbot)
+        widget._min_spin.setValue(1.0)
+
+        received = []
+        widget.roi_changed.connect(lambda min_mm, max_mm: received.append((min_mm, max_mm)))
+        widget._reset_button.click()
+
+        expected_extent_mm = widget._extent_mm
+        assert widget.roi_bounds_mm() == pytest.approx((0.0, expected_extent_mm))
+        assert received == [(0.0, expected_extent_mm)]
+        assert widget._error_label.isVisible() is False
+
+    def test_roi_bounds_px_matches_hand_computed_expectation(self, qtbot):
+        scale_factor, n_rows = 2.0, 500
+        widget = self._make_widget(qtbot, scale_factor=scale_factor, n_rows=n_rows)
+        combined_factor = PIXEL_PITCH_UM * scale_factor
+
+        widget._min_spin.setValue(1.0)
+        widget._max_spin.setValue(2.0)
+
+        expected_min_px = round((1.0 * MICRONS_PER_MM) / combined_factor)
+        expected_max_px = round((2.0 * MICRONS_PER_MM) / combined_factor)
+
+        assert widget.roi_bounds_px() == (expected_min_px, expected_max_px)
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- LiveViewWidget wired to SpatialROIControl (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestLiveViewSpatialROI:
+
+    def test_roi_change_narrows_plot_y_range(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+
+        min_mm, max_mm = 1.0, 5.0
+        widget._roi_control._min_spin.setValue(min_mm)
+        widget._roi_control._max_spin.setValue(max_mm)
+
+        y_range = widget._main_plot.viewRange()[1]
+        assert tuple(y_range) == pytest.approx((min_mm, max_mm))
+
+    def test_roi_change_drops_out_of_window_scatter_points(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+
+        _, y_before = widget._scatter.getData()
+        count_before = len(y_before)
+
+        # Median of the full-range scatter's own y-values -- guaranteed to
+        # cut roughly half the points (those below it) while leaving the
+        # rest, without hand-computing the fake centroid trend's mm range.
+        min_mm = float(np.median(y_before))
+        widget._roi_control._min_spin.setValue(min_mm)
+        max_mm = widget._roi_control.roi_bounds_mm()[1]
+
+        _, y_after = widget._scatter.getData()
+
+        assert len(y_after) < count_before
+        assert np.all((y_after >= min_mm) & (y_after <= max_mm))

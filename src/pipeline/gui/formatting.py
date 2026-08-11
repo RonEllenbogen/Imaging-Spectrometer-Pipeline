@@ -13,6 +13,8 @@ from decimal import ROUND_HALF_UP, Decimal
 
 # Constants
 
+MICRONS_PER_MM = 1000.0
+
 # Classes
 
 # Functions
@@ -106,4 +108,18 @@ def _round_to_significant_figures(magnitude: Decimal, significant_figures: int) 
     return magnitude.quantize(quantum, rounding=ROUND_HALF_UP)
 
 
-__all__ = ["format_value_with_uncertainty"]
+def microns_to_mm(value_um: float) -> float:
+
+    '''Converts microns to mm, since calibration/spatial/calibrate.py's ScaleFactorPositionCalibration.convert() returns microns but gui/ screens display in mm.'''
+
+    return value_um / MICRONS_PER_MM
+
+
+def mm_to_microns(value_mm: float) -> float:
+
+    '''Inverse of microns_to_mm().'''
+
+    return value_mm * MICRONS_PER_MM
+
+
+__all__ = ["format_value_with_uncertainty", "MICRONS_PER_MM", "microns_to_mm", "mm_to_microns"]
