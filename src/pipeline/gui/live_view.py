@@ -702,6 +702,7 @@ class LiveViewWidget(QWidget):
         self._image_item.setRect(
             min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
         )
+        self._placeholder_x_extent = (min(x0, x1), max(x0, x1))
 
         # Kept for _update_strip_chart_placeholder() to continue the same
         # random stream _populate_placeholder_data() threads it through,
@@ -719,6 +720,19 @@ class LiveViewWidget(QWidget):
         fit points are dropped entirely rather than merely clipped from
         view. Callable both at startup (_populate_placeholder_data()) and
         on every self._roi_control.roi_changed signal (_on_roi_changed()).
+
+        Sets BOTH axis ranges via one setRange() call, even though the ROI
+        only ever changes the y-range -- pinning x explicitly (rather than
+        leaving it on pyqtgraph's autorange) works around a real pyqtgraph
+        quirk: ScatterPlotItem's default pxMode markers size themselves in
+        screen pixels, and converting that to a data-space bounding rect
+        for autorange requires a pixel<->data transform that doesn't exist
+        yet before the widget's first paint. Fixing y alone left x on that
+        not-yet-valid autorange, which computed a wildly wrong x extent
+        (observed: roughly [-1.9e5, 3.8e6] instead of [0, 1919]) that
+        squeezed all the real scatter/fit-curve data into an invisible
+        sliver. x's own extent never depends on the ROI, so re-pinning it
+        to the same value every call is harmless.
         '''
 
         y_values, y_sigma = self._convert_to_mm(
@@ -749,7 +763,9 @@ class LiveViewWidget(QWidget):
         masked_image[row_max_px:, :] = 0
         self._image_item.setImage(masked_image)
 
-        self._main_plot.setYRange(min_mm, max_mm, padding=0)
+        self._main_plot.setRange(
+            xRange=self._placeholder_x_extent, yRange=(min_mm, max_mm), padding=0
+        )
 
     def _on_roi_changed(self, min_mm: float, max_mm: float) -> None:
 
