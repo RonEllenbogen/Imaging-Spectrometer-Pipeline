@@ -140,20 +140,72 @@ def print_report(result: ShotAnalysisResult, wavelength_axis) -> None:
         print(f"  degree {degree}: {fit.reduced_chi_squared:.4g}")
 
 
+def resample_to_wavelength_grid(image: np.ndarray, wavelength_axis) -> tuple[np.ndarray, np.ndarray]:
+
+    '''
+    Resamples image's columns from pixel-index space onto a uniform
+    wavelength grid via wavelength_axis's pixel -> wavelength_nm mapping.
+    Needed for plot_result()'s heatmap to be honestly labelled "wavelength"
+    on its x-axis -- relabelling pixel-index tick marks alone would only
+    be correct if the calibration were exactly linear; this is exact
+    regardless of the fitted degree, by construction.
+
+    Parameters
+    ----------
+    image
+        2D array, columns in pixel-index order (e.g. an already
+        geometric-tilt-corrected frame).
+    wavelength_axis
+        Anything with a wavelength_nm(pixel) method, e.g. a loaded
+        WavelengthCalibrationResult.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (wavelength_grid, resampled_image) -- wavelength_grid is
+        ascending and evenly spaced; resampled_image has the same shape
+        as image, with resampled_image[:, i] corresponding to
+        wavelength_grid[i].
+    '''
+
+    n_rows, n_columns = image.shape
+    columns = np.arange(n_columns, dtype=np.float64)
+    wavelength_per_column = wavelength_axis.wavelength_nm(columns)
+
+    # np.interp requires ascending x -- sort once here rather than assume
+    # wavelength increases with column (grating orientation isn't fixed,
+    # see line_matching.py's own module docstring on this same point).
+    order = np.argsort(wavelength_per_column)
+    sorted_wavelength = wavelength_per_column[order]
+    wavelength_grid = np.linspace(sorted_wavelength[0], sorted_wavelength[-1], n_columns)
+
+    resampled_image = np.empty_like(image)
+    for row in range(n_rows):
+        resampled_image[row] = np.interp(wavelength_grid, sorted_wavelength, image[row, order])
+
+    return wavelength_grid, resampled_image
+
+
 def plot_result(
-    image: np.ndarray, wavelength_nm: np.ndarray, result: ShotAnalysisResult,
+    image: np.ndarray, wavelength_axis, result: ShotAnalysisResult,
     col_min: int, col_max: int, output_path: Path,
 ) -> None:
 
     '''
     Heatmap with centroids overlaid (top), then one residuals panel per
-    fitted degree, sharing the wavelength x-axis -- so the three degrees'
-    residual scatter/structure can be compared directly by eye alongside
-    the printed reduced-chi-squared numbers.
+    fitted degree -- every panel shares a genuine wavelength x-axis (see
+    resample_to_wavelength_grid()), so the heatmap, centroids, and
+    residuals are all directly comparable, not just the bottom panels.
     '''
 
     centroids = result.centroids
     degrees = sorted(result.fits)
+
+    wavelength_grid, wavelength_image = resample_to_wavelength_grid(image, wavelength_axis)
+    centroid_wavelength_nm = wavelength_axis.wavelength_nm(centroids.columns)
+    col_min_wavelength_nm, col_max_wavelength_nm = sorted(
+        wavelength_axis.wavelength_nm(np.array([col_min, col_max])).tolist()
+    )
 
     fig, axes = plt.subplots(
         1 + len(degrees), 1, figsize=(11, 6 + 2.2 * len(degrees)),
@@ -161,21 +213,27 @@ def plot_result(
     )
     ax_image = axes[0]
 
-    im = ax_image.imshow(image, cmap="viridis", origin="upper", aspect="auto")
+    extent = (wavelength_grid[0], wavelength_grid[-1], image.shape[0], 0)
+    im = ax_image.imshow(wavelength_image, cmap="viridis", origin="upper", aspect="auto", extent=extent)
     fig.colorbar(im, ax=ax_image, label="Intensity (ADU, tilt-corrected)")
 
-    n_columns = image.shape[1]
     if col_min > 0:
-        ax_image.axvspan(0, col_min, color="black", alpha=0.35, linewidth=0, zorder=2.5)
-    if col_max < n_columns:
-        ax_image.axvspan(col_max, n_columns, color="black", alpha=0.35, linewidth=0, zorder=2.5)
+        ax_image.axvspan(
+            wavelength_grid[0], col_min_wavelength_nm, color="black", alpha=0.35, linewidth=0, zorder=2.5
+        )
+    if col_max < image.shape[1]:
+        ax_image.axvspan(
+            col_max_wavelength_nm, wavelength_grid[-1], color="black", alpha=0.35, linewidth=0, zorder=2.5
+        )
 
     ax_image.errorbar(
-        centroids.columns, centroids.x0, yerr=centroids.sigma_x0,
+        centroid_wavelength_nm, centroids.x0, yerr=centroids.sigma_x0,
         fmt="o", color="red", markersize=2, elinewidth=0.5, alpha=0.6,
         label="Centroid (x0 +/- sigma_x0)",
     )
+    ax_image.set_xlim(wavelength_grid[0], wavelength_grid[-1])
     ax_image.set_ylabel("Spatial pixel row")
+    ax_image.set_xlabel("Wavelength (nm)")
     ax_image.set_title(
         f"{DEFAULT_IMAGE_PATH} -- geometric-tilt-corrected, no baseline/flat-field\n"
         f"shaded = excluded from analysis (cols < {col_min} or >= {col_max})"
@@ -185,7 +243,7 @@ def plot_result(
     for ax, degree in zip(axes[1:], degrees):
         fit = result.fits[degree]
         ax.errorbar(
-            wavelength_nm, fit.residuals, yerr=centroids.sigma_x0,
+            centroid_wavelength_nm, fit.residuals, yerr=centroids.sigma_x0,
             fmt=".", color="steelblue", markersize=3, elinewidth=0.5, alpha=0.6,
         )
         ax.axhline(0.0, color="black", linewidth=0.8)
@@ -231,9 +289,8 @@ def main() -> None:
 
     print_report(result, spectral)
 
-    wavelength_nm = spectral.wavelength_nm(result.centroids.columns)
     plot_result(
-        frame.image, wavelength_nm, result,
+        frame.image, spectral, result,
         col_min=args.col_min, col_max=args.col_max, output_path=args.output,
     )
 
