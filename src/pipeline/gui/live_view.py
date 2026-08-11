@@ -63,6 +63,8 @@ from pipeline.gui.theme import (
     COLOR_BACKGROUND as BACKGROUND_COLOR,
     COLOR_TEXT_PRIMARY as FOREGROUND_COLOR,
     COLOR_PLOT_GRID as GRID_COLOR,
+    combo_box_stylesheet,
+    group_box_stylesheet,
     load_bundled_font,
 )
 
@@ -192,6 +194,7 @@ class LiveViewWidget(QWidget):
     '''
 
     recalibration_requested = Signal(str)
+    extended_measurement_requested = Signal()
 
     def __init__(
         self,
@@ -361,14 +364,13 @@ class LiveViewWidget(QWidget):
             f"QPushButton:hover {{ background-color: {ACCENT_COLOR}; border: 2px solid {FOREGROUND_COLOR}; }}"
         )
         self._extended_measurement_button.setToolTip(
-            "Not yet implemented -- placeholder for a future extended-"
-            "measurement / N-shot combination workflow. When built, "
-            "overriding exposure/gain there must trigger the same "
-            "recalibration prompt as the Acquisition Settings panel. The "
-            "Spatial ROI group above is already reusable there, unmodified."
+            "Opens the Extended Measurement screen (N-shot combination "
+            "workflow) -- itself still a Phase 1 visual skeleton, see "
+            "gui/extended_measurement.py's module docstring."
         )
-        # Deliberately left unconnected: building the feature itself is a
-        # non-goal of this phase (see module docstring).
+        self._extended_measurement_button.clicked.connect(
+            self.extended_measurement_requested
+        )
         layout.addWidget(self._extended_measurement_button)
 
         return panel
@@ -386,7 +388,7 @@ class LiveViewWidget(QWidget):
 
         group = QGroupBox("Acquisition Settings")
         group.setFont(load_bundled_font(10))
-        group.setStyleSheet(_group_box_stylesheet())
+        group.setStyleSheet(group_box_stylesheet())
         group.setToolTip(
             "Skeleton only -- does not reconfigure the camera. Pre-filled "
             "from the loaded baseline's capture settings; drifting past "
@@ -556,12 +558,12 @@ class LiveViewWidget(QWidget):
 
         group = QGroupBox("Fit Degree")
         group.setFont(load_bundled_font(10))
-        group.setStyleSheet(_group_box_stylesheet())
+        group.setStyleSheet(group_box_stylesheet())
         layout = QVBoxLayout(group)
 
         self._degree_selector = QComboBox()
         self._degree_selector.setFont(load_bundled_font(10))
-        self._degree_selector.setStyleSheet(_combo_box_stylesheet())
+        self._degree_selector.setStyleSheet(combo_box_stylesheet())
         for degree in DEGREE_CHOICES:
             self._degree_selector.addItem(DEGREE_LABELS[degree], userData=degree)
         self._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(DEFAULT_DEGREE))
@@ -582,7 +584,7 @@ class LiveViewWidget(QWidget):
 
         group = QGroupBox("Fit Diagnostics")
         group.setFont(load_bundled_font(10))
-        group.setStyleSheet(_group_box_stylesheet())
+        group.setStyleSheet(group_box_stylesheet())
         form = QFormLayout(group)
 
         label_font = load_bundled_font(10)
@@ -1047,25 +1049,6 @@ def fit_formula_html(degree: int, wavelength_axis: WavelengthAxis | None) -> str
         terms.append(f"c<sub>{power}</sub>{separator}{power_part}")
 
     return f"x<sub>0</sub>({variable}) = " + " + ".join(terms)
-
-
-def _group_box_stylesheet() -> str:
-
-    '''
-    Explicit background/text-color styling for a QGroupBox -- the
-    top-level widget's setStyleSheet() (see _build_ui()) doesn't reliably
-    cascade into QGroupBox/QComboBox on every platform, leaving them a
-    visibly different color from the rest of the page.
-    '''
-
-    return f"QGroupBox {{ background-color: {BACKGROUND_COLOR}; color: {FOREGROUND_COLOR}; }}"
-
-
-def _combo_box_stylesheet() -> str:
-
-    '''See _group_box_stylesheet() -- same rationale, for QComboBox.'''
-
-    return f"QComboBox {{ background-color: {BACKGROUND_COLOR}; color: {FOREGROUND_COLOR}; }}"
 
 
 def exposure_has_drifted(current_exposure_us: float, baseline_exposure_us: float) -> bool:

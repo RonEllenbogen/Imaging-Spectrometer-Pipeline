@@ -86,6 +86,28 @@ _FONT_FILES = [
 # Functions
 
 
+def group_box_stylesheet() -> str:
+
+    '''
+    Explicit background/text-color styling for a QGroupBox -- a
+    gui/ screen's own setStyleSheet() doesn't reliably cascade into
+    QGroupBox/QComboBox on every platform, leaving them a visibly
+    different color from the rest of the page. Shared across screens
+    (originally private copies in live_view.py) so every group box in
+    the GUI stays visually identical without each screen re-deriving
+    the same two-line stylesheet.
+    '''
+
+    return f"QGroupBox {{ background-color: {COLOR_BACKGROUND}; color: {COLOR_TEXT_PRIMARY}; }}"
+
+
+def combo_box_stylesheet() -> str:
+
+    '''See group_box_stylesheet() -- same rationale, for QComboBox.'''
+
+    return f"QComboBox {{ background-color: {COLOR_BACKGROUND}; color: {COLOR_TEXT_PRIMARY}; }}"
+
+
 def load_bundled_font(point_size: int = 10, *, bold: bool = False) -> QFont:
 
     '''
@@ -128,4 +150,5 @@ __all__ = [
     "SPACING_XS", "SPACING_SMALL", "SPACING_MEDIUM", "SPACING_LARGE", "SPACING_XL",
     "MARGIN_DEFAULT",
     "FONT_FAMILY_NAME", "load_bundled_font",
+    "group_box_stylesheet", "combo_box_stylesheet",
 ]

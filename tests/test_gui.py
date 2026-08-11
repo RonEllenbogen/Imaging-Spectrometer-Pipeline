@@ -44,7 +44,7 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QGroupBox  # noqa: E402
+from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QSpinBox  # noqa: E402
 
 from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
 from pipeline.analysis import SensorNoiseModel  # noqa: E402
@@ -58,6 +58,7 @@ from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa:
 from pipeline.calibration.spatial.calibrate import PIXEL_PITCH_UM  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 import pipeline.gui.calibration_screen as calibration_screen_module  # noqa: E402
+from pipeline.gui.app import MainWindow  # noqa: E402
 from pipeline.gui.calibration_dialogs import (  # noqa: E402
     BaselineDialog,
     ConversionGainDialog,
@@ -69,6 +70,10 @@ from pipeline.gui.calibration_dialogs import (  # noqa: E402
 )
 from pipeline.gui.calibration_screen import (  # noqa: E402
     CalibrationScreen,
+)
+from pipeline.gui.extended_measurement import (  # noqa: E402
+    DEFAULT_N_SHOTS,
+    ExtendedMeasurementScreen,
 )
 from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
@@ -254,6 +259,18 @@ def _patch_mismatched_gain_calibration_load(monkeypatch) -> list:
 
 def _make_live_view_widget(qtbot, wavelength_axis=None) -> LiveViewWidget:
     widget = LiveViewWidget(
+        calibration_set=_calibration_set(),
+        noise_model=SensorNoiseModel(gain_e_per_adu=2.2, background_sigma=1.0),
+        position_calibration=ScaleFactorPositionCalibration(),
+        wavelength_axis=wavelength_axis,
+        camera_stream=_camera_stream(),
+    )
+    qtbot.addWidget(widget)
+    return widget
+
+
+def _make_extended_measurement_widget(qtbot, wavelength_axis=None) -> ExtendedMeasurementScreen:
+    widget = ExtendedMeasurementScreen(
         calibration_set=_calibration_set(),
         noise_model=SensorNoiseModel(gain_e_per_adu=2.2, background_sigma=1.0),
         position_calibration=ScaleFactorPositionCalibration(),
@@ -768,13 +785,12 @@ class TestLiveViewWidgetSmoke:
         axis_label = widget._main_plot.getAxis("bottom").labelText
         assert axis_label == "Wavelength (nm)"
 
-    def test_extended_measurement_button_present_but_unwired(self, qtbot):
-        # Non-goal per spec: the button exists as a landing spot for a
-        # future feature, but must not be connected to anything yet.
+    def test_extended_measurement_button_emits_signal(self, qtbot):
         widget = _make_live_view_widget(qtbot)
         button = widget._extended_measurement_button
         assert button.text() == "Extended Measurement..."
-        assert button.receivers("2clicked()") == 0
+        with qtbot.waitSignal(widget.extended_measurement_requested, timeout=1000):
+            button.click()
 
 
 # ---------------------------------------------------------------------------
@@ -1146,3 +1162,173 @@ class TestLiveViewSpatialROI:
 
         assert len(y_after) < count_before
         assert np.all((y_after >= min_mm) & (y_after <= max_mm))
+
+
+# ---------------------------------------------------------------------------
+# extended_measurement.py -- ExtendedMeasurementScreen pytest-qt smoke tests
+# (offscreen)
+# ---------------------------------------------------------------------------
+
+class TestExtendedMeasurementScreenSmoke:
+
+    def test_widget_constructs_and_shows(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        widget.resize(800, 600)
+        widget.show()
+        qtbot.waitExposed(widget)
+        assert widget.isVisible()
+
+    def test_expected_group_boxes_present(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        titles = {box.title() for box in widget.findChildren(QGroupBox)}
+        assert {
+            "Run Configuration",
+            "Acquisition Settings",
+            "Spatial ROI",
+            "Fit Degree",
+            "Combined Result",
+        } <= titles
+
+    def test_core_child_widgets_exist(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert isinstance(widget._n_shots_spin, QSpinBox)
+        assert widget._n_shots_spin.value() == DEFAULT_N_SHOTS
+        assert widget._run_button is not None
+        assert widget._main_plot is not None
+        assert widget._residual_plot is not None
+        assert widget._scatter is not None
+        assert widget._error_bars is not None
+        assert widget._fit_curve is not None
+        assert widget._residual_scatter is not None
+        assert isinstance(widget._exposure_spin, QDoubleSpinBox)
+        assert isinstance(widget._gain_spin, QDoubleSpinBox)
+        assert widget._roi_control is not None
+        assert widget._degree_selector.count() == len(DEGREE_CHOICES)
+        assert widget._n_shots_label.text() != ""
+        assert widget._zeta_combined_label.text() != ""
+        assert widget._sigma_internal_label.text() != ""
+        assert widget._sigma_external_label.text() != ""
+        assert widget._back_button is not None
+
+    def test_run_button_updates_n_shots_label(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        widget._n_shots_spin.setValue(42)
+
+        widget._run_button.click()
+
+        assert widget._n_shots_label.text() == "42"
+
+    def test_degree_one_default_has_no_note(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert widget._degree_selector.currentData() == DEFAULT_DEGREE
+        assert widget._degree_note_label.text() == ""
+
+    def test_degree_greater_than_one_populates_note(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+        assert widget._degree_note_label.text() != ""
+
+    def test_back_button_emits_signal(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        with qtbot.waitSignal(widget.back_requested, timeout=1000):
+            widget._back_button.click()
+
+
+# ---------------------------------------------------------------------------
+# extended_measurement.py -- Acquisition Settings panel (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestExtendedMeasurementAcquisitionSettingsPanel:
+
+    def test_fields_prefilled_from_baseline_record(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert widget._exposure_spin.value() == pytest.approx(FIXTURE_EXPOSURE_US)
+        assert widget._gain_spin.value() == pytest.approx(FIXTURE_GAIN_DB)
+
+    def test_drifted_state_nas_combined_result_and_hides_overlay_and_warns_once(
+        self, qtbot, monkeypatch
+    ):
+        warning_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning",
+            lambda *args, **kwargs: warning_calls.append(args),
+        )
+        widget = _make_extended_measurement_widget(qtbot)
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+
+        widget._gain_spin.setValue(drifted_gain_db)
+
+        assert widget._settings_drifted is True
+        assert widget._n_shots_label.text() == "N/A"
+        assert widget._zeta_combined_label.text() == "N/A"
+        assert widget._sigma_internal_label.text() == "N/A"
+        assert widget._sigma_external_label.text() == "N/A"
+        assert widget._degree_note_label.text() == ""
+        assert widget._scatter.isVisible() is False
+        assert widget._error_bars.isVisible() is False
+        assert widget._fit_curve.isVisible() is False
+        assert widget._residual_scatter.isVisible() is False
+        assert len(warning_calls) == 1
+
+    def test_exiting_drifted_state_restores_combined_result_and_overlay(
+        self, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning",
+            lambda *args, **kwargs: None,
+        )
+        widget = _make_extended_measurement_widget(qtbot)
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+
+        widget._gain_spin.setValue(drifted_gain_db)
+        assert widget._settings_drifted is True
+
+        widget._gain_spin.setValue(FIXTURE_GAIN_DB)
+
+        assert widget._settings_drifted is False
+        assert widget._n_shots_label.text() != "N/A"
+        assert widget._zeta_combined_label.text() != "N/A"
+        assert widget._sigma_internal_label.text() != "N/A"
+        assert widget._sigma_external_label.text() != "N/A"
+        assert widget._scatter.isVisible() is True
+        assert widget._error_bars.isVisible() is True
+        assert widget._fit_curve.isVisible() is True
+        assert widget._residual_scatter.isVisible() is True
+
+
+# ---------------------------------------------------------------------------
+# app.py -- MainWindow navigation (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestMainWindowNavigation:
+
+    def test_calibration_to_live_view_to_extended_measurement_and_back(
+        self, qtbot, monkeypatch
+    ):
+        _patch_successful_calibration_load(monkeypatch)
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        window._calibration_screen.welcome_page.load_requested.emit()
+
+        assert window._stack.currentWidget() is window._live_view
+        assert window._live_view is not None
+
+        live_view = window._live_view
+
+        window._live_view.extended_measurement_requested.emit()
+
+        assert isinstance(window._extended_measurement, ExtendedMeasurementScreen)
+        assert window._stack.currentWidget() is window._extended_measurement
+
+        extended_measurement = window._extended_measurement
+
+        window._extended_measurement.back_requested.emit()
+
+        assert window._stack.currentWidget() is window._live_view
+        assert window._live_view is live_view
+
+        window._live_view.extended_measurement_requested.emit()
+
+        assert window._extended_measurement is extended_measurement
+        assert window._stack.currentWidget() is window._extended_measurement
