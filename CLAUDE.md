@@ -231,3 +231,5 @@ pipeline validates against.
   that makes it to GitHub without living in the repo itself — commit messages, PR descriptions, issue 
   text, code review comments. In particular, never add a `Co-Authored-By: Claude` (or similar) trailer
   to a commit, and don't reference AI assistance in commit bodies.
+- Commit titles should be 1 line long, rather than a title followed by a longer description
+- Worktrees should be merged locally before pushing to main.
