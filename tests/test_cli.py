@@ -45,11 +45,11 @@ class TestResolveArtifactPath:
 
     def test_absolute_path_ignores_output_dir(self):
         path = resolve_artifact_path("custom_dir", "/tmp/abs/foo.npz", "baseline.npz")
-        assert str(path) == "/tmp/abs/foo.npz"
+        assert path == Path("/tmp/abs/foo.npz")
 
     def test_relative_path_without_output_dir_used_as_is(self):
         path = resolve_artifact_path(None, "relative/foo.npz", "baseline.npz")
-        assert str(path) == "relative/foo.npz"
+        assert path == Path("relative/foo.npz")
 
     def test_relative_path_with_output_dir_joined(self):
         path = resolve_artifact_path("custom_dir", "sub/foo.npz", "baseline.npz")
