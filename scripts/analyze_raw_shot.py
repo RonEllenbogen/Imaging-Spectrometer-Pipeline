@@ -22,6 +22,7 @@ project's eventual px/nm convention.
 Usage:
     python scripts/analyze_raw_shot.py data/raw/khz/11.8.26.bmp
     python scripts/analyze_raw_shot.py data/raw/khz/11.8.26.bmp --degrees 1 2 3 --output out.png
+    python scripts/analyze_raw_shot.py data/raw/khz/11.8.26.bmp --col-min 501 --col-max 1700
 '''
 
 # Imports
@@ -44,6 +45,13 @@ from pipeline.utils.helpers import load_config
 
 DEFAULT_DEGREES = (1, 2, 3)
 DEFAULT_OUTPUT_PATH = Path("data/processed/khz_analysis.png")
+
+# Columns outside this range are excluded from centroiding/fitting via
+# ProcessedFrame.valid_columns -- 11.8.26.bmp's edges (cols 0-500 and
+# 1700 onward) carry no real beam signal, just uncalibrated background,
+# and were visibly dragging the centroid trace off the beam.
+DEFAULT_VALID_COL_MIN = 501
+DEFAULT_VALID_COL_MAX = 1700
 
 # analyze_shot()'s wavelength-axis abstraction requires a strictly
 # positive sigma on both axes (scipy.odr divides by it). Pixel column has
@@ -71,7 +79,7 @@ class PixelColumnAxis:
 
 # Functions
 
-def load_raw_frame(image_path: Path) -> ProcessedFrame:
+def load_raw_frame(image_path: Path, col_min: int, col_max: int) -> ProcessedFrame:
 
     '''
     Loads a raw image file and wraps it directly as a ProcessedFrame,
@@ -81,6 +89,12 @@ def load_raw_frame(image_path: Path) -> ProcessedFrame:
     ----------
     image_path
         Path to the raw image file (e.g. a .bmp capture).
+    col_min, col_max
+        Spectral columns outside [col_min, col_max) are marked invalid
+        via valid_columns, so extract_centroids() (analysis/centroiding.py)
+        skips them entirely -- the same gate signal-threshold masking
+        would normally populate, here set by hand since that preprocessing
+        step hasn't run.
 
     Returns
     -------
@@ -106,6 +120,10 @@ def load_raw_frame(image_path: Path) -> ProcessedFrame:
 
     config = load_config("configs/default.yaml")
 
+    n_columns = image.shape[1]
+    columns = np.arange(n_columns)
+    valid_columns = (columns >= col_min) & (columns < col_max)
+
     # exposure_us/gain_db are metadata ProcessedFrame requires but this
     # frame never carried -- it was captured manually, outside
     # CameraStream. Placeholders only (config's default exposure, 0dB
@@ -116,6 +134,7 @@ def load_raw_frame(image_path: Path) -> ProcessedFrame:
         timestamp=time.monotonic(),
         exposure_us=float(config["camera"]["exposure_time"]),
         gain_db=0.0,
+        valid_columns=valid_columns,
     )
 
 
@@ -141,12 +160,14 @@ def print_report(result: ShotAnalysisResult) -> None:
 
 
 def plot_result(
-    image: np.ndarray, result: ShotAnalysisResult, degree_for_line: int, output_path: Path
+    image: np.ndarray, result: ShotAnalysisResult, degree_for_line: int,
+    col_min: int, col_max: int, output_path: Path,
 ) -> None:
 
     '''
     Heatmap of the raw frame with centroids overlaid (top), residuals of
-    the requested degree's fit (bottom).
+    the requested degree's fit (bottom). Columns excluded from analysis
+    (outside [col_min, col_max)) are shaded on both panels.
 
     Parameters
     ----------
@@ -156,6 +177,10 @@ def plot_result(
         analyze_shot() output.
     degree_for_line
         Which fit's line/residuals to draw.
+    col_min, col_max
+        Same range passed to load_raw_frame() -- drawn as shaded bands
+        for context, not recomputed from result (which only ever sees the
+        already-excluded columns).
     output_path
         Where to save the figure (PNG).
     '''
@@ -169,6 +194,13 @@ def plot_result(
 
     im = ax_image.imshow(image, cmap="viridis", origin="upper", aspect="auto")
     fig.colorbar(im, ax=ax_image, label="Raw intensity (ADU)")
+
+    n_columns = image.shape[1]
+    for ax in (ax_image, ax_resid):
+        if col_min > 0:
+            ax.axvspan(0, col_min, color="black", alpha=0.35, linewidth=0, zorder=2.5)
+        if col_max < n_columns:
+            ax.axvspan(col_max, n_columns, color="black", alpha=0.35, linewidth=0, zorder=2.5)
 
     ax_image.errorbar(
         centroids.columns, centroids.x0, yerr=centroids.sigma_x0,
@@ -184,7 +216,10 @@ def plot_result(
     )
 
     ax_image.set_ylabel("Spatial pixel row")
-    ax_image.set_title("data/raw/khz/11.8.26.bmp -- raw heatmap + centroids (no calibration applied)")
+    ax_image.set_title(
+        "data/raw/khz/11.8.26.bmp -- raw heatmap + centroids (no calibration applied)\n"
+        f"shaded = excluded from analysis (cols < {col_min} or >= {col_max})"
+    )
     ax_image.legend(loc="upper right", fontsize=8)
 
     ax_resid.errorbar(
@@ -213,14 +248,25 @@ def main() -> None:
         "--output", type=Path, default=DEFAULT_OUTPUT_PATH,
         help="Where to save the plot PNG",
     )
+    parser.add_argument(
+        "--col-min", type=int, default=DEFAULT_VALID_COL_MIN,
+        help="First spectral column included in analysis (default: 501)",
+    )
+    parser.add_argument(
+        "--col-max", type=int, default=DEFAULT_VALID_COL_MAX,
+        help="First spectral column excluded again onward (default: 1700)",
+    )
     args = parser.parse_args()
 
-    frame = load_raw_frame(args.image_path)
+    frame = load_raw_frame(args.image_path, col_min=args.col_min, col_max=args.col_max)
     axis = PixelColumnAxis()
     result = analyze_shot(frame, axis, degrees=tuple(args.degrees))
 
     print_report(result)
-    plot_result(frame.image, result, degree_for_line=1, output_path=args.output)
+    plot_result(
+        frame.image, result, degree_for_line=1,
+        col_min=args.col_min, col_max=args.col_max, output_path=args.output,
+    )
 
 
 if __name__ == "__main__":
