@@ -52,6 +52,7 @@ from pipeline.calibration.spatial import (
 )
 from pipeline.calibration.spectral import (
     calibrate_spectral, build_manual_spectral_calibration, WavelengthCalibrationResult,
+    GeometricTiltResult, build_geometric_tilt, save_geometric_tilt, load_geometric_tilt,
     save_spectral_calibration, load_spectral_calibration,
     match_lines, run_spectral_calibration,
     diffraction_angle_rad, predicted_pixel_separation,
@@ -964,6 +965,159 @@ class TestMatchLines:
         start = time.time()
         match_lines(image)
         assert time.time() - start < 5.0
+
+
+def _build_tilted_lamp_frames(
+    pixel_positions: np.ndarray,
+    row_shift_fn,
+    n_frames: int = 2,
+    peak_height: float = 150.0,
+    peak_sigma_px: float = 2.5,
+    noise_std: float = 2.0,
+    seed: int = 0,
+) -> list[FrameData]:
+    '''
+    n_frames synthetic lamp FrameData: sharp Gaussian peaks at
+    pixel_positions, but shifted by row_shift_fn(row) at every row --
+    known-ground-truth input for build_geometric_tilt(). Peak height kept
+    well under CANONICAL_MAX_VALUE (255, Mono8) so _frame()'s cast to
+    CANONICAL_DTYPE doesn't clip it.
+    '''
+    n_rows, n_cols = CANONICAL_SHAPE
+    rows = np.arange(n_rows)
+    shift = row_shift_fn(rows)
+    columns = np.arange(n_cols)
+
+    target = pixel_positions[np.newaxis, :] + shift[:, np.newaxis]
+    image = peak_height * np.exp(
+        -0.5 * ((columns[np.newaxis, np.newaxis, :] - target[:, :, np.newaxis]) / peak_sigma_px) ** 2
+    ).sum(axis=1)
+
+    rng = np.random.default_rng(seed)
+    return [
+        _frame(np.clip(image + rng.normal(scale=noise_std, size=CANONICAL_SHAPE), 0, None), frame_id=i)
+        for i in range(n_frames)
+    ]
+
+
+class TestBuildGeometricTilt:
+
+    _PIXEL_POSITIONS = np.array([300.0, 700.0, 1100.0, 1500.0])
+
+    @staticmethod
+    def _row_shift_fn(rows):
+        # Modest, non-linear (ramp + sinusoid) shift -- exercises recovery
+        # of a genuinely non-monotonic shared shape, not just a slope.
+        return 0.003 * (rows - 600) + 1.5 * np.sin(rows / 180.0)
+
+    def test_recovers_known_shared_shift(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn)
+        result = build_geometric_tilt(frames)
+
+        rows = np.arange(CANONICAL_SHAPE[0])
+        true_shift = self._row_shift_fn(rows)
+        true_shift -= true_shift[result.reference_row]   # row_shift is anchored at reference_row
+
+        assert result.reference_row == CANONICAL_SHAPE[0] // 2
+        assert np.max(np.abs(result.row_shift - true_shift)) < 0.5
+
+    def test_no_injected_per_line_difference_gives_near_zero_residual(self):
+        # Every line shares the exact same row_shift_fn -- residual slope
+        # (leftover after subtracting the shared curve) should be ~0.
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn)
+        result = build_geometric_tilt(frames)
+        assert np.max(np.abs(result.residual_slope_values)) < 0.002
+
+    def test_residual_columns_ascending_and_match_line_positions(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn)
+        result = build_geometric_tilt(frames)
+        assert np.all(np.diff(result.residual_slope_columns) > 0)
+        for expected in self._PIXEL_POSITIONS:
+            assert np.min(np.abs(result.residual_slope_columns - expected)) < 2.0
+
+    def test_too_few_lines_raises(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS[:2], self._row_shift_fn)
+        with pytest.raises(LineMatchingError):
+            build_geometric_tilt(frames)
+
+    def test_empty_frames_raises(self):
+        with pytest.raises(ValueError):
+            build_geometric_tilt([])
+
+    def test_mismatched_settings_raises(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn, n_frames=1)
+        frames.append(_frame(_uniform(10), exposure_us=FIXTURE_EXPOSURE_US + 500.0))
+        with pytest.raises(ValueError):
+            build_geometric_tilt(frames)
+
+    def test_record_tags_settings_and_frame_count(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn, n_frames=3)
+        result = build_geometric_tilt(frames)
+        assert result.record.exposure_us == FIXTURE_EXPOSURE_US
+        assert result.record.gain_db == FIXTURE_GAIN_DB
+        assert result.record.source_frame_count == 3
+
+
+class TestGeometricTiltPersistence:
+
+    def test_save_load_round_trip(self, tmp_path):
+        frames = _build_tilted_lamp_frames(
+            TestBuildGeometricTilt._PIXEL_POSITIONS, TestBuildGeometricTilt._row_shift_fn,
+        )
+        result = build_geometric_tilt(frames)
+
+        path = tmp_path / "geometric_tilt.npz"
+        save_geometric_tilt(path, result)
+        loaded = load_geometric_tilt(path)
+
+        assert np.array_equal(loaded.row_shift, result.row_shift)
+        assert loaded.reference_row == result.reference_row
+        assert np.array_equal(loaded.residual_slope_columns, result.residual_slope_columns)
+        assert np.array_equal(loaded.residual_slope_values, result.residual_slope_values)
+        assert loaded.record.exposure_us == result.record.exposure_us
+        assert loaded.record.source_frame_count == result.record.source_frame_count
+
+    def test_load_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_geometric_tilt(tmp_path / "does_not_exist.npz")
+
+
+class TestGeometricTiltResult:
+
+    def test_column_shift_without_residual_ignores_column(self):
+        row_shift = np.linspace(-5.0, 5.0, CANONICAL_SHAPE[0])
+        result = GeometricTiltResult(
+            row_shift=row_shift, reference_row=CANONICAL_SHAPE[0] // 2,
+            residual_slope_columns=np.array([100.0, 900.0]),
+            residual_slope_values=np.array([1.0, -1.0]),
+            record=_record(),
+        )
+        shift_a = result.column_shift(np.array([300]), np.array([50]))
+        shift_b = result.column_shift(np.array([300]), np.array([1800]))
+        assert shift_a == shift_b == row_shift[300]
+
+    def test_column_shift_with_residual_holds_boundary_value(self):
+        row_shift = np.zeros(CANONICAL_SHAPE[0])
+        reference_row = 600
+        result = GeometricTiltResult(
+            row_shift=row_shift, reference_row=reference_row,
+            residual_slope_columns=np.array([100.0, 900.0]),
+            residual_slope_values=np.array([0.01, 0.02]),
+            record=_record(),
+        )
+        # Columns outside [100, 900] should use the nearest edge slope, not extrapolate.
+        far_left = result.column_shift(np.array([700]), np.array([0]), include_residual=True)
+        at_edge = result.column_shift(np.array([700]), np.array([100]), include_residual=True)
+        assert far_left == at_edge == pytest.approx(0.01 * (700 - reference_row))
+
+    def test_mismatched_residual_shapes_raise(self):
+        with pytest.raises(ValueError):
+            GeometricTiltResult(
+                row_shift=np.zeros(CANONICAL_SHAPE[0]), reference_row=0,
+                residual_slope_columns=np.array([100.0, 900.0]),
+                residual_slope_values=np.array([0.01]),
+                record=_record(),
+            )
 
 
 class TestBuildManualSpectralCalibration:

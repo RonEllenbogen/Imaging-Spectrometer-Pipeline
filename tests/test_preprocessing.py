@@ -33,11 +33,12 @@ from pipeline.preprocessing import (
 from pipeline.preprocessing.validation import check_frame_sanity
 from pipeline.preprocessing.steps import (
     apply_roi, apply_baseline, apply_flat_field, MIN_FLAT_FIELD_VALUE,
-    apply_bad_pixel_map, apply_signal_threshold,
+    apply_bad_pixel_map, apply_geometric_tilt_correction, apply_signal_threshold,
 )
 from pipeline.calibration.sensor import (
     build_baseline, build_flat_field, build_bad_pixel_map, CalibrationRecord,
 )
+from pipeline.calibration.spectral import GeometricTiltResult
 
 # Constants
 
@@ -272,6 +273,92 @@ class TestApplyBadPixelMap:
 
 
 # ---------------------------------------------------------------------------
+# steps/geometric_tilt.py
+# ---------------------------------------------------------------------------
+
+def _tilted_line_frame(line_col: float, row_shift: np.ndarray, amplitude=100.0, sigma_px=2.0) -> ProcessedFrame:
+    '''
+    A ProcessedFrame with one narrow Gaussian spectral line whose column
+    position is line_col + row_shift[row] at every row -- a synthetic
+    "observed, tilted" frame with a known ground-truth shift to undo.
+    '''
+    n_rows, n_cols = CANONICAL_SHAPE
+    columns = np.arange(n_cols)
+    target = line_col + row_shift[:, np.newaxis]
+    image = amplitude * np.exp(
+        -0.5 * ((columns[np.newaxis, :] - target) / sigma_px) ** 2
+    )
+    return _processed(image)
+
+
+def _row_centroid(image: np.ndarray, col_lo: int, col_hi: int) -> np.ndarray:
+    '''Plain (unweighted-uncertainty) per-row intensity-weighted centroid, for verification only.'''
+    columns = np.arange(col_lo, col_hi)
+    window = image[:, col_lo:col_hi]
+    return (window * columns).sum(axis=1) / window.sum(axis=1)
+
+
+class TestApplyGeometricTiltCorrection:
+
+    def test_dewarps_known_row_dependent_shift(self):
+        n_rows = CANONICAL_SHAPE[0]
+        rows = np.arange(n_rows)
+        row_shift = 0.01 * (rows - 600) + 3.0 * np.sin(rows / 150.0)
+        line_col = 960.0
+
+        frame = _tilted_line_frame(line_col, row_shift)
+        tilt = GeometricTiltResult(
+            row_shift=row_shift - row_shift[600], reference_row=600,
+            residual_slope_columns=np.array([500.0, 1400.0]),
+            residual_slope_values=np.array([0.0, 0.0]),
+            record=_record(),
+        )
+
+        before = _row_centroid(frame.image, 900, 1021)
+        corrected = apply_geometric_tilt_correction(frame, tilt)
+        after = _row_centroid(corrected.image, 900, 1021)
+
+        # Before: the line visibly drifts with row (matches the injected shift's range).
+        assert np.ptp(before) > 5.0
+        # After: dewarped to (nearly) constant column across every row.
+        assert np.ptp(after) < 0.5
+
+    def test_metadata_and_shape_preserved(self):
+        n_rows = CANONICAL_SHAPE[0]
+        frame = _tilted_line_frame(960.0, np.zeros(n_rows))
+        frame = ProcessedFrame(
+            image=frame.image, frame_id=11, timestamp=frame.timestamp,
+            exposure_us=3000.0, gain_db=2.5, valid_columns=None,
+        )
+        tilt = GeometricTiltResult(
+            row_shift=np.zeros(n_rows), reference_row=600,
+            residual_slope_columns=np.array([500.0, 1400.0]),
+            residual_slope_values=np.array([0.0, 0.0]),
+            record=_record(),
+        )
+
+        result = apply_geometric_tilt_correction(frame, tilt)
+
+        assert result.image.shape == CANONICAL_SHAPE
+        assert result.frame_id == 11
+        assert result.exposure_us == 3000.0
+        assert result.gain_db == 2.5
+
+    def test_zero_shift_is_a_near_noop(self):
+        n_rows = CANONICAL_SHAPE[0]
+        frame = _tilted_line_frame(960.0, np.zeros(n_rows))
+        tilt = GeometricTiltResult(
+            row_shift=np.zeros(n_rows), reference_row=600,
+            residual_slope_columns=np.array([500.0, 1400.0]),
+            residual_slope_values=np.array([0.0, 0.0]),
+            record=_record(),
+        )
+
+        result = apply_geometric_tilt_correction(frame, tilt)
+        assert np.allclose(result.image, frame.image, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # steps/signal_threshold.py
 # ---------------------------------------------------------------------------
 
@@ -402,6 +489,38 @@ class TestPreprocessingPipeline:
         assert np.all(processed.image[:500, :] == 0.0)
         assert np.all(processed.image[700:, :] == 0.0)
         assert np.all(processed.image[500:700, :] == 50.0)
+
+    def test_geometric_tilt_applied_when_provided(self):
+        # No geometric_tilt: CalibrationSet defaults it to None and every
+        # test above this one confirms run_preprocessing() still works
+        # unchanged. Here it's supplied, and a raw frame with a known,
+        # row-dependent spectral-line drift comes out dewarped.
+        n_rows, n_cols = CANONICAL_SHAPE
+        rows = np.arange(n_rows)
+        row_shift = 0.02 * (rows - 600)
+        line_col = 960.0
+        columns = np.arange(n_cols)
+        target = line_col + row_shift[:, np.newaxis]
+        raw_image = 100.0 * np.exp(-0.5 * ((columns[np.newaxis, :] - target) / 2.0) ** 2)
+        raw_frame = _frame(np.clip(raw_image, 0, CANONICAL_MAX_VALUE))
+
+        tilt = GeometricTiltResult(
+            row_shift=row_shift - row_shift[600], reference_row=600,
+            residual_slope_columns=np.array([500.0, 1400.0]),
+            residual_slope_values=np.array([0.0, 0.0]),
+            record=_record(),
+        )
+        base = _make_clean_calibration_set(baseline_value=0.0)
+        calibration = CalibrationSet(
+            baseline=base.baseline, baseline_record=base.baseline_record,
+            flat_field=base.flat_field, flat_field_record=base.flat_field_record,
+            bad_pixel_mask=base.bad_pixel_mask, background_sigma=base.background_sigma,
+            geometric_tilt=tilt,
+        )
+
+        processed, _ = run_preprocessing(raw_frame, calibration, roi_bounds=None)
+        after = _row_centroid(processed.image, 900, 1021)
+        assert np.ptp(after) < 1.0
 
     def test_roi_skipped_when_bounds_none(self):
         calibration = _make_clean_calibration_set(baseline_value=0.0)

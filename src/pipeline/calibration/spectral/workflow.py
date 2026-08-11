@@ -31,19 +31,30 @@ from match_lines()) until that module is filled in.
 
 # Imports
 
+# Postpones annotation evaluation (PEP 563) so the CalibrationSet type hint
+# below doesn't need pipeline.preprocessing imported at module load time --
+# see run_spectral_calibration()'s local import for why: preprocessing/
+# now imports calibration/spectral/ too (geometric_tilt.py's
+# GeometricTiltResult, used as a CalibrationSet field), so importing
+# pipeline.preprocessing here at module scope would be circular.
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from pipeline.acquisition import CameraStream
-from pipeline.preprocessing import run_preprocessing, CalibrationSet
 
 from ..shared.metadata import CalibrationRecord
 from .calibrate import calibrate_spectral, WavelengthCalibrationResult
 from .io import save_spectral_calibration
 from .line_matching import match_lines
+
+if TYPE_CHECKING:
+    from pipeline.preprocessing import CalibrationSet
 
 # Constants
 
@@ -101,6 +112,8 @@ def run_spectral_calibration(
         one session, so any drift between frames indicates a setup
         problem, not something to average over.
     '''
+
+    from pipeline.preprocessing import run_preprocessing   # see module docstring's import note
 
     frames = camera_stream.collect_n_frames(n_frames)
     reference_exposure_us = frames[0].exposure_us

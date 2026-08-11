@@ -2,13 +2,14 @@
 Single public entry point for preprocessing. Enforces the correction
 order as a property of the code, not documentation the caller has to
 remember: frame validation -> saturation check -> baseline subtraction ->
-flat-field division -> bad-pixel masking -> signal-threshold masking ->
-optional ROI masking.
+flat-field division -> bad-pixel masking -> optional geometric tilt
+correction -> signal-threshold masking -> optional ROI masking.
 
-Building calibration artifacts (baseline, flat field, bad-pixel map) is
-NOT this function's job -- that happens once, infrequently, via each
-artifact's own build_*() function in calibration/sensor/. This function
-only applies already-built artifacts to one science frame at a time.
+Building calibration artifacts (baseline, flat field, bad-pixel map,
+geometric tilt) is NOT this function's job -- that happens once,
+infrequently, via each artifact's own build_*() function in
+calibration/sensor/ or calibration/spectral/. This function only applies
+already-built artifacts to one science frame at a time.
 """
 
 from dataclasses import dataclass
@@ -18,10 +19,14 @@ import numpy as np
 from pipeline.acquisition import FrameData
 from pipeline.calibration.sensor import check_saturation, SaturationCheckResult
 from pipeline.calibration.shared import CalibrationRecord
+from pipeline.calibration.spectral import GeometricTiltResult
 
 from .processed_frame import ProcessedFrame
 from .validation import check_frame_sanity
-from .steps import apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map, apply_signal_threshold
+from .steps import (
+    apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map,
+    apply_geometric_tilt_correction, apply_signal_threshold,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +45,14 @@ class CalibrationSet:
     background_sigma is required (no default): every call to
     run_preprocessing() now runs signal-threshold masking, which cannot
     compute a noise floor without it -- see steps/signal_threshold.py.
+
+    geometric_tilt defaults to None (correction skipped) rather than
+    being required -- unlike baseline/flat-field/bad-pixel-map, no
+    geometric tilt calibration session has necessarily been run for a
+    given camera/spectrometer setup yet (see
+    calibration/spectral/geometric_tilt.py), and every existing caller
+    that builds a CalibrationSet without one should keep working
+    unchanged.
     '''
 
     baseline: np.ndarray
@@ -48,6 +61,7 @@ class CalibrationSet:
     flat_field_record: CalibrationRecord
     bad_pixel_mask: np.ndarray
     background_sigma: float
+    geometric_tilt: GeometricTiltResult | None = None
 
 
 def run_preprocessing(
@@ -68,7 +82,8 @@ def run_preprocessing(
         not something check_frame_sanity() should reject.
     calibration
         The pre-built baseline, flat field, bad-pixel map, and
-        background_sigma to apply.
+        background_sigma to apply, plus an optional geometric tilt
+        correction (see CalibrationSet).
     roi_bounds
         (row_min, row_max) to mask outside of, or None to skip ROI
         entirely. Still pending an empirical check (a real background
@@ -102,6 +117,8 @@ def run_preprocessing(
     processed = apply_baseline(frame, calibration.baseline, calibration.baseline_record)
     processed = apply_flat_field(processed, calibration.flat_field, calibration.flat_field_record)
     processed = apply_bad_pixel_map(processed, calibration.bad_pixel_mask)
+    if calibration.geometric_tilt is not None:
+        processed = apply_geometric_tilt_correction(processed, calibration.geometric_tilt)
     processed = apply_signal_threshold(processed, calibration.background_sigma)
     valid_columns = processed.valid_columns
 
