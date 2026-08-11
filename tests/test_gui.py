@@ -752,6 +752,21 @@ class TestLiveViewWidgetSmoke:
     def test_degree_selector_defaults_to_linear(self, qtbot):
         widget = _make_live_view_widget(qtbot)
         assert widget._degree_selector.currentData() == DEFAULT_DEGREE
+
+    def test_heatmap_positioned_in_data_space_not_unit_square(self, qtbot):
+        # Regression test: ImageItem.setRect() scales by self.width()/
+        # self.height(), which silently fall back to 1.0 if setImage()
+        # hasn't been called yet -- if _generate_placeholder_data() ever
+        # calls setRect() before assigning an image again, the transform's
+        # scale factors become the raw setRect() width/height (~1919,
+        # ~6.21) instead of those values divided by the image's real
+        # 1920x1200 pixel dimensions (~0.9995, ~0.005175), stretching the
+        # heatmap ~1920x/1200x too large so only its extreme top-left
+        # corner is visible (a flat, uniform color, not a heatmap).
+        widget = _make_live_view_widget(qtbot)
+        transform = widget._image_item.transform()
+        assert transform.m11() < 10.0
+        assert transform.m22() < 10.0
         assert widget._current_degree == DEFAULT_DEGREE
         assert widget._zeta_note_label.text() == ""
 

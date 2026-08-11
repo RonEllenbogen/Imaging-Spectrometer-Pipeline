@@ -694,6 +694,17 @@ class LiveViewWidget(QWidget):
 
         self._placeholder_image_full = image
 
+        # An image must already be assigned before setRect() below --
+        # pyqtgraph's ImageItem.setRect() scales by self.width()/
+        # self.height(), which silently fall back to 1.0 if no image has
+        # ever been set yet, producing a wildly wrong transform (the
+        # visible plot then shows only the image's extreme top-left
+        # corner, stretched to fill the whole view -- a uniform flat
+        # color, not a heatmap). _apply_roi_bounds() below calls
+        # setImage() again with the actual ROI-cropped array; this call
+        # only exists to make width()/height() valid in time for setRect().
+        self._image_item.setImage(image)
+
         # setRect()'s extent depends only on the (fixed) frame shape and
         # wavelength axis, never on the current ROI, so it's computed
         # once here rather than on every _apply_roi_bounds() call.
