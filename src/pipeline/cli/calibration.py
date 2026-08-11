@@ -93,11 +93,12 @@ def build_camera_stream(
     config_path
         YAML config file. Defaults to repo-root configs/default.yaml.
     exposure_us
-        Exposure time in microseconds for this session. Defaults to
-        config's camera.exposure_time when omitted (unchanged prior
-        behavior). Ignored if auto_exposure is True -- still passed
-        through to CameraStream, which ignores it identically (see
-        CameraStream's own docstring).
+        Exposure time in microseconds for this session. Required unless
+        auto_exposure is True -- there is no implicit config-file default;
+        every caller (a CLI flag or a GUI field) must supply an explicit
+        value. Ignored when auto_exposure is True -- still passed through
+        to CameraStream, which ignores it identically (see CameraStream's
+        own docstring) -- so it may be omitted in that case.
     auto_exposure
         If True, the real camera runs a one-time ExposureAuto convergence
         instead of using exposure_us -- see PylonBackend. The converged
@@ -108,16 +109,26 @@ def build_camera_stream(
     -------
     CameraStream
         Stream configured for the real PylonBackend (backend=None).
+
+    Raises
+    ------
+    ValueError
+        If auto_exposure is False and exposure_us is None.
     '''
+
+    if not auto_exposure and exposure_us is None:
+        raise ValueError(
+            "exposure_us is required when auto_exposure is False -- pass "
+            "--exposure-us (CLI) or enter an exposure time (GUI); there is "
+            "no implicit config-file default."
+        )
 
     if config_path is None:
         config_path = DEFAULT_CONFIG_PATH
     config = load_config(config_path)
     camera = config["camera"]
-    if exposure_us is None:
-        exposure_us = camera["exposure_time"]
     return CameraStream(
-        exposure_us=exposure_us,
+        exposure_us=exposure_us if exposure_us is not None else 0.0,
         gain_db=gain_db,
         pixel_format=camera["pixel_format"],
         timeout_ms=camera["timeout"],
@@ -192,12 +203,13 @@ def _add_gain_db(subparser: argparse.ArgumentParser) -> None:
 def _add_exposure_args(subparser: argparse.ArgumentParser) -> None:
 
     '''
-    --auto-exposure and --exposure-us, mutually exclusive -- neither is
-    required, matching the prior (implicit) behavior of always falling
-    back to configs/default.yaml's camera.exposure_time when omitted.
+    --auto-exposure and --exposure-us, mutually exclusive and one of the
+    two required -- there is no implicit config-file default (see
+    build_camera_stream()), so the caller must explicitly choose fixed or
+    auto exposure every time.
     '''
 
-    group = subparser.add_mutually_exclusive_group()
+    group = subparser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--auto-exposure",
         action="store_true",
@@ -209,7 +221,7 @@ def _add_exposure_args(subparser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         dest="exposure_us",
-        help="Exposure time in microseconds (default: configs/default.yaml's camera.exposure_time).",
+        help="Exposure time in microseconds (required unless --auto-exposure is passed).",
     )
 
 
@@ -283,7 +295,13 @@ def _cmd_conversion_gain(args: argparse.Namespace) -> None:
     path = resolve_artifact_path(
         args.output_dir, args.path, DEFAULT_CONVERSION_GAIN_FILENAME
     )
-    stream = build_camera_stream(args.gain_db)
+    # No dedicated flag for conversion-gain's initial exposure -- the sweep
+    # (exposure_min_us..exposure_max_us) is caller-driven from the very
+    # first level, so seeding the pre-sweep stream at exposure_min_us (the
+    # sweep's own first point, per np.linspace) is exact, not a guess, and
+    # needs no separate flag. See build_camera_stream()'s docstring for why
+    # an explicit value is required at all -- no config-file default.
+    stream = build_camera_stream(args.gain_db, exposure_us=args.exposure_min_us)
     stream.start()
     try:
         run_conversion_gain_calibration(

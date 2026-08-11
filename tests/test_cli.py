@@ -58,24 +58,24 @@ class TestResolveArtifactPath:
 
 class TestBuildCameraStream:
 
-    def test_defaults_to_config_exposure(self):
-        stream = build_camera_stream(gain_db=5.0)
-        # configs/default.yaml's camera.exposure_time -- see conftest/module
-        # docstring elsewhere for why this file is intentionally not
-        # hardcoded here; just check it's a positive, config-sourced value.
-        assert stream.exposure_us > 0
-        assert stream.gain_db == 5.0
+    def test_exposure_us_required_without_auto_exposure(self):
+        # No implicit config-file default -- the caller (CLI flag or GUI
+        # field) must supply an explicit exposure_us, or opt into
+        # auto_exposure instead.
+        with pytest.raises(ValueError):
+            build_camera_stream(gain_db=5.0)
 
-    def test_explicit_exposure_us_overrides_config(self):
+    def test_explicit_exposure_us_used(self):
         stream = build_camera_stream(gain_db=5.0, exposure_us=12345.0)
         assert stream.exposure_us == 12345.0
+        assert stream.gain_db == 5.0
 
     def test_auto_exposure_flag_threaded_to_backend(self):
         stream = build_camera_stream(gain_db=5.0, auto_exposure=True)
         assert stream._backend.auto_exposure is True
 
     def test_auto_exposure_defaults_to_false(self):
-        stream = build_camera_stream(gain_db=5.0)
+        stream = build_camera_stream(gain_db=5.0, exposure_us=1000.0)
         assert stream._backend.auto_exposure is False
 
 
@@ -90,11 +90,17 @@ class TestArgumentParsing:
         with pytest.raises(SystemExit):
             self.parser.parse_args(["baseline"])
 
+    def test_baseline_requires_exposure_choice(self):
+        # Neither --exposure-us nor --auto-exposure given -- no implicit
+        # config-file default, so this must fail to parse.
+        with pytest.raises(SystemExit):
+            self.parser.parse_args(["baseline", "--gain-db", "1.0"])
+
     def test_baseline_defaults(self):
-        args = self.parser.parse_args(["baseline", "--gain-db", "1.0"])
+        args = self.parser.parse_args(
+            ["baseline", "--gain-db", "1.0", "--exposure-us", "2000"]
+        )
         assert args.gain_db == 1.0
-        assert args.auto_exposure is False
-        assert args.exposure_us is None
         assert args.n_frames == 50
 
     def test_baseline_manual_exposure(self):
@@ -300,6 +306,7 @@ class TestSpectralCaptureArgumentParsing:
         cli.main([
             "spectral-capture",
             "--gain-db", "2.5",
+            "--exposure-us", "500",
             "--n-frames", "20",
             "--degree", "2",
             "--baseline", "custom_baseline.npz",
@@ -319,7 +326,7 @@ class TestSpectralCaptureArgumentParsing:
         captured = {}
         monkeypatch.setattr(cli, "_cmd_spectral_capture", lambda args: captured.update(vars(args)))
 
-        cli.main(["spectral-capture", "--gain-db", "0.0"])
+        cli.main(["spectral-capture", "--gain-db", "0.0", "--auto-exposure"])
 
         assert captured["n_frames"] == cli.DEFAULT_N_FRAMES
         assert captured["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
@@ -327,12 +334,16 @@ class TestSpectralCaptureArgumentParsing:
         assert captured["flat_field"] is None
         assert captured["bad_pixel_map"] is None
         assert captured["path"] is None
-        assert captured["auto_exposure"] is False
+        assert captured["auto_exposure"] is True
         assert captured["exposure_us"] is None
 
     def test_gain_db_required(self):
         with pytest.raises(SystemExit):
-            cli.main(["spectral-capture"])
+            cli.main(["spectral-capture", "--auto-exposure"])
+
+    def test_requires_exposure_choice(self):
+        with pytest.raises(SystemExit):
+            cli.main(["spectral-capture", "--gain-db", "1.0"])
 
     def test_auto_and_manual_exposure_mutually_exclusive(self):
         with pytest.raises(SystemExit):
@@ -396,7 +407,8 @@ class TestSpectralCapturePathResolution:
         self._patch_collaborators(monkeypatch, recorded)
 
         cli.main([
-            "spectral-capture", "--gain-db", "1.0", "--output-dir", str(tmp_path),
+            "spectral-capture", "--gain-db", "1.0", "--auto-exposure",
+            "--output-dir", str(tmp_path),
         ])
 
         assert recorded["baseline_path"] == tmp_path / cli.DEFAULT_BASELINE_FILENAME
@@ -413,7 +425,7 @@ class TestSpectralCapturePathResolution:
 
         custom_baseline = tmp_path / "my_baseline.npz"
         cli.main([
-            "spectral-capture", "--gain-db", "1.0",
+            "spectral-capture", "--gain-db", "1.0", "--auto-exposure",
             "--baseline", str(custom_baseline),
         ])
 
