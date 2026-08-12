@@ -21,6 +21,7 @@ hardware-only tests.
 
 # Imports
 
+import dataclasses
 import os
 import time
 
@@ -50,8 +51,10 @@ from pipeline.calibration.spatial.calibrate import PIXEL_PITCH_UM  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 from pipeline.gui.live_view import (  # noqa: E402
     DEFAULT_DEGREE,
+    DEFAULT_UPDATE_INTERVAL_MS,
     DEGREE_CHOICES,
     EVALUATED_AT_COLUMN,
+    MAX_CONSECUTIVE_SKIPS,
     MICRONS_PER_MM,
     LiveViewWidget,
     _PowerOfTenAxisItem,
@@ -64,6 +67,13 @@ from pipeline.gui.live_view import (  # noqa: E402
     wavelength_axis_label,
 )
 from pipeline.gui.roi_control import SpatialROIControl  # noqa: E402
+
+# gui_fixture_helpers.py is a plain sibling module in this directory (no
+# tests/__init__.py, so pytest's rootless import mode puts tests/ on
+# sys.path directly) -- see its own module docstring for why it's the
+# shared, read-only "realistic CalibrationBundle" builder for any gui/
+# wiring test that needs one, this file included.
+from gui_fixture_helpers import build_realistic_calibration_bundle  # noqa: E402
 
 # Constants
 
@@ -119,6 +129,76 @@ def _make_live_view_widget(qtbot, wavelength_axis=None) -> LiveViewWidget:
     )
     qtbot.addWidget(widget)
     return widget
+
+
+def _realistic_bundle(background_sigma: float = 1.0):
+    '''
+    build_realistic_calibration_bundle()'s dark/illuminated synthetic
+    frames are bit-for-bit uniform (see gui_fixture_helpers.py's _frame()
+    helper), so the per-pixel sample standard deviation build_baseline()
+    measures across them comes out exactly 0.0. run_preprocessing()'s
+    signal-threshold step requires a strictly positive background_sigma
+    (there's no meaningful SNR against a zero noise floor) and raises
+    ValueError otherwise -- so every real-tick test below overrides it to
+    a small, physically reasonable positive value via dataclasses.replace()
+    on the returned (frozen) dataclasses, rather than editing the shared,
+    read-only fixture module itself. A very large background_sigma is
+    also used deliberately by the insufficient-signal tests below, to
+    force every column below SNR_THRESHOLD and reliably trigger
+    InsufficientDataError on every tick.
+    '''
+    bundle = build_realistic_calibration_bundle()
+    calibration_set = dataclasses.replace(bundle.calibration_set, background_sigma=background_sigma)
+    noise_model = dataclasses.replace(bundle.noise_model, background_sigma=background_sigma)
+    return dataclasses.replace(bundle, calibration_set=calibration_set, noise_model=noise_model)
+
+
+def _make_real_live_view_widget(
+    qtbot, camera_stream: CameraStream, background_sigma: float = 1.0,
+    update_interval_ms: int = 20,
+) -> LiveViewWidget:
+    '''
+    Builds a LiveViewWidget over a real, non-placeholder CalibrationBundle
+    (see _realistic_bundle()) and an already-STARTED camera_stream --
+    unlike _make_live_view_widget()'s deliberately-unstarted stream above,
+    the real update-loop tests need get_latest_frame() to actually return
+    data. update_interval_ms defaults to a small value so qtbot.waitUntil()
+    below sees a tick quickly instead of waiting out
+    DEFAULT_UPDATE_INTERVAL_MS's full ~5Hz interval.
+    '''
+    bundle = _realistic_bundle(background_sigma=background_sigma)
+    widget = LiveViewWidget(
+        calibration_set=bundle.calibration_set,
+        noise_model=bundle.noise_model,
+        position_calibration=bundle.position_calibration,
+        wavelength_axis=bundle.wavelength_axis,
+        camera_stream=camera_stream,
+        conversion_gain_record=bundle.conversion_gain_record,
+        update_interval_ms=update_interval_ms,
+    )
+    qtbot.addWidget(widget)
+    return widget
+
+
+@pytest.fixture
+def started_camera_stream():
+    '''
+    A running CameraStream over a seeded SyntheticBackend, for the real
+    update-loop tests that need get_latest_frame() to return actual data
+    (unlike this file's _camera_stream() helper, explicitly never started).
+    Always stopped on teardown -- even on a test failure -- so a leaked
+    background grab thread can't make an unrelated, later test flaky or
+    hang (see this task's own lifecycle warning about exactly that).
+    '''
+    stream = CameraStream(
+        exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
+        pixel_format="Mono8", timeout_ms=5000, backend=SyntheticBackend(seed=0),
+    )
+    stream.start()
+    try:
+        yield stream
+    finally:
+        stream.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -667,3 +747,150 @@ class TestLiveViewSpatialROI:
 
         assert len(y_after) < count_before
         assert np.all((y_after >= min_mm) & (y_after <= max_mm))
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- real QTimer-driven update loop (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+#
+# Uses a real, STARTED CameraStream (started_camera_stream fixture) and a
+# real, non-placeholder CalibrationBundle (_realistic_bundle()), unlike
+# every test above -- these exercise the actual run_preprocessing() ->
+# analyze_shot() chain per tick, not just the widget's presentational
+# state. update_interval_ms is shrunk to 20ms (see
+# _make_real_live_view_widget()) so qtbot.waitUntil() below resolves
+# quickly and reliably instead of waiting out the real ~5Hz default.
+
+class TestLiveViewRealUpdateLoop:
+
+    def test_tick_populates_scatter_from_real_analysis(self, qtbot, started_camera_stream):
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        # The placeholder feed only ever plots ~127 points (see
+        # _generate_placeholder_data()'s columns = np.arange(200, 1720, 12));
+        # a real tick fits every one of SyntheticBackend's ~1920 valid
+        # columns, so a scatter count comfortably above that placeholder
+        # count is an unambiguous signal that real data has landed, without
+        # hand-computing the synthetic beam's exact centroid trend.
+        qtbot.waitUntil(lambda: len(widget._scatter.getData()[0]) > 500, timeout=3000)
+
+        x_values, y_values = widget._scatter.getData()
+        assert len(x_values) == len(y_values) > 500
+        assert np.all(np.isfinite(y_values))
+        assert widget._consecutive_skips == 0
+        assert widget._insufficient_signal is False
+
+    def test_tick_updates_fit_diagnostics_from_real_result(self, qtbot, started_camera_stream):
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        placeholder_chi_squared = widget._chi_squared_label.text()
+        qtbot.waitUntil(
+            lambda: widget._chi_squared_label.text() != placeholder_chi_squared, timeout=3000
+        )
+
+        # Real coefficients/zeta must actually be finite, formatted numbers
+        # -- not "N/A" (the insufficient-signal/drifted placeholder) and not
+        # left showing the construction-time placeholder text.
+        assert "N/A" not in widget._chi_squared_label.text()
+        assert "±" in widget._zeta_label.text()
+        assert "N/A" not in widget._zeta_label.text()
+
+    def test_heatmap_updates_from_real_processed_frame(self, qtbot, started_camera_stream):
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        initial_image = widget._image_item.image.copy()
+        qtbot.waitUntil(
+            lambda: not np.array_equal(widget._image_item.image, initial_image), timeout=3000
+        )
+
+        assert widget._image_item.image.shape == CANONICAL_SHAPE
+
+    def test_status_label_reflects_running_stream(self, qtbot, started_camera_stream):
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        qtbot.waitUntil(lambda: widget._status_label.text() == "Status: OK", timeout=3000)
+
+    def test_status_label_reflects_stopped_stream(self, qtbot):
+        # Deliberately the never-started stream (unlike started_camera_stream
+        # above) -- is_running is False from construction onward.
+        widget = _make_live_view_widget(qtbot)
+        assert widget._status_label.text() == "Status: Camera stopped"
+
+    def test_roi_bounds_are_applied_to_real_preprocessing(self, qtbot, started_camera_stream):
+        # Regression test for the live-loop's roi_bounds=self._roi_control.
+        # roi_bounds_px() wiring: narrow the ROI to exclude the top half of
+        # the spatial axis, then confirm a real tick's displayed heatmap
+        # actually reflects apply_roi()'s row-zeroing, not just the
+        # unmasked raw frame.
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._consecutive_skips == 0 and widget._scatter.getData()[0].size > 0, timeout=3000)
+
+        full_extent_mm = widget._roi_control.roi_bounds_mm()[1]
+        widget._roi_control._min_spin.setValue(full_extent_mm / 2.0)
+        row_min_px, _ = widget._roi_control.roi_bounds_px()
+        assert row_min_px > 0
+
+        def _top_rows_zeroed() -> bool:
+            image = widget._image_item.image
+            return image is not None and np.all(image[:row_min_px, :] == 0)
+
+        qtbot.waitUntil(_top_rows_zeroed, timeout=3000)
+
+    def test_insufficient_signal_state_after_consecutive_skips(self, qtbot, started_camera_stream):
+        # An enormous background_sigma pushes every column's SNR below
+        # SNR_THRESHOLD, so every tick's analyze_shot() call raises
+        # InsufficientDataError -- see _realistic_bundle()'s docstring.
+        widget = _make_real_live_view_widget(
+            qtbot, started_camera_stream, background_sigma=1.0e6, update_interval_ms=10,
+        )
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._insufficient_signal is True, timeout=5000)
+
+        assert widget._consecutive_skips >= MAX_CONSECUTIVE_SKIPS
+        assert widget._chi_squared_label.text() == "N/A"
+        assert widget._zeta_label.text() == "N/A"
+        assert widget._scatter.isVisible() is False
+        assert widget._error_bars.isVisible() is False
+        assert widget._fit_curve.isVisible() is False
+        # The heatmap keeps updating on a skip -- preprocessing itself
+        # succeeded, only the fit lacked enough columns (see
+        # _on_timer_tick()'s InsufficientDataError branch).
+        assert widget._image_item.isVisible() is True
+
+    def test_settings_drift_pauses_real_updates(self, qtbot, started_camera_stream, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        # Let at least one real tick land first, so there's genuine
+        # (non-placeholder) state that a drifted tick must NOT overwrite.
+        qtbot.waitUntil(lambda: widget._scatter.getData()[0].size > 500, timeout=3000)
+
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+        widget._gain_spin.setValue(drifted_gain_db)
+        assert widget._settings_drifted is True
+
+        # Give the real loop several more tick intervals' worth of real
+        # camera time to (wrongly) act on, then confirm it didn't: the
+        # drifted state's own "N/A"/hidden-overlay treatment must still be
+        # showing, untouched by any real tick that fired in the meantime.
+        qtbot.wait(150)
+
+        assert widget._chi_squared_label.text() == "N/A"
+        assert widget._zeta_label.text() == "N/A"
+        assert widget._scatter.isVisible() is False
+        assert widget._error_bars.isVisible() is False
+        assert widget._fit_curve.isVisible() is False

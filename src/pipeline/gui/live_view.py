@@ -5,35 +5,72 @@ centroid position vs. wavelength (or pixel column, if no wavelength
 calibration exists yet), with an overlaid fit curve, a raw-image heatmap
 underneath, a side info panel, and a rolling trend chart.
 
-PHASE 1 (this file, as it stands): visual skeleton only -- layout,
-styling, and placeholder/dummy data. No real camera polling,
-preprocessing, or analyze_shot() calls happen here yet; the QTimer-driven
-update loop, the skip-counter state machine, and the real per-tick
-computation described in the module design are a follow-up phase. The
-degree selector is present and changes the panel's *displayed* (still
-fake) numbers, but does not trigger any real refit.
+A QTimer (see __init__'s self._update_timer, interval
+DEFAULT_UPDATE_INTERVAL_MS -- ~5Hz, the target refresh rate noted in
+docs/project_state.md) drives the real per-tick computation:
+self._on_timer_tick() pulls the newest frame off camera_stream (a no-op
+skip if none has arrived yet), runs it through run_preprocessing() with
+self._roi_control's current bounds, then analyze_shot() at the currently
+selected degree, and pushes the result into the scatter/error-bar/
+fit-curve/heatmap/strip-chart/side-panel widgets (_display_shot_result())
+-- replacing the construction-time placeholder feed
+(_populate_placeholder_data()) that still seeds the widget's very first
+paint, before any real frame has arrived. The timer is started
+unconditionally at the end of __init__ (not deferred to first show()):
+this widget's whole existing __init__ already finishes every other piece
+of setup synchronously (see _populate_placeholder_data()/
+_recompute_settings_drift() below), a caller only ever constructs it once
+its calibration_set/camera_stream are genuinely ready, and a tick before
+the stream has produced a first frame is a harmless no-op -- so there's
+no meaningful window where deferring to show() would help.
+
+A frame that preprocesses fine but yields too few valid spectral columns
+for the selected fit degree (InsufficientDataError) is skipped rather
+than shown as an error -- see docs/project_state.md's "Skip-frame
+handling". After MAX_CONSECUTIVE_SKIPS (~10) such skips in a row, the
+display switches to an explicit "insufficient signal" state (fit overlay
+hidden, diagnostics read "N/A") rather than silently freezing on the last
+good frame; the raw heatmap still updates on a skip, since preprocessing
+itself succeeded -- only the fit failed for lack of columns.
 
 The Acquisition Settings side-panel section (exposure_us/gain_db spin
-boxes, pre-filled from the loaded baseline's capture settings) is the
-same kind of skeleton: editing either field re-evaluates a combined
-drift state against calibration_set.baseline_record (and
+boxes, pre-filled from the loaded baseline's capture settings) still does
+NOT reconfigure camera_stream -- editing either field only re-evaluates a
+combined drift state against calibration_set.baseline_record (and
 conversion_gain_record, if supplied) via _recompute_settings_drift().
 Crossing from "in tolerance" to "drifted" hides the fit diagnostics
 (reading "N/A") and the scatter/error-bar/fit-curve overlay (the raw
 heatmap keeps displaying underneath) and pops a single informational
-message; returning to "in tolerance" restores both. Does NOT reconfigure
-camera_stream, though -- that's deferred to the same future "real camera
-wiring" phase as the QTimer update loop above.
+message; returning to "in tolerance" restores both. While drifted,
+_on_timer_tick() returns immediately without running any real
+preprocessing/analysis -- the loaded calibrations are untrusted against
+the entered settings, so there's nothing valid to compute -- rather than
+fighting the drift UI's own hide/restore logic.
+
+Degree selection (the combo box) does NOT trigger a synchronous refit:
+_on_degree_changed() only swaps in this widget's placeholder numbers for
+the newly picked degree immediately, and the next timer tick (which reads
+self._current_degree fresh) supplies the real ones -- at most one tick
+interval later, close enough given the ~5Hz cadence that a dedicated
+refit path isn't worth the complexity.
+
+Real per-tick fits close the "degree > 1 has no internal zeta
+uncertainty" gap noted in docs/project_state.md: SpatialDispersionFitResult
+.sigma_zeta() (exact coefficient-covariance propagation) is called for
+every degree, not just degree 1, so the "uncertainty not available" caveat
+only ever appears on the construction-time placeholder numbers now, never
+on a real result.
 '''
 
 # Imports
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -49,18 +86,31 @@ from PySide6.QtWidgets import (
 )
 
 from pipeline.acquisition import CameraStream, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
-from pipeline.analysis import SensorNoiseModel
+from pipeline.analysis import (
+    analyze_shot,
+    InsufficientDataError,
+    SensorNoiseModel,
+    ShotAnalysisResult,
+    SpatialDispersionFitResult,
+)
 from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.sensor import ConversionGainRecord
 from pipeline.calibration.shared import EXPOSURE_MATCH_TOLERANCE_REL, GAIN_MATCH_TOLERANCE_ABS
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
-from pipeline.preprocessing import CalibrationSet
+from pipeline.preprocessing import (
+    CalibrationSet,
+    NoSignalError,
+    ProcessedFrame,
+    run_preprocessing,
+    SettingsMismatchError,
+)
 
 from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM, microns_to_mm
 from pipeline.gui.roi_control import SpatialROIControl
 from pipeline.gui.theme import (
     COLOR_ACCENT as ACCENT_COLOR,
     COLOR_BACKGROUND as BACKGROUND_COLOR,
+    COLOR_ERROR as ERROR_COLOR,
     COLOR_TEXT_PRIMARY as FOREGROUND_COLOR,
     COLOR_PLOT_GRID as GRID_COLOR,
     combo_box_stylesheet,
@@ -83,6 +133,31 @@ DEFAULT_DEGREE = 1
 STRIP_CHART_WINDOW_SECONDS = 60.0
 
 SIDE_PANEL_WIDTH = 300
+
+# QTimer tick interval driving the real update loop -- ~5Hz, the target
+# refresh rate from docs/project_state.md's live-view design notes
+# (analyze_shot() profiles at ~11.7ms/call, well under this budget; the
+# plotting redraw, not the science pipeline, is the real constraint).
+# Overridable per-instance via LiveViewWidget's update_interval_ms
+# constructor parameter, e.g. to shrink it for fast, deterministic tests.
+DEFAULT_UPDATE_INTERVAL_MS = 200
+
+# Number of consecutive InsufficientDataError skips (too few valid
+# spectral columns to fit the selected degree) before the display gives
+# up on the last good frame and switches to an explicit "insufficient
+# signal" state instead. An unverified starting constant, same treatment
+# as SNR_THRESHOLD/SIGMA_THRESHOLD elsewhere -- see docs/project_state.md's
+# "Skip-frame handling".
+MAX_CONSECUTIVE_SKIPS = 10
+
+# Placeholder sigma (in pixel-column units) fed to TotalLeastSquaresFit's
+# scipy.odr backend by _PixelColumnWavelengthAxis when no real wavelength
+# calibration is loaded -- scipy.odr requires a strictly positive input
+# standard deviation on both axes, but a bare pixel-column index has no
+# real uncertainty of its own (see the WavelengthAxis fallback convention
+# used throughout this module); never displayed anywhere, only fed to the
+# fitter to keep it numerically valid.
+FALLBACK_PIXEL_COLUMN_SIGMA = 0.5
 
 # Spectral-column center used for the degree > 1 placeholder's "evaluated
 # at" note (n_cols / 2 from _populate_placeholder_data()'s fake 1920-column
@@ -148,6 +223,27 @@ class _PowerOfTenAxisItem(pg.AxisItem):
         return f"<span style='{style}'>{s}</span>"
 
 
+class _PixelColumnWavelengthAxis:
+
+    '''
+    Trivial WavelengthAxis stand-in used internally by the real timer
+    loop's analyze_shot() calls when no real spectral calibration has
+    been loaded (self._wavelength_axis is None) -- analyze_shot()
+    requires a WavelengthAxis to fit against, but every on-screen element
+    already falls back to a plain pixel-column axis in that case (see
+    wavelength_axis_label()/heatmap_x_extent() above), so this makes the
+    fit run in that same fallback domain: wavelength_nm() is the identity
+    map on pixel-column index. See FALLBACK_PIXEL_COLUMN_SIGMA for why
+    sigma_wavelength_nm() is a small positive constant rather than 0.
+    '''
+
+    def wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
+        return np.asarray(pixel, dtype=float)
+
+    def sigma_wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
+        return np.full_like(np.asarray(pixel, dtype=float), FALLBACK_PIXEL_COLUMN_SIGMA)
+
+
 class LiveViewWidget(QWidget):
 
     '''
@@ -179,8 +275,8 @@ class LiveViewWidget(QWidget):
         clearly labeled as such.
     camera_stream
         A CameraStream the caller owns the lifecycle of (start/stop are
-        not this widget's responsibility). Not polled in this phase --
-        stored for the follow-up wiring phase's QTimer loop.
+        not this widget's responsibility). Polled every self._update_timer
+        tick via get_latest_frame() -- see module docstring.
     conversion_gain_record
         ConversionGainRecord (gain_db + timing/sweep metadata, no
         exposure_us -- conversion gain sweeps exposure by design) tagging
@@ -189,6 +285,11 @@ class LiveViewWidget(QWidget):
         panel's gain_db field is drift-checked against it in addition to
         calibration_set.baseline_record.gain_db, since the two artifacts
         can drift independently of each other.
+    update_interval_ms
+        Real update loop's QTimer interval, in milliseconds -- defaults to
+        DEFAULT_UPDATE_INTERVAL_MS (~5Hz). Exposed as a constructor
+        parameter (rather than only the class-level default) so tests can
+        shrink it for fast, deterministic execution without monkeypatching.
     parent
         Standard Qt parent widget.
     '''
@@ -204,6 +305,7 @@ class LiveViewWidget(QWidget):
         wavelength_axis: WavelengthAxis | None,
         camera_stream: CameraStream,
         conversion_gain_record: ConversionGainRecord | None = None,
+        update_interval_ms: int = DEFAULT_UPDATE_INTERVAL_MS,
         parent: QWidget | None = None,
     ) -> None:
 
@@ -218,6 +320,12 @@ class LiveViewWidget(QWidget):
 
         self._current_degree = DEFAULT_DEGREE
 
+        # Real-loop state -- see module docstring and _on_timer_tick().
+        self._consecutive_skips = 0
+        self._insufficient_signal = False
+        self._strip_chart_history: list[tuple[float, float]] = []
+        self._pixel_column_wavelength_axis = _PixelColumnWavelengthAxis()
+
         self._apply_pyqtgraph_theme()
         self._build_ui()
         self._populate_placeholder_data()
@@ -228,6 +336,15 @@ class LiveViewWidget(QWidget):
         # state the supplied records actually imply, not assumed "OK".
         self._settings_drifted = False
         self._recompute_settings_drift()
+
+        self._update_status_label()
+
+        # See module docstring for why this starts unconditionally here
+        # rather than being deferred to first show().
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(update_interval_ms)
+        self._update_timer.timeout.connect(self._on_timer_tick)
+        self._update_timer.start()
 
     # -- construction ---------------------------------------------------
 
@@ -257,13 +374,14 @@ class LiveViewWidget(QWidget):
 
     def _build_status_bar(self) -> QWidget:
 
-        # Purely visual placeholder for the connection-lost /
-        # insufficient-signal states the real update loop will drive --
-        # not wired to camera_stream.is_running/last_error yet.
-        label = QLabel("Status: OK  (skeleton -- not connected to live camera state)")
-        label.setFont(load_bundled_font(10))
-        label.setStyleSheet(f"color: {ACCENT_COLOR};")
-        return label
+        # Real text/color are set by _update_status_label() (called once
+        # at the end of __init__, then every timer tick) -- this initial
+        # text is only ever visible for the instant between widget
+        # construction and that first call.
+        self._status_label = QLabel("Status: OK")
+        self._status_label.setFont(load_bundled_font(10))
+        self._status_label.setStyleSheet(f"color: {ACCENT_COLOR};")
+        return self._status_label
 
     def _build_main_plot(self) -> pg.PlotWidget:
 
@@ -658,7 +776,7 @@ class LiveViewWidget(QWidget):
 
         # -- scatter + error bars --------------------------------------
         columns = np.arange(200, 1720, 12)
-        x_values = self._placeholder_x_values(columns)
+        x_values = self._x_values_for_columns(columns)
         centroid_px = true_centroid_px(columns) + rng.normal(scale=3.0, size=columns.shape)
         x_sigma = (
             np.full_like(x_values, 0.4) if self._wavelength_axis is not None else None
@@ -715,7 +833,11 @@ class LiveViewWidget(QWidget):
         self._image_item.setRect(
             min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
         )
-        self._placeholder_x_extent = (min(x0, x1), max(x0, x1))
+        # Data-independent (only the frame shape and wavelength axis feed
+        # into it) -- computed once here and reused by both
+        # _apply_roi_bounds() (placeholder rendering) and
+        # _display_shot_result() (real rendering) below.
+        self._main_plot_x_extent = (min(x0, x1), max(x0, x1))
 
         # Kept for _update_strip_chart_placeholder() to continue the same
         # random stream _populate_placeholder_data() threads it through,
@@ -777,7 +899,7 @@ class LiveViewWidget(QWidget):
         self._image_item.setImage(masked_image)
 
         self._main_plot.setRange(
-            xRange=self._placeholder_x_extent, yRange=(min_mm, max_mm), padding=0
+            xRange=self._main_plot_x_extent, yRange=(min_mm, max_mm), padding=0
         )
 
     def _on_roi_changed(self, min_mm: float, max_mm: float) -> None:
@@ -793,6 +915,237 @@ class LiveViewWidget(QWidget):
         noisy = trend + rng.normal(scale=0.02 * abs(zeta_center) + 1e-6, size=t.shape)
         self._strip_curve.setData(x=t, y=noisy)
 
+    # -- live update loop (QTimer-driven -- see module docstring) --------
+
+    def _update_status_label(self) -> None:
+
+        '''
+        Reflects self._camera_stream's real is_running/last_error state.
+        Called once at the end of __init__ (so the very first paint
+        already shows reality, not the construction-time default text)
+        and again on every timer tick thereafter. last_error takes
+        priority over is_running since a stream that died from a fatal
+        CameraError is also, necessarily, no longer running -- reporting
+        the error is more useful than just "stopped".
+        '''
+
+        last_error = self._camera_stream.last_error
+        if last_error is not None:
+            self._status_label.setText(f"Status: Camera error -- {last_error}")
+            self._status_label.setStyleSheet(f"color: {ERROR_COLOR};")
+        elif not self._camera_stream.is_running:
+            self._status_label.setText("Status: Camera stopped")
+            self._status_label.setStyleSheet(f"color: {ERROR_COLOR};")
+        else:
+            self._status_label.setText("Status: OK")
+            self._status_label.setStyleSheet(f"color: {ACCENT_COLOR};")
+
+    def _on_timer_tick(self) -> None:
+
+        '''
+        self._update_timer's timeout slot -- see module docstring for the
+        full per-tick flow and the drift/skip-counter interactions.
+        Deliberately swallows every expected failure mode itself (missing
+        frame, bad-frame/settings-mismatch preprocessing errors,
+        insufficient-column fit errors) rather than letting any of them
+        escape as an uncaught exception out of a Qt slot.
+        '''
+
+        self._update_status_label()
+
+        if self._settings_drifted:
+            # Untrusted calibrations against the entered settings -- see
+            # module docstring for why this skips real work entirely
+            # rather than fighting _enter_drifted_state()/_exit_drifted_
+            # state()'s own hide/restore of the same overlay.
+            return
+
+        frame = self._camera_stream.get_latest_frame()
+        if frame is None:
+            # Nothing grabbed yet (stream not started, or hasn't produced
+            # its first frame) -- leave whatever's on screen alone rather
+            # than treating "no new data this tick" as an error.
+            return
+
+        try:
+            processed, _saturation_result = run_preprocessing(
+                frame, self._calibration_set, roi_bounds=self._roi_control.roi_bounds_px()
+            )
+        except (NoSignalError, SettingsMismatchError):
+            # A genuinely signal-free raw frame, or the frame's actual
+            # exposure_us/gain_db no longer matching calibration_set.
+            # baseline_record -- distinct failure modes from "not enough
+            # valid columns to fit" below (and not currently surfaced
+            # anywhere else per-tick), so just skip this frame rather than
+            # let either propagate out of a Qt slot.
+            return
+
+        axis = (
+            self._wavelength_axis
+            if self._wavelength_axis is not None
+            else self._pixel_column_wavelength_axis
+        )
+
+        try:
+            result = analyze_shot(
+                processed, axis, noise_model=self._noise_model,
+                degrees=(self._current_degree,),
+            )
+        except InsufficientDataError:
+            # Preprocessing succeeded (so the raw view is still genuinely
+            # current) but too few columns cleared the signal threshold to
+            # fit the selected degree -- update the heatmap alone, count
+            # the skip, and only give up on the overlay after
+            # MAX_CONSECUTIVE_SKIPS in a row (see module docstring).
+            self._image_item.setImage(processed.image)
+            self._consecutive_skips += 1
+            if self._consecutive_skips >= MAX_CONSECUTIVE_SKIPS and not self._insufficient_signal:
+                self._enter_insufficient_signal_state()
+            return
+
+        self._consecutive_skips = 0
+        if self._insufficient_signal:
+            self._exit_insufficient_signal_state()
+
+        self._display_shot_result(processed, result)
+
+    def _display_shot_result(self, processed: ProcessedFrame, result: ShotAnalysisResult) -> None:
+
+        '''
+        Pushes one successful analyze_shot() result into the scatter/
+        error-bar/fit-curve/heatmap/strip-chart/side-panel widgets --
+        the real-data counterpart to _apply_roi_bounds()'s placeholder
+        rendering. Fit coefficients/zeta stay in the pixel/wavelength
+        units analyze_shot() itself reports (position_calibration is
+        deliberately not passed to analyze_shot() -- see module
+        docstring's unit note); only the scatter/error-bar/fit-curve y
+        values (physical position) go through self._convert_to_mm(), to
+        match the main plot's "Relative Physical Position (mm)" y-axis.
+        '''
+
+        fit = result.fits[self._current_degree]
+        columns = result.centroids.columns
+        x_values = self._x_values_for_columns(columns)
+
+        y_values, y_sigma = self._convert_to_mm(result.centroids.x0, result.centroids.sigma_x0)
+        self._scatter.setData(x=x_values, y=y_values)
+
+        error_kwargs = dict(x=x_values, y=y_values, top=y_sigma, bottom=y_sigma)
+        if self._wavelength_axis is not None:
+            x_sigma = self._wavelength_axis.sigma_wavelength_nm(columns)
+            error_kwargs["left"] = x_sigma
+            error_kwargs["right"] = x_sigma
+        self._error_bars.setData(**error_kwargs)
+
+        fit_x = np.linspace(x_values.min(), x_values.max(), 200)
+        fit_y_px = np.polynomial.polynomial.polyval(fit_x, fit.coefficients)
+        fit_y_mm, _ = self._convert_to_mm(fit_y_px, np.zeros_like(fit_y_px))
+        self._fit_curve.setData(x=fit_x, y=fit_y_mm)
+
+        self._image_item.setImage(processed.image)
+        self._main_plot.setRange(
+            xRange=self._main_plot_x_extent, yRange=self._roi_control.roi_bounds_mm(), padding=0
+        )
+
+        # "Central wavelength of the currently-valid columns" -- see
+        # docs/project_state.md's degree > 1 spec.
+        eval_x = float(np.median(x_values))
+        self._update_fit_panel_from_result(fit, eval_x)
+        self._append_strip_chart_point(float(fit.zeta(np.array([eval_x]))[0]))
+
+    def _update_fit_panel_from_result(
+        self, fit: SpatialDispersionFitResult, eval_x: float
+    ) -> None:
+
+        '''
+        Real-data counterpart to _update_fit_panel() (which reads
+        self._placeholder_fits): the same label layout, but sourced from
+        a real SpatialDispersionFitResult and evaluated at eval_x via
+        fit.zeta()/fit.sigma_zeta() -- the latter uses the fit's full
+        coefficient covariance (see SpatialDispersionFitResult.sigma_zeta's
+        docstring), so degree > 1 gets a real internal uncertainty here,
+        closing the gap _update_fit_panel()'s placeholder path still
+        deliberately leaves open (see module docstring).
+        '''
+
+        self._chi_squared_label.setText(f"{fit.reduced_chi_squared:.3f}")
+
+        coeff_lines = [
+            f"c<sub>{i}</sub> = {format_value_with_uncertainty(c, s)}"
+            for i, (c, s) in enumerate(zip(fit.coefficients, fit.coefficient_sigma))
+        ]
+        self._coefficients_label.setText("<br>".join(coeff_lines))
+
+        self._formula_label.setText(fit_formula_html(fit.degree, self._wavelength_axis))
+
+        eval_point = np.array([eval_x])
+        zeta_value = float(fit.zeta(eval_point)[0])
+        zeta_sigma = float(fit.sigma_zeta(eval_point)[0])
+        self._zeta_label.setText(format_value_with_uncertainty(zeta_value, zeta_sigma))
+        self._zeta_note_label.setText("")
+
+        self._evaluated_at_label.setText(
+            evaluated_at_text(eval_x, self._wavelength_axis) if fit.degree > 1 else ""
+        )
+
+    def _append_strip_chart_point(self, zeta_value: float) -> None:
+
+        '''
+        Real-data counterpart to _update_strip_chart_placeholder(): appends
+        one (now, zeta_value) sample to a rolling history trimmed to the
+        last STRIP_CHART_WINDOW_SECONDS, then redraws the strip curve
+        against "seconds ago" (0 = this tick, negative = further in the
+        past), matching the placeholder version's x convention.
+        '''
+
+        now = time.monotonic()
+        self._strip_chart_history.append((now, zeta_value))
+        cutoff = now - STRIP_CHART_WINDOW_SECONDS
+        self._strip_chart_history = [
+            (t, z) for t, z in self._strip_chart_history if t >= cutoff
+        ]
+
+        t = np.array([sample_t - now for sample_t, _ in self._strip_chart_history])
+        z = np.array([sample_z for _, sample_z in self._strip_chart_history])
+        self._strip_curve.setData(x=t, y=z)
+
+    def _enter_insufficient_signal_state(self) -> None:
+
+        '''
+        Entered once self._consecutive_skips reaches MAX_CONSECUTIVE_SKIPS
+        InsufficientDataError skips in a row: hides the scatter/error-bar/
+        fit-curve overlay and replaces the side-panel diagnostics with an
+        explicit "N/A", the same visual treatment _enter_drifted_state()
+        gives a settings-drift episode -- but without popping a message
+        box or emitting recalibration_requested, since low signal isn't
+        something a recalibration would fix. The raw heatmap is left
+        alone; it's still being updated every skip (see _on_timer_tick()).
+        '''
+
+        self._insufficient_signal = True
+        self._chi_squared_label.setText("N/A")
+        self._coefficients_label.setText("N/A")
+        self._zeta_label.setText("N/A")
+        self._zeta_note_label.setText("")
+        self._evaluated_at_label.setText("")
+        self._scatter.setVisible(False)
+        self._error_bars.setVisible(False)
+        self._fit_curve.setVisible(False)
+
+    def _exit_insufficient_signal_state(self) -> None:
+
+        '''
+        Entered on the first tick to succeed after an insufficient-signal
+        episode -- restores overlay visibility. Diagnostics/scatter/fit
+        data itself is populated right after by the same tick's
+        _display_shot_result() call, not here.
+        '''
+
+        self._insufficient_signal = False
+        self._scatter.setVisible(True)
+        self._error_bars.setVisible(True)
+        self._fit_curve.setVisible(True)
+
     # -- degree selector (stub -- see module docstring) -----------------
 
     def _on_degree_changed(self, index: int) -> None:
@@ -802,9 +1155,11 @@ class LiveViewWidget(QWidget):
             return
         self._current_degree = degree
         # NOTE: this only swaps in this widget's own pre-baked placeholder
-        # numbers for the newly-selected degree -- it does not re-run
-        # analyze_shot() or refit anything. Real recomputation is wired up
-        # in the follow-up phase.
+        # numbers for the newly-selected degree immediately -- it does not
+        # synchronously re-run analyze_shot()/refit anything. The next
+        # timer tick reads self._current_degree fresh and supplies the
+        # real numbers instead, at most one tick interval later (see
+        # module docstring).
         self._update_fit_panel(degree)
 
     def _update_fit_panel(self, degree: int) -> None:
@@ -840,7 +1195,10 @@ class LiveViewWidget(QWidget):
     def _x_axis_label(self) -> str:
         return wavelength_axis_label(self._wavelength_axis)
 
-    def _placeholder_x_values(self, columns: np.ndarray) -> np.ndarray:
+    def _x_values_for_columns(self, columns: np.ndarray) -> np.ndarray:
+        # Wavelength (nm) per column if a real axis is loaded, else the raw
+        # pixel-column index -- shared by the placeholder feed and real
+        # per-tick rendering (_display_shot_result()) alike.
         if self._wavelength_axis is not None:
             return self._wavelength_axis.wavelength_nm(columns)
         return columns.astype(float)
@@ -1133,4 +1491,6 @@ __all__ = [
     "EVALUATED_AT_COLUMN",
     "FIT_CURVE_COLOR",
     "FIT_CURVE_WIDTH",
+    "DEFAULT_UPDATE_INTERVAL_MS",
+    "MAX_CONSECUTIVE_SKIPS",
 ]
