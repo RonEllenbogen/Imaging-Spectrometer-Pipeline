@@ -41,7 +41,9 @@ be gone first, not just hidden behind a fresh pair.
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
+from pipeline.acquisition import CameraError
 from pipeline.cli.calibration import build_camera_stream
+from pipeline.gui.calibration_dialogs import show_camera_error_dialog
 from pipeline.gui.calibration_screen import CalibrationBundle, CalibrationScreen
 from pipeline.gui.extended_measurement import ExtendedMeasurementScreen
 from pipeline.gui.live_view import LiveViewWidget
@@ -96,14 +98,30 @@ class MainWindow(QMainWindow):
         self._extended_measurement/self._camera_stream are already torn
         down and None (see _on_back_to_calibration_requested), so this
         just runs the same fresh-build path it does the first time.
+
+        If the camera itself fails to start (CameraError -- no device
+        found, already open elsewhere, etc.), shows the same
+        show_camera_error_dialog() every other real camera-touching call
+        in this codebase routes to, and leaves self._bundle/
+        self._camera_stream reset to None rather than half-set -- the
+        user stays on CalibrationScreen (never switched away from), which
+        needs no state reset of its own to retry: clicking "Load Existing
+        Calibrations" (or completing CreatePage) again just re-fires
+        calibration_ready and re-enters this method fresh.
         '''
 
-        self._bundle = bundle
-        self._camera_stream = build_camera_stream(
+        camera_stream = build_camera_stream(
             gain_db=bundle.calibration_set.baseline_record.gain_db,
             exposure_us=bundle.calibration_set.baseline_record.exposure_us,
         )
-        self._camera_stream.start()
+        try:
+            camera_stream.start()
+        except CameraError as error:
+            show_camera_error_dialog(self, str(error))
+            return
+
+        self._bundle = bundle
+        self._camera_stream = camera_stream
 
         self._live_view = LiveViewWidget(
             calibration_set=bundle.calibration_set,

@@ -30,7 +30,9 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
+from pipeline.acquisition import (  # noqa: E402
+    CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
+)
 from pipeline.calibration.shared import CalibrationRecord  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 import pipeline.gui.calibration_screen as calibration_screen_module  # noqa: E402
@@ -247,3 +249,57 @@ class TestMainWindowNavigation:
         assert window._live_view is not first_live_view
         assert window._camera_stream is not first_camera_stream
         assert window._camera_stream.is_running is True
+
+    def test_calibration_ready_camera_error_shows_dialog_and_stays_on_calibration_screen(
+        self, qtbot, monkeypatch
+    ):
+        # Regression test: _on_calibration_ready() used to call
+        # self._camera_stream.start() completely unguarded -- a real
+        # CameraError (no device found, already open elsewhere, etc.)
+        # would crash right as the user transitions from calibration into
+        # live view, before they'd seen it once. Confirmed for real
+        # (against the actual, unmocked build_camera_stream()/PylonBackend
+        # with no camera attached) during manual verification; this is
+        # the pytest-suite regression coverage for the same fix.
+        _patch_successful_calibration_load(monkeypatch)
+
+        # build_camera_stream() itself never touches hardware (construction
+        # is documented as hardware-safe) -- only .start() does, via
+        # connect(). So the fake must return a real, normally-constructed
+        # CameraStream whose .start() genuinely raises, not have
+        # build_camera_stream() itself raise -- that would test a failure
+        # mode the real code never actually hits.
+        def _build_stream_that_fails_to_start(gain_db, *, exposure_us=None, auto_exposure=False):
+            stream = _fake_build_camera_stream(gain_db, exposure_us=exposure_us, auto_exposure=auto_exposure)
+
+            def _raise(*a, **k):
+                raise CameraConnectionError("no device found")
+
+            monkeypatch.setattr(stream, "start", _raise)
+            return stream
+
+        monkeypatch.setattr("pipeline.gui.app.build_camera_stream", _build_stream_that_fails_to_start)
+        camera_error_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.app.show_camera_error_dialog",
+            lambda parent, message: camera_error_calls.append(message),
+        )
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        window._calibration_screen.welcome_page.load_requested.emit()
+
+        assert len(camera_error_calls) == 1
+        assert window._stack.currentWidget() is window._calibration_screen
+        assert window._live_view is None
+        assert window._camera_stream is None
+        assert window._bundle is None
+
+        # Retrying (e.g. after reconnecting the camera) must work cleanly
+        # -- no leftover state from the failed attempt above.
+        monkeypatch.setattr("pipeline.gui.app.build_camera_stream", _fake_build_camera_stream)
+        window._calibration_screen.welcome_page.load_requested.emit()
+
+        assert window._stack.currentWidget() is window._live_view
+        assert window._live_view is not None
+        assert window._camera_stream is not None

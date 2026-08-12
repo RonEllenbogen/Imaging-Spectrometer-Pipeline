@@ -41,7 +41,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QSpinBox  # noqa: E402
 
-from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
+from pipeline.acquisition import (  # noqa: E402
+    CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
+)
 from pipeline.analysis import InsufficientDataError, SensorNoiseModel  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
@@ -414,6 +416,98 @@ class TestExtendedMeasurementRealMeasurement:
             title, message = warning_calls[0][1], warning_calls[0][2]
             assert title == "Measurement Failed"
             assert "could not be analyzed" in message
+        finally:
+            stream.stop()
+
+    def test_run_measurement_camera_error_during_acquisition_aborts_cleanly(
+        self, qtbot, monkeypatch
+    ):
+        # Regression test: collect_n_frames() had zero exception handling
+        # -- a real camera dropping mid-acquisition (a plausible lab event:
+        # a cable wiggle, a GigE hiccup) would raise CameraError/RuntimeError
+        # straight out of this button's click handler. Confirms the fix:
+        # routed through show_camera_error_dialog(), the same convention
+        # every other real camera-touching call in this codebase uses, run
+        # aborted with no partial shot_results update.
+        camera_error_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.show_camera_error_dialog",
+            lambda parent, message: camera_error_calls.append(message),
+        )
+
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+
+            def _raise(*a, **k):
+                raise CameraConnectionError("device disconnected mid-acquisition")
+
+            monkeypatch.setattr(stream, "collect_n_frames", _raise)
+
+            widget._run_button.click()
+
+            assert widget._shot_results is None
+            assert widget._n_shots_label.text() == "--"
+            assert len(camera_error_calls) == 1
+            assert "disconnected" in camera_error_calls[0]
+        finally:
+            stream.stop()
+
+    def test_run_measurement_camera_error_on_reconfigure_aborts_cleanly(
+        self, qtbot, monkeypatch
+    ):
+        # Regression test: _maybe_reconfigure_camera_stream()'s .start()
+        # call (after stopping the stream to apply new exposure/gain) was
+        # likewise unguarded. Confirms the fix catches a failed restart
+        # the same way.
+        #
+        # Setting the exposure spin below to something that actually
+        # differs (needed to make _maybe_reconfigure_camera_stream() take
+        # its real branch at all) can itself cross the settings-drift
+        # threshold against calibration_set.baseline_record and pop a
+        # real QMessageBox.warning() -- a real (unmocked) modal
+        # QMessageBox.exec() blocks forever offscreen, so this is mocked
+        # defensively here the same way every other exposure/gain-editing
+        # test in this file already does.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        camera_error_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.show_camera_error_dialog",
+            lambda parent, message: camera_error_calls.append(message),
+        )
+
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            # Force a real mismatch so _maybe_reconfigure_camera_stream()
+            # actually attempts a stop/reconfigure/restart cycle --
+            # _maybe_reconfigure_camera_stream()'s own match check uses
+            # rel_tol=1e-9, so any nonzero difference is enough. Kept well
+            # under EXPOSURE_MATCH_TOLERANCE_REL (1%, i.e. ~20us at this
+            # fixture's 2000us) so this doesn't *also* cross the
+            # settings-drift threshold -- that's a separate concern from
+            # what this test is checking, and would otherwise change
+            # _n_shots_label's text to "N/A" (drifted) instead of "--"
+            # (never-run) for a reason unrelated to the camera error here.
+            widget._exposure_spin.setValue(stream.exposure_us + 1.0)
+
+            def _raise(*a, **k):
+                raise CameraConnectionError("device did not respond to restart")
+
+            monkeypatch.setattr(stream, "start", _raise)
+
+            widget._run_button.click()
+
+            assert widget._shot_results is None
+            assert widget._n_shots_label.text() == "--"
+            assert len(camera_error_calls) == 1
+            assert "restart" in camera_error_calls[0]
         finally:
             stream.stop()
 

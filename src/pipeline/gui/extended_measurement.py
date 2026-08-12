@@ -102,7 +102,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pipeline.acquisition import CameraStream, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
+from pipeline.acquisition import CameraError, CameraStream, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
 from pipeline.analysis import (
     analyze_shot, combine_shots, CombinedSpatialDispersionResult,
     InsufficientDataError, SensorNoiseModel, ShotAnalysisResult,
@@ -114,6 +114,7 @@ from pipeline.preprocessing import (
     CalibrationSet, NoSignalError, SettingsMismatchError, run_preprocessing,
 )
 
+from pipeline.gui.calibration_dialogs import show_camera_error_dialog
 from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
 from pipeline.gui.live_view import (
     DEFAULT_DEGREE,
@@ -729,12 +730,24 @@ class ExtendedMeasurementScreen(QWidget):
         display is left exactly as it was before this click -- no partial
         _set_measurement_data()/_refresh_measurement_display() call with
         an incomplete shot_results list.
+
+        CameraError (from _maybe_reconfigure_camera_stream()'s restart, or
+        from collect_n_frames() if the camera drops mid-acquisition) and
+        the RuntimeError collect_n_frames() itself documents (stream
+        stopped by something else while waiting) get the same
+        abort-cleanly treatment, via show_camera_error_dialog() -- the
+        same routing calibration_dialogs.py already uses for every other
+        real camera-touching call in this codebase.
         '''
 
-        self._maybe_reconfigure_camera_stream()
+        try:
+            self._maybe_reconfigure_camera_stream()
 
-        n_shots = self._n_shots_spin.value()
-        frames = self._camera_stream.collect_n_frames(n_shots)
+            n_shots = self._n_shots_spin.value()
+            frames = self._camera_stream.collect_n_frames(n_shots)
+        except (CameraError, RuntimeError) as error:
+            show_camera_error_dialog(self, str(error))
+            return
 
         shot_results: list[ShotAnalysisResult] = []
         for frame in frames:

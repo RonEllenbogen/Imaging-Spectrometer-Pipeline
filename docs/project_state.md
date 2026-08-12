@@ -717,6 +717,33 @@ indefinitely, in the real app, despite every screen's own isolated tests passing
 `tests/test_gui_end_to_end.py`'s cross-screen drive-through, which is the reason that test file exists
 as a distinct thing from the three per-screen files above.
 
+**Three more real-camera-error gaps found in a pre-lab-session audit, all now fixed.** Every screen's
+tests run exclusively against `SyntheticBackend`, which never raises `CameraError` -- so three call sites
+into the real camera had accumulated with zero exception handling, none of them caught by any existing
+test:
+- `app.py`'s `_on_calibration_ready()` -- `camera_stream.start()`, right as calibration hands off to live
+  view. A real `CameraConnectionError` here (no device found, already open elsewhere, camera not powered
+  on yet) would have crashed that transition outright, before live view was shown even once.
+- `extended_measurement.py`'s `_maybe_reconfigure_camera_stream()` -- the `.start()` half of its
+  stop/reconfigure/restart cycle, if the camera fails to come back up after being stopped to apply new
+  exposure/gain.
+- `extended_measurement.py`'s `_on_run_clicked()` -- `collect_n_frames()`, if the camera drops mid-
+  acquisition (a real, plausible lab event: a cable wiggle, a GigE hiccup).
+
+All three now route through `show_camera_error_dialog()` -- the same convention every camera-touching
+call in `calibration_dialogs.py` already used from the original wiring pass -- catching `CameraError`
+(and, for `collect_n_frames()`, the `RuntimeError` it also documents for a stream that stops without
+`last_error` set). Both `extended_measurement.py` fixes leave `shot_results`/the display exactly as they
+were before the click, same as the `InsufficientDataError` fix above. Verified against the real,
+unmocked `build_camera_stream()`/`PylonBackend` with no camera attached (not just mocked in tests): the
+real failure path genuinely raises `CameraConnectionError` after PylonBackend's documented 3-attempt/
+0.5s-interval device-enumeration retry, `app.py`'s fix catches it cleanly with no crash, and a full sweep
+of every remaining `.start()`/`.stop()`/`collect_n_frames()`/`build_camera_stream()` call in `gui/` found
+no further gaps -- `calibration_dialogs.py`'s four dialogs already had this from the original wiring
+pass, and every `.stop()` call is safe by design regardless of stream state (`PylonBackend.close()`'s own
+docstring: "safe to call in any state, including if connect() was never called or failed partway
+through").
+
 **Bug found and fixed post-merge, from real usage**: `LiveViewWidget._on_roi_changed()` (the
 `SpatialROIControl.roi_changed` handler) unconditionally called `_apply_roi_bounds()`, which repaints the
 scatter/error-bars/fit-curve/heatmap from `self._placeholder_*` — stale, randomly-generated,
