@@ -82,22 +82,9 @@ def apply_geometric_tilt_correction(
     shift = tilt.column_shift(row_grid, col_grid, include_residual=include_residual)
     source_columns = col_grid + shift
 
-    import sys, time as _time
-    print(
-        f"[DIAG] frame.image shape={frame.image.shape} dtype={frame.image.dtype} "
-        f"c_contig={frame.image.flags['C_CONTIGUOUS']} "
-        f"finite={np.isfinite(frame.image).all()} "
-        f"shift min={shift.min()} max={shift.max()} nan={np.isnan(shift).any()} "
-        f"source_columns dtype={source_columns.dtype} c_contig={source_columns.flags['C_CONTIGUOUS']}",
-        file=sys.stderr, flush=True,
-    )
-    _t0 = _time.time()
-
     corrected = map_coordinates(
         frame.image, [row_grid, source_columns], order=1, mode="constant", cval=0.0,
     )
-
-    print(f"[DIAG] map_coordinates took {_time.time() - _t0:.4f}s", file=sys.stderr, flush=True)
 
     return ProcessedFrame(
         image=corrected, frame_id=frame.frame_id, timestamp=frame.timestamp,
