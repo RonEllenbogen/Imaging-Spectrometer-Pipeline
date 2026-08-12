@@ -200,3 +200,50 @@ class TestMainWindowNavigation:
 
         assert window._extended_measurement is extended_measurement
         assert window._stack.currentWidget() is window._extended_measurement
+
+    def test_back_to_calibration_stops_camera_and_rebuilds_fresh_live_view(
+        self, qtbot, monkeypatch
+    ):
+        _patch_successful_calibration_load(monkeypatch)
+        monkeypatch.setattr("pipeline.gui.app.build_camera_stream", _fake_build_camera_stream)
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        window._calibration_screen.welcome_page.load_requested.emit()
+        assert window._stack.currentWidget() is window._live_view
+
+        first_live_view = window._live_view
+        first_camera_stream = window._camera_stream
+        assert first_camera_stream.is_running is True
+
+        window._live_view.extended_measurement_requested.emit()
+        first_extended_measurement = window._extended_measurement
+        assert window._stack.currentWidget() is first_extended_measurement
+
+        window._live_view.back_to_calibration_requested.emit()
+
+        # Stream stopped (freed for CalibrationScreen's own dialogs) and
+        # both downstream screens fully torn down, not just hidden -- see
+        # _on_back_to_calibration_requested()'s own docstring for why.
+        assert first_camera_stream.is_running is False
+        assert window._live_view is None
+        assert window._extended_measurement is None
+        assert window._camera_stream is None
+        assert window._stack.currentWidget() is window._calibration_screen
+        assert window._stack.indexOf(first_live_view) == -1
+        assert window._stack.indexOf(first_extended_measurement) == -1
+
+        # Completing calibration again must build a genuinely fresh
+        # LiveViewWidget/CameraStream, not resurrect or reuse the torn-down
+        # ones -- this is the exact round-trip _on_calibration_ready()'s
+        # own docstring says must work.
+        window._calibration_screen.welcome_page.load_requested.emit()
+
+        assert window._stack.currentWidget() is window._live_view
+        assert window._live_view is not None
+        assert window._live_view is not first_live_view
+        assert window._camera_stream is not first_camera_stream
+        assert window._camera_stream.is_running is True

@@ -673,7 +673,9 @@ against a placeholder (not real) bundle — see each script's own docstring.
   re-acquisition), and combines the results (see below).
 - **`app.py`'s `MainWindow`** owns the one shared `CameraStream` both downstream screens are built around:
   builds it via `build_camera_stream()` and **starts it** in `_on_calibration_ready()` (see the bug note
-  below), stops it again in `closeEvent()`.
+  below), stops it again in `closeEvent()` -- and also in `_on_back_to_calibration_requested()`, wired to
+  `LiveViewWidget`'s "Back to Calibration" button, which fully tears down both downstream screens and
+  returns to `CalibrationScreen` (see the to-do list entry below for why "fully," not just hidden).
 
 **Bug found and fixed during the end-to-end integration pass**: `build_camera_stream()` explicitly does
 not start the stream it returns ("callers own stream lifecycle" — see its own docstring), and
@@ -685,6 +687,22 @@ started would have meant `get_latest_frame()` returning `None` forever and `coll
 indefinitely, in the real app, despite every screen's own isolated tests passing. Caught specifically by
 `tests/test_gui_end_to_end.py`'s cross-screen drive-through, which is the reason that test file exists
 as a distinct thing from the three per-screen files above.
+
+**Bug found and fixed post-merge, from real usage**: `LiveViewWidget._on_roi_changed()` (the
+`SpatialROIControl.roi_changed` handler) unconditionally called `_apply_roi_bounds()`, which repaints the
+scatter/error-bars/fit-curve/heatmap from `self._placeholder_*` — stale, randomly-generated,
+construction-time-only arrays. Since nothing gated this on whether real data was already on screen,
+narrowing/widening the spatial ROI after the real polling loop had already started showing genuine
+`analyze_shot()` results would replace them with fake placeholder data for one tick's worth of time (until
+the next real tick overwrote it again) — a visible flash/jump to an unrelated, uncalibrated-looking beam
+pattern every time the ROI control was touched. Fixed with a `self._displayed_real_data` flag, flipped
+permanently `False -> True` the first time `_display_shot_result()` draws a real result: once set,
+`_on_roi_changed()` only rescales the plot's y-range (`setRange(...)`) and leaves the data-bearing items
+alone, letting the next real tick reflect the new ROI naturally rather than repainting fake data as an
+intermediate step. `_apply_roi_bounds()` itself is unchanged and still correct for its one remaining
+caller — before any real tick has ever landed (construction, or a stream that hasn't produced a frame
+yet), there's nothing real to preserve, so cropping the placeholder to the new bounds is still the right
+behavior.
 
 **Exposure/gain consistency between calibration and live view, now built** (the gap: nothing used to
 record what exposure/gain a calibration was captured under anywhere the live-view screen could see it,
@@ -988,12 +1006,19 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
 - **GUI: fixed (non-responsive) layout across all pages.** Currently the calibration screen and live
   view both reflow on window resize (stretch factors, expanding layouts) — needs a pass to make every
   page hold a fixed layout tuned for its default window size regardless of resizing. See §5.
-- **GUI live view: `recalibration_requested` signal still unconnected.** Emitted for real by the
-  drift-detection logic in §5, but `MainWindow` has no "go back to CalibrationScreen from LiveViewWidget"
-  navigation path yet to receive it — deliberately left unconnected during the real-backend wiring pass
-  rather than building new cross-screen navigation as an unplanned extension of that work. The in-widget
-  drift UI (hidden overlay, "N/A" side-panel, paused polling) already handles the drifted state on its
-  own without this signal going anywhere.
+- ~~**GUI live view: no way to navigate back to CalibrationScreen.**~~ **Done.** `LiveViewWidget` gained a
+  "Back to Calibration" button (`back_to_calibration_requested = Signal()`, placed in the side panel below
+  "Extended Measurement...", mirroring `ExtendedMeasurementScreen`'s own `back_requested`/`_back_button`
+  pattern). `MainWindow._on_back_to_calibration_requested()` stops the shared `CameraStream` (freeing it
+  for `CalibrationScreen`'s own dialogs — the one-camera-connection-at-a-time constraint means both can't
+  be connected at once) and **fully tears down** `LiveViewWidget`/`ExtendedMeasurementScreen` (removed from
+  `self._stack`, `deleteLater()`'d, references dropped) rather than just hiding them, since
+  `_on_calibration_ready()` can now genuinely fire more than once per `MainWindow` lifetime — completing
+  calibration again after navigating back builds a **fresh** `LiveViewWidget` and `CameraStream`, never
+  reusing or resurrecting the torn-down ones. `recalibration_requested` (emitted by the drift-detection
+  logic in §5) is still NOT auto-connected to this new back-navigation — that remains a deliberate, open
+  question (should a drift warning also auto-navigate the user back, or is the manual button enough now
+  that one exists?), not an oversight.
 - **Input validation pass**, GUI and CLI both -- not yet done anywhere. Numeric
   fields (exposure_us, gain_db, scale factor, ROI bounds once built, etc.) and
   CLI arguments currently rely on Qt's own spin-box range clamping or accept
