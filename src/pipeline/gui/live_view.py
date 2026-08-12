@@ -232,8 +232,9 @@ class _PowerOfTenAxisItem(pg.AxisItem):
     pyqtgraph's default plain-decimal "%g" formatting ("x0.001") -- see
     format_power_of_ten_superscript(). Used for the strip chart's left
     axis, where "Spatial Dispersion" has no physical SI unit to prefix
-    (px/nm), so pyqtgraph's default unit-prefix annotation is the only
-    place this scale factor is ever shown.
+    (mm/nm, a composite unit -- see _zeta_to_mm()), so pyqtgraph's default
+    unit-prefix annotation is the only place this scale factor is ever
+    shown.
     '''
 
     def labelString(self) -> str:
@@ -792,7 +793,7 @@ class LiveViewWidget(QWidget):
 
         form.addRow("Reduced Chi-Squared:", self._chi_squared_label)
         form.addRow("Coefficients:", self._coefficients_label)
-        form.addRow("Spatial Dispersion:", self._zeta_label)
+        form.addRow("Spatial Dispersion (mm/nm):", self._zeta_label)
         form.addRow("", self._zeta_note_label)
         form.addRow("Evaluated At:", self._evaluated_at_label)
 
@@ -1158,12 +1159,19 @@ class LiveViewWidget(QWidget):
         Pushes one successful analyze_shot() result into the scatter/
         error-bar/fit-curve/heatmap/strip-chart/side-panel widgets --
         the real-data counterpart to _apply_roi_bounds()'s placeholder
-        rendering. Fit coefficients/zeta stay in the pixel/wavelength
+        rendering. fit.coefficients stay in the raw pixel/wavelength
         units analyze_shot() itself reports (position_calibration is
-        deliberately not passed to analyze_shot() -- see module
-        docstring's unit note); only the scatter/error-bar/fit-curve y
-        values (physical position) go through self._convert_to_mm(), to
-        match the main plot's "Relative Physical Position (mm)" y-axis.
+        deliberately not passed to analyze_shot() -- see
+        calibration/spatial/'s scale-factor-only design); the
+        scatter/error-bar/fit-curve y values (physical position) go
+        through self._convert_to_mm(), to match the main plot's "Relative
+        Physical Position (mm)" y-axis, and zeta specifically (the one
+        coefficient given its own side-panel/strip-chart display) goes
+        through self._zeta_to_mm() at its own two call sites below and in
+        _update_fit_panel_from_result() -- valid because
+        ScaleFactorPositionCalibration.convert() is a pure linear scale,
+        so converting a slope this way is exactly as correct as
+        converting a position.
         '''
 
         self._displayed_real_data = True
@@ -1196,7 +1204,8 @@ class LiveViewWidget(QWidget):
         # docs/project_state.md's degree > 1 spec.
         eval_x = float(np.median(x_values))
         self._update_fit_panel_from_result(fit, eval_x)
-        self._append_strip_chart_point(float(fit.zeta(np.array([eval_x]))[0]))
+        zeta_mm, _ = self._zeta_to_mm(float(fit.zeta(np.array([eval_x]))[0]))
+        self._append_strip_chart_point(zeta_mm)
 
     def _update_fit_panel_from_result(
         self, fit: SpatialDispersionFitResult, eval_x: float
@@ -1224,8 +1233,9 @@ class LiveViewWidget(QWidget):
         self._formula_label.setText(fit_formula_html(fit.degree, self._wavelength_axis))
 
         eval_point = np.array([eval_x])
-        zeta_value = float(fit.zeta(eval_point)[0])
-        zeta_sigma = float(fit.sigma_zeta(eval_point)[0])
+        zeta_value_px = float(fit.zeta(eval_point)[0])
+        zeta_sigma_px = float(fit.sigma_zeta(eval_point)[0])
+        zeta_value, zeta_sigma = self._zeta_to_mm(zeta_value_px, zeta_sigma_px)
         self._zeta_label.setText(format_value_with_uncertainty(zeta_value, zeta_sigma))
         self._zeta_note_label.setText("")
 
@@ -1455,33 +1465,63 @@ class LiveViewWidget(QWidget):
         y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
         return microns_to_mm(y0), microns_to_mm(sigma_y0)
 
-    @staticmethod
-    def _build_placeholder_fits() -> dict[int, _PlaceholderFit]:
+    def _zeta_to_mm(
+        self, zeta_value: float, zeta_sigma: float | None = None
+    ) -> tuple[float, float | None]:
+
+        '''
+        Converts a fitted zeta (analyze_shot()'s native px/nm) to physical
+        units (mm/nm) via self._convert_to_mm(). Valid for a slope/
+        derivative, not just a position, because
+        ScaleFactorPositionCalibration.convert() is a pure linear scale
+        with no additive offset (see its own docstring) -- the same
+        combined_factor that turns a pixel position into a physical one
+        turns a px/nm slope into an mm/nm one.
+
+        zeta_sigma
+            None (degree > 1's placeholder "uncertainty not available"
+            case) passes through as None; a real sigma converts alongside
+            zeta_value.
+        '''
+
+        zeta_mm, sigma_mm = self._convert_to_mm(
+            np.array([zeta_value]), np.array([zeta_sigma if zeta_sigma is not None else 0.0])
+        )
+        return float(zeta_mm[0]), (float(sigma_mm[0]) if zeta_sigma is not None else None)
+
+    def _build_placeholder_fits(self) -> dict[int, _PlaceholderFit]:
 
         '''
         Fake side-panel numbers, illustrative of typical real-world
-        zeta magnitudes (px/nm-scale dispersion) once a real
-        SpatialDispersionFitResult exists. Deliberately NOT derived from
-        (and not numerically consistent with) the fake scatter/fit-curve/
-        heatmap drawn in _populate_placeholder_data(), which instead uses
-        its own simple "true" pixel-space trend -- both are placeholders
-        for different parts of the layout, not a single coherent fake
-        dataset.
+        zeta magnitudes (px/nm-scale dispersion, converted to mm/nm via
+        self._zeta_to_mm() -- matching the real-data path's units) once a
+        real SpatialDispersionFitResult exists. Deliberately NOT derived
+        from (and not numerically consistent with) the fake scatter/fit-
+        curve/heatmap drawn in _populate_placeholder_data(), which instead
+        uses its own simple "true" pixel-space trend -- both are
+        placeholders for different parts of the layout, not a single
+        coherent fake dataset. coefficients/coefficient_sigma stay in raw
+        px/nm^k units, unconverted, same scoping as the real-data path
+        (see _update_fit_panel_from_result()).
         '''
+
+        zeta_1, zeta_sigma_1 = self._zeta_to_mm(1.6e-3, 2.1e-5)
+        zeta_2, _ = self._zeta_to_mm(1.62e-3)
+        zeta_3, _ = self._zeta_to_mm(1.58e-3)
 
         return {
             1: _PlaceholderFit(
                 coefficients=(0.02, 1.6e-3),
                 coefficient_sigma=(0.01, 2.1e-5),
                 reduced_chi_squared=1.04,
-                zeta_value=1.6e-3,
-                zeta_sigma=2.1e-5,
+                zeta_value=zeta_1,
+                zeta_sigma=zeta_sigma_1,
             ),
             2: _PlaceholderFit(
                 coefficients=(0.01, 1.55e-3, 3.0e-7),
                 coefficient_sigma=(0.01, 3.0e-5, 1.0e-7),
                 reduced_chi_squared=0.98,
-                zeta_value=1.62e-3,
+                zeta_value=zeta_2,
                 zeta_sigma=None,
                 evaluated_at_column=EVALUATED_AT_COLUMN,
             ),
@@ -1489,7 +1529,7 @@ class LiveViewWidget(QWidget):
                 coefficients=(0.01, 1.5e-3, 2.8e-7, -4.0e-10),
                 coefficient_sigma=(0.01, 4.0e-5, 1.5e-7, 6.0e-10),
                 reduced_chi_squared=0.97,
-                zeta_value=1.58e-3,
+                zeta_value=zeta_3,
                 zeta_sigma=None,
                 evaluated_at_column=EVALUATED_AT_COLUMN,
             ),

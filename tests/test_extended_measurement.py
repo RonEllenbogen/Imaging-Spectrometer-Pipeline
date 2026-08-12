@@ -52,6 +52,7 @@ from pipeline.gui.extended_measurement import (  # noqa: E402
     DEFAULT_N_SHOTS,
     ExtendedMeasurementScreen,
 )
+from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM  # noqa: E402
 from pipeline.gui.live_view import DEFAULT_DEGREE, DEGREE_CHOICES  # noqa: E402
 
 from gui_fixture_helpers import (  # noqa: E402
@@ -533,6 +534,28 @@ class TestExtendedMeasurementRealMeasurement:
 
             combined = widget._compute_combined_result(1)
             assert combined.zeta_combined == pytest.approx(expected_zeta, rel=0.3)
+
+            # The displayed "Spatial Dispersion" label must be zeta_combined
+            # converted to physical units (mm/nm) via the widget's own
+            # ScaleFactorPositionCalibration -- not the raw px/nm value
+            # _compute_combined_result() returns internally. Recomputes the
+            # expected conversion independently (PIXEL_PITCH_UM * scale_factor,
+            # microns -> mm) rather than calling widget._zeta_to_mm() itself,
+            # so this actually exercises the wiring rather than restating it.
+            expected_zeta_mm, expected_sigma_mm = ScaleFactorPositionCalibration().convert(
+                np.array([combined.zeta_combined]), np.array([combined.sigma_zeta_combined])
+            )
+            expected_zeta_mm = float(expected_zeta_mm[0]) / MICRONS_PER_MM
+            expected_sigma_mm = float(expected_sigma_mm[0]) / MICRONS_PER_MM
+            assert widget._spatial_dispersion_label.text() == format_value_with_uncertainty(
+                expected_zeta_mm, expected_sigma_mm
+            )
+            # Sanity check this isn't just approving whatever the raw px/nm
+            # text would already have been -- the conversion factor here
+            # (PIXEL_PITCH_UM * 1.5 / 1000 ~ 0.005) is nowhere near 1.
+            assert widget._spatial_dispersion_label.text() != format_value_with_uncertainty(
+                combined.zeta_combined, combined.sigma_zeta_combined
+            )
         finally:
             stream.stop()
 
