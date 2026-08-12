@@ -130,6 +130,13 @@ class CameraStream:
         (see CameraBackend.configure()'s docstring) -- so every FrameData
         grabbed by _run() afterward carries the true applied exposure, not
         a stale nominal one.
+
+        Also discards any frame left over in get_latest_frame() from a
+        previous run -- without this, a caller cycling stop()/reconfigure/
+        start() (e.g. conversion-gain's exposure sweep) can have its first
+        collect_n_frames() poll immediately return a frame the background
+        thread grabbed under the OLD settings just before stop() took
+        effect, silently mislabeling it as belonging to the new settings.
         '''
 
         if self.is_running:
@@ -152,6 +159,8 @@ class CameraStream:
         # Clear state left over from a previous start()/stop() cycle
         self._stop_event.clear()
         self._last_error = None
+        with self._frame_lock:
+            self._latest_frame = None
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

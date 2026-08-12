@@ -4,6 +4,7 @@ Test suite for CameraStream. Every test here runs against SyntheticBackend
 CameraStream itself never touches pypylon directly.
 """
 
+import threading
 import time
 
 import pytest
@@ -92,6 +93,39 @@ class _CloseTrackingBackend:
     def close(self) -> None:
         self.close_called = True
         self._wrapped.close()
+
+
+class _GatedBackend:
+
+    '''
+    Wraps a real CameraBackend, blocking every grab_one() call until
+    release() is called -- lets a test deterministically inspect
+    CameraStream state right after start(), before the background thread
+    can possibly have grabbed a frame under the new run.
+    '''
+
+    def __init__(self, wrapped: CameraBackend):
+        self._wrapped = wrapped
+        self._gate = threading.Event()
+
+    def connect(self) -> None:
+        self._wrapped.connect()
+
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str):
+        return self._wrapped.configure(exposure_us, gain_db, pixel_format)
+
+    def grab_one(self, timeout_ms: int):
+        self._gate.wait()
+        return self._wrapped.grab_one(timeout_ms)
+
+    def close(self) -> None:
+        self._wrapped.close()
+
+    def release(self) -> None:
+        self._gate.set()
+
+    def reset_gate(self) -> None:
+        self._gate = threading.Event()
 
 
 def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_timeouts=None):
@@ -202,6 +236,42 @@ class TestCameraStreamLifecycle:
             assert entered is stream
             assert stream.is_running is True
         assert stream.is_running is False
+
+
+class TestStartClearsStaleFrame:
+    """
+    Regression test: start() must discard any frame left over from a
+    previous run. Without this, a caller cycling stop()/reconfigure()/
+    start() (e.g. conversion-gain calibration's exposure sweep) can have
+    its first collect_n_frames() poll immediately return a frame grabbed
+    under the settings that were in effect before this start() call,
+    mislabeling it as belonging to the new settings.
+    """
+
+    def test_get_latest_frame_is_none_immediately_after_restart(self):
+        gated = _GatedBackend(SyntheticBackend(seed=STREAM_SEED))
+        stream = _make_stream(backend=gated)
+
+        stream.start()
+        gated.release()
+        try:
+            first_frame = _wait_for_frame(stream)
+        finally:
+            stream.stop()
+        assert first_frame is not None
+
+        # Re-arm the gate so the restarted background thread can't grab
+        # anything until we explicitly release it below.
+        gated.reset_gate()
+        stream.start()
+        try:
+            assert stream.get_latest_frame() is None, (
+                "start() left a frame from the previous run visible before "
+                "the new run produced one of its own"
+            )
+        finally:
+            gated.release()
+            stream.stop()
 
 
 class TestCameraStreamFrameDelivery:
