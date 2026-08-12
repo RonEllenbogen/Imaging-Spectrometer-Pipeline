@@ -851,14 +851,17 @@ constraining layouts to hold their proportions rather than expand into extra spa
 - **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
   override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
 - **Spectral** — like spatial, offers a choice between two flows rather than one, via a two-mode
-  `SpectralCalibrationDialog`: "Capture from Lamp" (mirrors `BaselineDialog`'s single-phase form, uses
-  the curated Argon 751.46-842.46nm window, §3; needs an already-saved baseline+flat-field on disk first,
-  showing "Missing Sensor Calibration" if either is absent, and — as a side effect of calling
-  `run_spectral_calibration()` — builds and saves a real geometric-tilt calibration too, for free) and
-  "Manual Entry" (mirrors `SpatialCalibrationDialog`'s manual-value style, but for a variable-length
-  coefficient+sigma list, rebuilt per chosen degree, that calls `build_manual_spectral_calibration()`).
-  Both modes' Start/Save buttons call their real backend function, same as every other dialog in this
-  screen.
+  `SpectralCalibrationDialog`: "Capture from Lamp" (mirrors `BaselineDialog`'s single-phase form,
+  including its Auto/Manual exposure choice — added after a real lamp capture on the lab PC hit
+  `check_settings_match()` rejecting an auto-exposure-converged lamp frame (picked ~39ms for the dim
+  Argon lamp) against a baseline captured at a fixed 1000us, with no way to force the lamp exposure to
+  match short of dropping to the CLI; uses the curated Argon 751.46-842.46nm window, §3; needs an
+  already-saved baseline+flat-field on disk first, showing "Missing Sensor Calibration" if either is
+  absent, and — as a side effect of calling `run_spectral_calibration()` — builds and saves a real
+  geometric-tilt calibration too, for free) and "Manual Entry" (mirrors `SpatialCalibrationDialog`'s
+  manual-value style, but for a variable-length coefficient+sigma list, rebuilt per chosen degree, that
+  calls `build_manual_spectral_calibration()`). Both modes' Start/Save buttons call their real backend
+  function, same as every other dialog in this screen.
 - **Bad-pixel-map has no manual "create" option at all** — it runs automatically immediately after every
   flat-field capture (`build_bad_pixel_map()` + `save_bad_pixel_map()` chained onto
   `finish_flat_field_calibration()`), since it's derived purely from the flat field with no camera

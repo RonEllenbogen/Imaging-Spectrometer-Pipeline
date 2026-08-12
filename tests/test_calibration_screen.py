@@ -748,6 +748,40 @@ def test_spectral_dialog_capture_mode_has_frame_gain_and_degree_fields(qtbot):
     assert dialog.capture_degree_selector.currentData() == SPECTRAL_DEFAULT_DEGREE
 
 
+def test_spectral_dialog_defaults_to_auto_exposure(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.auto_exposure() is True
+    assert dialog.exposure_us() is None
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+
+
+def test_spectral_dialog_manual_exposure_enables_field_and_getters(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+
+    assert dialog.exposure_us_spin.isEnabled()
+    assert dialog.auto_exposure() is False
+
+    dialog.exposure_us_spin.setValue(1000.0)
+    assert dialog.exposure_us() == pytest.approx(1000.0)
+
+
+def test_spectral_dialog_switching_back_to_auto_resets_gain(qtbot):
+    dialog = SpectralCalibrationDialog()
+    qtbot.addWidget(dialog)
+    dialog.exposure_mode_combo.setCurrentText("Manual")
+    dialog.gain_db_spin.setValue(9.0)
+
+    dialog.exposure_mode_combo.setCurrentText("Auto")
+
+    assert dialog.gain_db_spin.value() == pytest.approx(0.0)
+    assert not dialog.exposure_us_spin.isEnabled()
+    assert dialog.exposure_us() is None
+
+
 def test_spectral_dialog_manual_degree_defaults_to_cubic_coefficient_rows(qtbot):
     dialog = SpectralCalibrationDialog()
     qtbot.addWidget(dialog)
@@ -1153,6 +1187,44 @@ class TestSpectralCalibrationDialogWiring:
         assert args[3] == tmp_path / DEFAULT_SPECTRAL_FILENAME
         assert args[4] == tmp_path / DEFAULT_GEOMETRIC_TILT_FILENAME
         assert not stream.is_running
+
+    def test_capture_mode_manual_exposure_threads_through_to_camera_stream(
+        self, qtbot, monkeypatch, tmp_path
+    ):
+        '''
+        Regression test: manual exposure_us must reach build_camera_stream()
+        unchanged, not get silently discarded in favor of auto-exposure --
+        see class docstring on SpectralCalibrationDialog for why this
+        specifically matters (a lamp frame's actual exposure_us has to be
+        able to match the loaded baseline's for check_settings_match() to
+        pass downstream in run_spectral_calibration()).
+        '''
+        monkeypatch.setattr(calibration_dialogs_module, "DEFAULT_ARTIFACT_DIR", tmp_path)
+        _save_sensor_artifacts(tmp_path)
+        stream = _synthetic_camera_stream()
+        build_calls = []
+
+        def _fake_build_camera_stream(*args, **kwargs):
+            build_calls.append((args, kwargs))
+            return stream
+
+        monkeypatch.setattr(calibration_dialogs_module, "build_camera_stream", _fake_build_camera_stream)
+        _record_calls(monkeypatch, calibration_dialogs_module, "run_spectral_calibration")
+
+        dialog = SpectralCalibrationDialog()
+        qtbot.addWidget(dialog)
+        dialog.exposure_mode_combo.setCurrentText("Manual")
+        dialog.exposure_us_spin.setValue(1000.0)
+        dialog.gain_db_spin.setValue(5.0)
+
+        dialog.start_button.click()
+
+        assert dialog.result() == QDialog.DialogCode.Accepted
+        assert len(build_calls) == 1
+        args, kwargs = build_calls[0]
+        assert args[0] == pytest.approx(5.0)
+        assert kwargs["exposure_us"] == pytest.approx(1000.0)
+        assert kwargs["auto_exposure"] is False
 
     def test_capture_mode_camera_error_shows_camera_dialog(self, qtbot, monkeypatch, tmp_path):
         monkeypatch.setattr(calibration_dialogs_module, "DEFAULT_ARTIFACT_DIR", tmp_path)
