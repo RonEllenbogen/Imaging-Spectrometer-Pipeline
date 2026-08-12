@@ -1175,3 +1175,12 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   unchanged/still pending, only the missing statistics underneath it are now built.
 - **Monte Carlo / bootstrap uncertainty validation** for `analysis/`
   (optional, time permitting) — see centroid uncertainty note in §2.
+- **Calibration dialogs: no persistent "finished" confirmation.** Each of the five
+  `calibration_dialogs.py` dialogs currently `accept()`s (closing itself) the instant its
+  underlying `build_*()`/`save_*()` call succeeds, with only a status-label text change (e.g.
+  `"Baseline calibration complete."`) visible for a moment before the dialog disappears —
+  there's nothing the user can look at afterward to be sure the capture actually finished
+  successfully, as opposed to the dialog just closing for some other reason. Requested: a
+  clearer "calibration complete" indication (e.g. holding the dialog open on an explicit
+  success state with its own "Close" button, or a brief confirmation message) so the user
+  knows it's safe to close the dialog and move on.
