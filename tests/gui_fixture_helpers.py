@@ -76,6 +76,29 @@ def _frame(value: float, exposure_us: float = FIXTURE_EXPOSURE_US, frame_id: int
     )
 
 
+def _noisy_frame(
+    value: float, rng: np.random.Generator,
+    exposure_us: float = FIXTURE_EXPOSURE_US, frame_id: int = 0,
+) -> FrameData:
+    '''
+    A FrameData at the given mean value with small seeded per-pixel noise --
+    unlike _frame(), which is bit-for-bit uniform and so produces a sample
+    standard deviation of exactly zero across a frame stack (every pixel has
+    an identical value in every frame). build_baseline()'s background_sigma
+    is that per-pixel sample std, and
+    preprocessing/steps/signal_threshold.py requires it to be strictly
+    positive -- so the dark/illuminated source frames need this instead of
+    _frame() for the resulting CalibrationSet to be usable by
+    run_preprocessing().
+    '''
+    noise = rng.normal(loc=0.0, scale=0.6, size=CANONICAL_SHAPE)
+    image = np.clip(np.round(value + noise), 0, 255).astype(np.uint8)
+    return FrameData(
+        image=image, frame_id=frame_id, timestamp=time.monotonic(),
+        exposure_us=exposure_us, gain_db=FIXTURE_GAIN_DB,
+    )
+
+
 def _conversion_gain_frames_by_exposure() -> dict[float, list[FrameData]]:
     '''
     A frames_by_exposure sweep with an EXACT, known variance_ADU =
@@ -112,8 +135,9 @@ def build_realistic_calibration_bundle() -> CalibrationBundle:
     CalibrationBundle
     '''
 
-    illuminated = [_frame(150.0, frame_id=i) for i in range(3)]
-    dark = [_frame(10.0, frame_id=i) for i in range(3)]
+    rng = np.random.default_rng(seed=0)
+    illuminated = [_noisy_frame(150.0, rng, frame_id=i) for i in range(3)]
+    dark = [_noisy_frame(10.0, rng, frame_id=i) for i in range(3)]
 
     baseline_result, baseline_record = build_baseline(dark)
     flat_field, flat_field_record = build_flat_field(illuminated, dark)
