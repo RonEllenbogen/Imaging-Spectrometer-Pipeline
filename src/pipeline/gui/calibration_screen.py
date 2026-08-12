@@ -5,38 +5,31 @@ creating new ones, per calibration type (not all-or-nothing), then hands
 off the resulting calibration objects to whatever opens the main window
 next (see CalibrationScreen's class docstring for the hand-off contract).
 
-PHASE 1 (VISUAL SKELETON) NOTE: CreatePage's cards open the real dialogs
-from calibration_dialogs.py, but those dialogs' own accept-paths are still
-placeholder -- nothing acquires a frame, builds an artifact, or touches
-calibration_artifacts/ on disk yet. A follow-up pass wires:
-  - CreatePage's dialog accept-paths to cli/calibration.py's
-    build_camera_stream() + calibration/sensor's run_baseline_calibration()/
-    capture_dark_frames()/capture_illuminated_frames()/
-    finish_flat_field_calibration() (chaining build_bad_pixel_map()+
-    save_bad_pixel_map() automatically onto the latter) /
-    run_conversion_gain_calibration(), calibration/spatial's
-    save_scale_factor(), and calibration/spectral's
-    run_spectral_calibration()/build_manual_spectral_calibration().
-  - Camera-connection failures (CameraError and subclasses) to
-    calibration_dialogs.show_camera_error_dialog(); calibration-specific
-    failures (SettingsMismatchError, InvalidFlatFieldError,
-    InvalidConversionGainError, NoSignalError) to
-    calibration_dialogs.show_calibration_error_dialog(), leaving the
-    originating dialog open so the user can retry.
+CreatePage's cards open the real dialogs from calibration_dialogs.py, each
+of which now acquires real frames and builds/saves a real artifact under
+DEFAULT_ARTIFACT_DIR on its own accept path (see calibration_dialogs.py's
+module docstring) -- CreatePage itself only tracks, per calibration type,
+whether that dialog has ever been accepted (see CreatePage's own
+docstring), to gate "Continue to Main Window".
 
-WelcomePage's "Load Existing Calibrations" flow is fully wired, by
-contrast: clicking it immediately attempts to load every artifact from
-DEFAULT_ARTIFACT_DIR (baseline, flat field, bad-pixel map, conversion
-gain, spectral, spatial scale factor, geometric tilt) via
-CalibrationScreen._attempt_load_existing_calibrations(), with no
-intermediate review page. Success builds a CalibrationBundle and emits
-calibration_ready right away; failure (any of baseline/flat-field/
-bad-pixel-map/conversion-gain/spectral missing) shows an error dialog and
-leaves the user on WelcomePage. Two artifacts are allowed to be missing
-without failing the load: spatial's scale factor always falls back to a
-physically valid default, and geometric tilt (built alongside spectral
-only when it was captured from the lamp, not entered manually) is simply
-left unset on CalibrationSet -- see CalibrationBundle's own docstring.
+WelcomePage's "Load Existing Calibrations" flow and CreatePage's "Continue
+to Main Window" both end up calling the same method --
+CalibrationScreen._attempt_load_existing_calibrations() -- since every
+dialog in calibration_dialogs.py already saves to the exact paths that
+method reads from: re-reading from disk is simpler and more consistent
+than threading each dialog's in-memory result through a second code path.
+It attempts to load every artifact from DEFAULT_ARTIFACT_DIR (baseline,
+flat field, bad-pixel map, conversion gain, spectral, spatial scale
+factor, geometric tilt), with no intermediate review page. Success builds
+a CalibrationBundle and emits calibration_ready right away; failure (any
+of baseline/flat-field/bad-pixel-map/conversion-gain/spectral missing) or
+a baseline/conversion-gain gain_db mismatch shows an error dialog and
+leaves the user wherever they were (WelcomePage, or CreatePage for the
+"Continue" path). Two artifacts are allowed to be missing without failing
+the load: spatial's scale factor always falls back to a physically valid
+default, and geometric tilt (built alongside spectral only when it was
+captured from the lamp, not entered manually) is simply left unset on
+CalibrationSet -- see CalibrationBundle's own docstring.
 
 Bad-pixel-map is deliberately absent from CreatePage's card list -- it has
 no manual "create new" entry point anywhere in this screen (see
@@ -49,6 +42,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -279,7 +273,8 @@ class _CalibrationTypeCard(QFrame):
     '''
     One selectable calibration type on CreatePage: title, one-line
     description, and either an action button (enabled types) or a
-    disabled placeholder with an explanatory note (spectral only).
+    disabled placeholder with an explanatory note (see enabled below --
+    no card currently uses this).
 
     Parameters
     ----------
@@ -390,12 +385,37 @@ class CreatePage(QWidget):
     conversion gain, spatial, and spectral each open their own dialog from
     calibration_dialogs.py. Bad-pixel-map is intentionally not listed (see
     module docstring).
+
+    Tracks, per calibration type, whether its dialog has ever been
+    accepted this session (_baseline_done/_flat_field_done/
+    _conversion_gain_done/_spectral_done -- a dialog only calls accept()
+    once the real acquire-and-save call underneath it actually succeeded,
+    see calibration_dialogs.py) and enables continue_button once
+    baseline, flat field, conversion gain, and spectral are all done.
+    Spatial is deliberately not part of this gate -- it always has a
+    physically valid default (DEFAULT_SCALE_FACTOR), so there's nothing
+    the user is required to configure before continuing (see
+    calibration/spatial/calibrate.py's module docstring). Bad-pixel-map
+    is likewise not gated on directly -- it's built automatically as part
+    of flat-field calibration (see FlatFieldDialog's docstring).
+
+    continue_requested is emitted when the user clicks "Continue to Main
+    Window" (only reachable once every gated type is done) -- see
+    CalibrationScreen's own docstring for why its handler is the exact
+    same _attempt_load_existing_calibrations() WelcomePage uses, rather
+    than a second code path built from these dialogs' in-memory results.
     '''
 
     back_requested = Signal()
+    continue_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+
+        self._baseline_done = False
+        self._flat_field_done = False
+        self._conversion_gain_done = False
+        self._spectral_done = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACING_LARGE, SPACING_LARGE, SPACING_LARGE, SPACING_LARGE)
@@ -477,32 +497,53 @@ class CreatePage(QWidget):
         self.continue_button = QPushButton("Continue to Main Window")
         self.continue_button.setProperty("role", "primary")
         self.continue_button.setEnabled(False)
-        self.continue_button.setToolTip("Create at least baseline and flat field first.")
-        # NOTE: once wired to actually emit calibration_ready (see module
-        # docstring's Phase-1 note), this must run the same
-        # check_conversion_gain_matches_baseline() gain-mismatch check
-        # _attempt_load_existing_calibrations() does below, before proceeding.
+        self.continue_button.setToolTip(
+            "Create baseline, flat field, conversion gain, and spectral calibrations first."
+        )
+        self.continue_button.clicked.connect(self.continue_requested)
         layout.addWidget(self.continue_button)
+
+    def _update_continue_button(self) -> None:
+        '''Enables continue_button once every gated calibration type has
+        been created this session -- see class docstring for which types
+        gate it and why.'''
+        ready = (
+            self._baseline_done
+            and self._flat_field_done
+            and self._conversion_gain_done
+            and self._spectral_done
+        )
+        self.continue_button.setEnabled(ready)
 
     def _open_baseline_dialog(self) -> None:
         dialog = BaselineDialog(self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._baseline_done = True
+            self._update_continue_button()
 
     def _open_flat_field_dialog(self) -> None:
         dialog = FlatFieldDialog(self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._flat_field_done = True
+            self._update_continue_button()
 
     def _open_conversion_gain_dialog(self) -> None:
         dialog = ConversionGainDialog(self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._conversion_gain_done = True
+            self._update_continue_button()
 
     def _open_spatial_dialog(self) -> None:
+        # Spatial is not part of the completion gate (see class docstring)
+        # -- no bookkeeping needed on top of the dialog's own save.
         dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR, self)
         dialog.exec()
 
     def _open_spectral_dialog(self) -> None:
         dialog = SpectralCalibrationDialog(self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._spectral_done = True
+            self._update_continue_button()
 
 
 class CalibrationScreen(QWidget):
@@ -526,10 +567,11 @@ class CalibrationScreen(QWidget):
     get_calibration_bundle() afterward -- it returns the same object, or
     None if neither path above has completed yet.
 
-    PHASE 1: CreatePage's "Continue to Main Window" is still a disabled
-    placeholder (see CreatePage) -- wiring it up is a follow-up pass, once
-    real build_*() calls replace CreatePage's dialogs' placeholder accept
-    paths (see module docstring). The load path above is fully wired.
+    CreatePage's "Continue to Main Window" reaches calibration_ready via
+    the exact same _attempt_load_existing_calibrations() call the
+    WelcomePage load path uses (see module docstring) -- CreatePage.
+    continue_requested is connected straight to it below, rather than to
+    a separate handler.
     '''
 
     calibration_ready = Signal(object)
@@ -557,6 +599,7 @@ class CalibrationScreen(QWidget):
         self.welcome_page.create_requested.connect(
             lambda: self._stack.setCurrentIndex(_PAGE_CREATE)
         )
+        self.create_page.continue_requested.connect(self._attempt_load_existing_calibrations)
         self.create_page.back_requested.connect(
             lambda: self._stack.setCurrentIndex(_PAGE_WELCOME)
         )
