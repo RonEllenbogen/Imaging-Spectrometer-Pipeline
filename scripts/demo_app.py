@@ -15,8 +15,13 @@ the stack), then CalibrationScreen.calibration_ready is emitted directly
 with a synthetic CalibrationBundle, the same hand-off MainWindow would
 receive from a real WelcomePage "Load Existing Calibrations" click (see
 calibration_screen.py's class docstring) -- MainWindow's
-_on_calibration_ready() handler runs for real from there, including its
-real (hardware-safe at construction time) build_camera_stream() call.
+_on_calibration_ready() handler runs for real from there, including
+starting the camera stream it builds. `pipeline.gui.app.build_camera_stream`
+is monkeypatched to a SyntheticBackend-driven CameraStream before that
+handler runs, so this script needs no physical camera attached; without
+that override, MainWindow would build (and now, since it also starts it,
+actually try to connect) a real PylonBackend stream and hang/error with
+no hardware present.
 
 Usage (opens one real window, requires a display):
     python scripts/demo_app.py
@@ -35,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline.acquisition import CANONICAL_SHAPE
+from pipeline.acquisition import CANONICAL_SHAPE, CameraStream, SyntheticBackend
 from pipeline.analysis import SensorNoiseModel
 from pipeline.calibration.shared import CalibrationRecord
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
@@ -49,6 +54,24 @@ DEFAULT_HEIGHT = 900
 
 
 # Functions
+
+def _build_synthetic_camera_stream(gain_db, *, exposure_us=None, auto_exposure=False):
+
+    '''
+    Stand-in for pipeline.cli.calibration.build_camera_stream() -- the
+    real one constructs a PylonBackend, which MainWindow now starts (see
+    module docstring), so without this override main() would try to
+    connect to real hardware. Mirrors demo_live_view.py's
+    build_placeholder_camera_stream() and every gui/ test file's own copy
+    of this same substitution.
+    '''
+
+    return CameraStream(
+        exposure_us=exposure_us if exposure_us is not None else 2000.0,
+        gain_db=gain_db, pixel_format="Mono8", timeout_ms=5000,
+        backend=SyntheticBackend(seed=0),
+    )
+
 
 def build_placeholder_calibration_bundle():
 
@@ -107,10 +130,13 @@ def main() -> None:
     # (e.g. by a test) without requiring a QApplication to exist yet --
     # same rationale as demo_live_view.py's own main().
     from PySide6.QtWidgets import QApplication
+    import pipeline.gui.app as app_module
     from pipeline.gui.app import MainWindow
     from pipeline.gui.live_view import DEGREE_CHOICES
 
     app = QApplication.instance() or QApplication([])
+
+    app_module.build_camera_stream = _build_synthetic_camera_stream
 
     window = MainWindow()
     window.setWindowTitle("Imaging Spectrometer Pipeline (placeholder calibrations)")
@@ -125,6 +151,15 @@ def main() -> None:
     )
 
     if args.screenshot:
+        # live_view's real QTimer polling loop only fires while the Qt
+        # event loop is running -- app.exec() never runs in this branch,
+        # so without pumping events here the screenshot would still only
+        # show live_view's construction-time placeholder paint, not a
+        # real polled-and-analyzed frame.
+        for _ in range(10):
+            app.processEvents()
+            time.sleep(0.05)
+
         args.output_dir.mkdir(parents=True, exist_ok=True)
         for name, screen in (
             ("live_view", window._live_view),

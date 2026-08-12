@@ -1,11 +1,13 @@
 """
 Opens the calibration screen and the live-view screen together, each as
-its own real window, in their current in-development states -- for
-reviewing both screens interactively in one run rather than launching
-each by hand. LiveViewWidget is built with placeholder/synthetic
-calibration objects (assembling them for real is the calibration
-screen's job, not this script's -- see live_view.py's module docstring);
-CalibrationScreen needs no such inputs, since it's what produces them.
+its own real window -- for reviewing both interactively in one run
+rather than launching each by hand. LiveViewWidget is built with
+placeholder/synthetic calibration objects (assembling them for real is
+the calibration screen's job, not this script's -- see live_view.py's
+module docstring) around a real, started SyntheticBackend-driven
+CameraStream, so its real polling loop actually has synthetic frames to
+show, not just its construction-time placeholder paint. CalibrationScreen
+needs no such inputs, since it's what produces them.
 
 Usage (opens two real windows, requires a display):
     python scripts/demo_live_view.py
@@ -64,12 +66,16 @@ def build_placeholder_calibration_set() -> CalibrationSet:
 
 def build_placeholder_camera_stream() -> CameraStream:
 
-    '''A CameraStream over SyntheticBackend -- not started; held, not polled, by the widget in this phase.'''
+    '''A CameraStream over SyntheticBackend, started -- LiveViewWidget's
+    real polling loop reads from it via get_latest_frame(), so it needs
+    to actually be producing frames, not just constructed.'''
 
-    return CameraStream(
+    stream = CameraStream(
         exposure_us=2000.0, gain_db=0.0, pixel_format="Mono8", timeout_ms=5000,
         backend=SyntheticBackend(seed=0),
     )
+    stream.start()
+    return stream
 
 
 def main() -> None:
@@ -115,6 +121,15 @@ def main() -> None:
     live_view._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(args.degree))
 
     if args.screenshot:
+        # live_view's real QTimer polling loop only fires while the Qt
+        # event loop is running -- app.exec() never runs in this branch,
+        # so without pumping events here the screenshot would still only
+        # show live_view's construction-time placeholder paint, not a
+        # real polled-and-analyzed frame.
+        for _ in range(10):
+            app.processEvents()
+            time.sleep(0.05)
+
         args.output_dir.mkdir(parents=True, exist_ok=True)
         for name, widget in (("calibration_screen", calibration_screen), ("live_view", live_view)):
             output_path = args.output_dir / f"{name}_skeleton_sample.png"
