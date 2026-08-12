@@ -9,19 +9,29 @@ deliberate cuts) — it is not maintained going forward. Consult it for that
 historical detail; consult this file for where things currently stand and
 what's next.
 
-## 0. Current focus (as of 2026-08-10)
+## 0. Current focus (as of 2026-08-12)
 
-A real calibration session is in progress on the lab PC (Windows), driven entirely through the CLI
-(§4) — baseline, flat-field, bad-pixel-map, conversion-gain, spectral-capture (geometric tilt is now
-built and saved automatically as part of this step, from the same lamp frames -- see §3/§4), in that
-order (spatial is a manual value entry, not part of this session), followed by a **second** `baseline`
-run at whatever exposure/gain the actual spatial-chirp measurement will use (likely very different from
-the lamp-calibration settings above -- `run_preprocessing()`'s `check_settings_match()` will reject a
-baseline tagged with the wrong settings, so this second capture is required, not optional, and should be
-saved to a different path than the first). A published guide walks through the exact commands and
-physical setup for each step; ask the user for the link if it's needed again, since artifact URLs aren't
-recorded in this repo -- it predates geometric tilt's CLI integration and should be checked/updated to
-include it.
+**The first real calibration session against the actual instrument is done.** Baseline, flat-field,
+bad-pixel-map, conversion-gain, and spectral-capture (which also built and saved geometric tilt, from
+the same lamp frames — see §3/§4) all ran for real on the lab PC and are saved to
+`data/calibration_artifacts_12.8.26/` (spatial stayed a manual value entry, not part of this session, per
+its own design — see §3). This is real captured instrument data, not synthetic — every package's test
+suite is still synthetic-only (§1), so this is the project's first evidence of how the real optics/sensor
+behave, not a replacement for the test suite. The **second** `baseline` run at whatever exposure/gain the
+actual spatial-chirp measurement will use (`run_preprocessing()`'s `check_settings_match()` rejects a
+baseline tagged with the wrong settings, so this remains required, not optional, and belongs at a
+different path than the first) has not happened yet. A published guide walks through the exact commands
+and physical setup for each step; ask the user for the link if it's needed again, since artifact URLs
+aren't recorded in this repo — it predates geometric tilt's CLI integration and should be checked/updated
+to include it.
+
+**Follow-up real-camera captures, once the session above was on disk.** `scripts/save_tilt_diagnostic_frames.py`
+(new — see §3) was run to inspect whether the newly-built geometric-tilt calibration actually straightens
+a real beam feature; its output (raw/corrected/uncorrected/diff frames, `.npy` + percentile-stretched
+`.png`) is saved under `data/diagnostic/geometric_tilt_correction/`. A separate batch of 15 raw `.bmp`
+frames (5 positions × 3 repeats, unprocessed — no script in this repo reads them yet) was also captured to
+`data/diagnostic/spatial_calibration_12.8.26/`; purpose and next step (if any) not yet recorded here, ask
+the user before assuming what it's for.
 
 The repo is pushed to a **public** GitHub remote (`origin` = `RonEllenbogen/Imaging-Spectrometer-
 Pipeline`) — the tooling-mention policy documented in `CLAUDE.md`'s "Conventions" section applies to
@@ -52,7 +62,7 @@ only tested via a throwaway venv, not a real second machine, until this lab sess
 | `calibration/shared/`, `calibration/spatial/` | Complete, tested (synthetic only) — see §3 |
 | `calibration/spectral/` | Complete, tested (synthetic only) — `line_matching.py` now built (Argon lamp), see §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
-| `cli/` | Calibration subcommands complete, import/argparse-tested — real hardware paths unverified — see §4 |
+| `cli/` | Calibration subcommands complete, import/argparse-tested — now exercised end-to-end against real hardware too, see §4 |
 | `gui/` | Fully wired to real acquisition/calibration/analysis calls, tested offscreen (`SyntheticBackend`) — see §5 |
 | `main.py` | Not started |
 
@@ -543,6 +553,19 @@ derivations (θ_m(800nm)≈−12.8°, full 1920-column sensor spans ~108nm).
   pre-existing `CalibrationSet` construction site keeps working unchanged) and applied in
   `run_preprocessing()`'s correction order right after bad-pixel masking, before signal-threshold
   masking.
+- **`scripts/save_tilt_diagnostic_frames.py`** (new) — a real-camera diagnostic tool, written to answer
+  the reproducibility question above directly against a real beam rather than by comparing two tilt
+  calibrations to each other: grabs real frames and preprocesses each one twice, once through the full
+  pipeline with `apply_geometric_tilt_correction()` applied (`CalibrationSet.geometric_tilt` populated)
+  and once with it skipped (`geometric_tilt=None`, everything else identical), saving raw/corrected/
+  uncorrected/diff images (`.npy` float64 + a percentile-stretched `.png` for quick viewing) plus a
+  `summary.txt`. Loads baseline/flat-field/bad-pixel-map/geometric-tilt the same way
+  `gui/calibration_screen.py`'s `WelcomePage` does (same `load_*()` calls, same default filenames), so it
+  exercises the identical on-disk artifacts a real session would use, not a re-derived approximation. It
+  doesn't test whether the correction *runs* (already confirmed by `run_preprocessing()`'s own code path)
+  — it's for inspecting whether the measured `row_shift` curve is accurate enough to actually straighten a
+  real beam feature. First real output is saved to `data/diagnostic/geometric_tilt_correction/` (§0);
+  findings not yet folded back into this section.
 - `spectral/workflow.py`'s `run_spectral_calibration()` — fully wired: acquires `n_frames` lamp frames,
   builds a `GeometricTiltResult` from those same raw frames (before any other preprocessing --
   `build_geometric_tilt()` does its own per-line background handling) and saves it to a caller-supplied
@@ -639,16 +662,35 @@ true applied exposure regardless of which path configured it.
 deliberately no silent default, unlike the GUI's own "Auto" preset (§5), which is a convenience default
 for a different, less explicit context.
 
+**Bug found and fixed: `CameraStream.start()` could hand back a frame grabbed under the OLD settings
+after a stop/reconfigure/restart cycle.** Surfaced as exposure-sweep leakage — `run_conversion_gain_calibration()`'s
+per-level stop/reconfigure/start loop (this section, above) calls `collect_n_frames()` immediately after
+each `start()`, and `get_latest_frame()` was returning whatever `FrameData` the background thread had
+grabbed *just before* the preceding `stop()` took effect, still sitting in `_latest_frame` from the
+previous exposure level — silently mislabeling a frame as belonging to the new settings when it was
+actually captured under the old ones. `ExtendedMeasurementScreen`'s own reconfigure-then-run cycle (§5)
+and this diagnostic script's `--auto-exposure` capture (§0) go through the identical `stop()`/`start()`
+sequence, so they were equally exposed even though this was found via the conversion-gain sweep
+specifically. Fixed in `CameraStream.start()`: `_latest_frame` is now explicitly cleared (under
+`_frame_lock`) as part of the same "clear state left over from a previous start()/stop() cycle" step that
+already reset `_stop_event`/`_last_error` — so every caller's first `get_latest_frame()`/`collect_n_frames()`
+poll after `start()` now genuinely blocks until a fresh frame under the new settings has been grabbed,
+rather than risking a stale one leaking through.
+
 `tests/test_cli.py` (new) covers argument parsing for every subcommand (including the mutual-exclusion
 rule on `baseline`/`flat-field`'s new flags, and confirming `conversion-gain` does NOT accept
 `--exposure-us`) — the CLI previously had no dedicated test file at all; the "argparse-tested" status in
 this section's own history was verified manually via `--help`, not via committed tests.
 
-No hardware-connected code path had been exercised against a real camera as of this section's last
-rewrite — everything above was verified via imports, argparse `--help`, the CLI's own new test file, and
-the existing synthetic-only test suite. **A real lab session against the actual camera is now in
-progress** (§0) — update this paragraph with what that session actually found once it's done, rather than
-leaving this claim stale.
+**Every hardware-connected code path has now been exercised against the real camera, not just imports and
+argparse `--help`.** `baseline`/`flat-field`/`bad-pixel-map`/`conversion-gain`/`spectral-capture` all ran
+for real on the lab PC and produced the artifacts saved to `data/calibration_artifacts_12.8.26/` (§0) —
+the first time any of this CLI's real-hardware paths (as opposed to `SyntheticBackend`) had run at all.
+No CLI-layer bugs were found in the process; the two real issues that session did surface —
+`CameraStream.start()` leaking a stale frame across an exposure-sweep reconfigure, and
+`check_settings_match()` rejecting an auto-exposure-converged lamp frame against a fixed-exposure
+baseline — were both acquisition/GUI-layer, not CLI-layer, and are documented where they were fixed (this
+section, above, and §5's `SpectralCalibrationDialog` note respectively).
 
 `pyproject.toml` (previously empty) now declares `numpy`/`scipy`/`pyyaml`/`pypylon` as real install
 dependencies, so `pip install -e .` alone is enough to run this CLI on a fresh checkout — no more
@@ -721,7 +763,16 @@ against a placeholder (not real) bundle — see each script's own docstring.
   once baseline/flat-field/conversion-gain/spectral are all done (spatial isn't gated — it always has a
   valid default); "Continue" reuses the exact same `_attempt_load_existing_calibrations()` re-read-from-
   disk path `WelcomePage` uses, rather than threading each dialog's in-memory result through a second code
-  path.
+  path. Its per-type "done" flags now also **pre-mark** any type whose artifact is already found on disk
+  at construction time (`_mark_existing_calibrations()`, probing `DEFAULT_ARTIFACT_DIR` with the same
+  `load_*()` calls `WelcomePage` uses, each type independent — one missing file doesn't block detecting
+  the others), revealing an "Existing calibration found on disk." note on that type's card
+  (`_CalibrationTypeCard.mark_existing_on_disk()`) without changing the card's action button — re-running
+  it is still how the user recalibrates. Fixes a real gap: before this, the four gated flags were
+  session-only, so a user who'd already calibrated in an earlier app run, then closed and relaunched into
+  `CreatePage` (rather than `WelcomePage`'s "Load Existing Calibrations"), would have had to redo
+  perfectly good captures just to re-enable "Continue to Main Window" — the artifacts themselves always
+  persisted across restarts in `DEFAULT_ARTIFACT_DIR`, only the page's own flags didn't know that.
 - **`LiveViewWidget`** runs a real `QTimer` (`DEFAULT_UPDATE_INTERVAL_MS = 200`, ~5Hz, overridable) polling
   loop: each tick pulls `camera_stream.get_latest_frame()`, runs it through `run_preprocessing()` (using
   the live-updated ROI bounds from `SpatialROIControl`) and `analyze_shot()`, and pushes the result into
