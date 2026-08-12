@@ -5,24 +5,29 @@ single QStackedWidget, and is what makes this package independently
 launchable (python src/pipeline/gui/app.py) the same way every other
 gui/ screen already is via scripts/demo_live_view.py.
 
-Nothing about this wiring itself is a placeholder -- the page navigation
-and the real CameraStream construction below are real, matching the
-other two screens' own Phase-1 framing (see calibration_screen.py's and
-live_view.py's module docstrings): it's only CalibrationScreen's
-CreatePage-driven build path and LiveViewWidget/ExtendedMeasurementScreen's
-own internals that are still Phase-1 skeletons -- MainWindow just connects
-whatever real or placeholder state each screen currently hands off.
+Nothing about this wiring is a placeholder -- CalibrationScreen's load/
+create paths, LiveViewWidget's real-time polling loop, and
+ExtendedMeasurementScreen's acquire-and-combine flow are all real (see
+each module's own docstring). MainWindow's own job is narrower: page
+navigation, and owning the one shared CameraStream both downstream
+screens are built around (matching the project's
+one-camera-connection-at-a-time constraint).
 
 CalibrationScreen is built immediately, since it needs no inputs (it's
 what produces them). LiveViewWidget and ExtendedMeasurementScreen are
 both built lazily, once CalibrationBundle actually exists to construct
 them from: LiveViewWidget when calibration_ready first fires,
 ExtendedMeasurementScreen the first time LiveViewWidget's
-extended_measurement_requested fires. Both downstream screens are built
-around one shared CameraStream (see _on_calibration_ready), matching the
-project's one-camera-connection-at-a-time constraint -- MainWindow never
-calls start()/stop() on it itself; neither downstream widget polls it yet
-in this phase.
+extended_measurement_requested fires.
+
+MainWindow starts the shared CameraStream itself, in _on_calibration_ready,
+right after building it and before constructing LiveViewWidget -- neither
+downstream screen ever does this itself (LiveViewWidget's polling loop
+only ever reads via get_latest_frame(); ExtendedMeasurementScreen's own
+_maybe_reconfigure_camera_stream() stops/reconfigures/restarts it around a
+settings change, but assumes it was already running to begin with). It's
+stopped again in closeEvent(), so a running background acquisition thread
+never outlives the window.
 '''
 
 # Imports
@@ -86,6 +91,7 @@ class MainWindow(QMainWindow):
             gain_db=bundle.calibration_set.baseline_record.gain_db,
             exposure_us=bundle.calibration_set.baseline_record.exposure_us,
         )
+        self._camera_stream.start()
 
         self._live_view = LiveViewWidget(
             calibration_set=bundle.calibration_set,
@@ -127,6 +133,19 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(self._extended_measurement)
 
         self._stack.setCurrentWidget(self._extended_measurement)
+
+    def closeEvent(self, event) -> None:
+
+        '''
+        Stops the shared CameraStream's background acquisition thread
+        (if one was ever started -- CalibrationScreen may never have
+        reached calibration_ready) before the window closes, so it never
+        outlives the GUI.
+        '''
+
+        if self._camera_stream is not None and self._camera_stream.is_running:
+            self._camera_stream.stop()
+        super().closeEvent(event)
 
 
 # Functions
