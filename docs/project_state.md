@@ -259,6 +259,25 @@ object (scale factor or callable, pixel→physical position, with its own
 uncertainty) converts to physical units only if supplied; until
 `calibration/spatial/` exists, it never is.
 
+`calibration/spatial/` exists now (§3), but `analyze_shot()` still
+defaults to pixel units by design — `position_calibration` stays an
+opt-in parameter, not a new default, so every non-GUI caller
+(`scripts/`, `analysis/` tests) is unaffected. The GUI is the one caller
+that now opts in, but only for the "Spatial Dispersion" (ζ) display
+specifically, not the whole fit: `live_view.py`/`extended_measurement.py`
+each gained a `_zeta_to_mm()` helper that converts a fitted ζ (px/nm) to
+physical units (mm/nm) via the same `ScaleFactorPositionCalibration` the
+scatter/fit-curve y-values already went through — valid for a slope
+because `.convert()` is a pure linear scale with no additive offset, so
+scaling a derivative this way is exactly as correct as scaling a
+position. Everything ζ feeds into internally (`_recompute_fit_and_
+residuals()`'s redrawn fit line/residuals in `extended_measurement.py`,
+`combine_shots()`'s inputs) still uses the raw px/nm value — only the
+two on-screen labels (`live_view.py`'s side-panel field + rolling strip
+chart, `extended_measurement.py`'s combined-result field) show the
+converted one, each now suffixed "(mm/nm)" so the unit is explicit
+on-screen rather than implicit.
+
 **Result object shapes**:
 - `CentroidResult` (per frame) — arrays over valid columns: `columns`,
   `x0` (pixels), `sigma_x0` (TLW).

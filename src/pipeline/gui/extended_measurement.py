@@ -32,6 +32,11 @@ convention every real caller in this codebase already follows, e.g.
 scripts/analyze_raw_shot.py/scripts/measure_spatial_dispersion.py).
 self._position_calibration/_convert_to_mm() only convert already-computed
 pixel-unit results to mm for display, the same duality live_view.py uses.
+zeta_combined specifically -- the one value with its own side-panel
+display -- goes through the analogous _zeta_to_mm() at that one display
+call site only; every internal consumer (_recompute_fit_and_residuals(),
+which redraws the fit line/residuals against self._measurement_x0_px)
+keeps using the raw px/nm value returned by combine_shots().
 When no real wavelength calibration is loaded (self._wavelength_axis is
 None), _PixelColumnWavelengthAxis stands in for it so analyze_shot() still
 has something to fit against -- pixel column itself, mirroring this
@@ -692,7 +697,7 @@ class ExtendedMeasurementScreen(QWidget):
             widget.setFont(label_font)
 
         form.addRow("N Shots:", self._n_shots_label)
-        form.addRow("Spatial Dispersion:", self._spatial_dispersion_label)
+        form.addRow("Spatial Dispersion (mm/nm):", self._spatial_dispersion_label)
         form.addRow("Reduced Chi-Squared:", self._reduced_chi_squared_label)
         form.addRow("Evaluate At:", self._evaluated_at_spin)
         form.addRow("Evaluated At:", self._evaluated_at_label)
@@ -947,9 +952,8 @@ class ExtendedMeasurementScreen(QWidget):
         combined = self._compute_combined_result(degree)
 
         self._n_shots_label.setText(str(combined.n_shots))
-        self._spatial_dispersion_label.setText(
-            format_value_with_uncertainty(combined.zeta_combined, combined.sigma_zeta_combined)
-        )
+        zeta_mm, zeta_sigma_mm = self._zeta_to_mm(combined.zeta_combined, combined.sigma_zeta_combined)
+        self._spatial_dispersion_label.setText(format_value_with_uncertainty(zeta_mm, zeta_sigma_mm))
         # combine_shots() doesn't expose reduced chi-squared as its own
         # field (see combination.py) -- but it's recoverable exactly from
         # the two sigmas it does return, since weighted_scatter/(n_shots-1)
@@ -1066,6 +1070,24 @@ class ExtendedMeasurementScreen(QWidget):
 
         y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
         return microns_to_mm(y0), microns_to_mm(sigma_y0)
+
+    def _zeta_to_mm(self, zeta_value: float, zeta_sigma: float) -> tuple[float, float]:
+
+        '''
+        Converts a combined zeta (px/nm, combine_shots()'s native unit)
+        to physical units (mm/nm) via self._convert_to_mm() -- valid for
+        a slope, not just a position, because
+        ScaleFactorPositionCalibration.convert() is a pure linear scale
+        with no additive offset (see its own docstring). Display-only:
+        callers must keep using the raw px/nm zeta_combined for
+        _recompute_fit_and_residuals(), which needs it in
+        analyze_shot()'s native units to match self._measurement_x0_px.
+        Identical to LiveViewWidget's helper of the same name, minus the
+        None-sigma case (combine_shots() always returns a real sigma).
+        '''
+
+        zeta_mm, sigma_mm = self._convert_to_mm(np.array([zeta_value]), np.array([zeta_sigma]))
+        return float(zeta_mm[0]), float(sigma_mm[0])
 
 
 # Functions

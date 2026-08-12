@@ -41,7 +41,7 @@ from PySide6.QtWidgets import QGroupBox  # noqa: E402
 from pipeline.acquisition import (  # noqa: E402
     CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
 )
-from pipeline.analysis import SensorNoiseModel  # noqa: E402
+from pipeline.analysis import SensorNoiseModel, SpatialDispersionFitResult  # noqa: E402
 from pipeline.calibration.sensor import ConversionGainRecord  # noqa: E402
 from pipeline.calibration.shared import (  # noqa: E402
     CalibrationRecord,
@@ -68,6 +68,7 @@ from pipeline.gui.live_view import (  # noqa: E402
     heatmap_x_extent,
     wavelength_axis_label,
 )
+from pipeline.gui.formatting import format_value_with_uncertainty  # noqa: E402
 from pipeline.gui.roi_control import SpatialROIControl  # noqa: E402
 
 # gui_fixture_helpers.py is a plain sibling module in this directory (no
@@ -391,6 +392,67 @@ class TestLiveViewWidgetSmoke:
 # live_view.py -- Phase-1 review refinements (colormap, mm conversion,
 # background styling, formatting, formula box, evaluated-at note)
 # ---------------------------------------------------------------------------
+
+class TestZetaPhysicalUnits:
+
+    '''
+    Regression coverage for _zeta_to_mm(): "Spatial Dispersion" must be
+    displayed in physical units (mm/nm, via self._position_calibration),
+    not analyze_shot()'s native px/nm -- see live_view.py's
+    _display_shot_result()/_update_fit_panel_from_result() docstrings.
+    '''
+
+    def _expected_mm(self, value_px, sigma_px=0.0):
+        value_um, sigma_um = ScaleFactorPositionCalibration().convert(
+            np.array([value_px]), np.array([sigma_px])
+        )
+        return float(value_um[0]) / MICRONS_PER_MM, float(sigma_um[0]) / MICRONS_PER_MM
+
+    def test_zeta_to_mm_matches_position_calibration_scale(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        zeta_mm, sigma_mm = widget._zeta_to_mm(1.0, 0.1)
+        expected_zeta_mm, expected_sigma_mm = self._expected_mm(1.0, 0.1)
+        assert zeta_mm == pytest.approx(expected_zeta_mm)
+        assert sigma_mm == pytest.approx(expected_sigma_mm)
+        # Sanity check this is a real conversion, not an accidental no-op --
+        # PIXEL_PITCH_UM * DEFAULT_SCALE_FACTOR / MICRONS_PER_MM is nowhere
+        # near 1.
+        assert zeta_mm != pytest.approx(1.0)
+
+    def test_zeta_to_mm_preserves_none_sigma(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        _, sigma_mm = widget._zeta_to_mm(1.0, None)
+        assert sigma_mm is None
+
+    def test_update_fit_panel_from_result_displays_converted_zeta(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        zeta_px, sigma_px = 2.0, 0.05
+        fit = SpatialDispersionFitResult(
+            degree=1,
+            coefficients=np.array([500.0, zeta_px]),
+            coefficient_sigma=np.array([1.0, sigma_px]),
+            coefficient_covariance=np.diag([1.0, sigma_px ** 2]),
+            reduced_chi_squared=1.0,
+            residuals=np.zeros(3),
+            normalized_residuals=np.zeros(3),
+        )
+
+        widget._update_fit_panel_from_result(fit, eval_x=750.0)
+
+        expected_zeta_mm, expected_sigma_mm = self._expected_mm(zeta_px, sigma_px)
+        assert widget._zeta_label.text() == format_value_with_uncertainty(
+            expected_zeta_mm, expected_sigma_mm
+        )
+
+    def test_placeholder_zeta_is_already_in_mm(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        # _build_placeholder_fits() hardcodes 1.6e-3 (px/nm) for degree 1
+        # before conversion -- see live_view.py.
+        expected_zeta_mm, expected_sigma_mm = self._expected_mm(1.6e-3, 2.1e-5)
+        placeholder = widget._placeholder_fits[1]
+        assert placeholder.zeta_value == pytest.approx(expected_zeta_mm)
+        assert placeholder.zeta_sigma == pytest.approx(expected_sigma_mm)
+
 
 class TestLiveViewWidgetRefinements:
 
