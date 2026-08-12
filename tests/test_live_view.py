@@ -38,7 +38,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QGroupBox  # noqa: E402
 
-from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
+from pipeline.acquisition import (  # noqa: E402
+    CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
+)
 from pipeline.analysis import SensorNoiseModel  # noqa: E402
 from pipeline.calibration.sensor import ConversionGainRecord  # noqa: E402
 from pipeline.calibration.shared import (  # noqa: E402
@@ -904,6 +906,87 @@ class TestLiveViewRealUpdateLoop:
 
         assert widget._consecutive_skips >= MAX_CONSECUTIVE_SKIPS
         assert any("error displaying frame" in message for message in caplog.messages)
+
+    def test_camera_disconnect_shows_warning_and_freezes_overlay(
+        self, qtbot, started_camera_stream, monkeypatch
+    ):
+        # Regression test: a fatal CameraError (real camera disconnects,
+        # GigE hiccup, etc.) kills CameraStream's background thread, but
+        # never clears _latest_frame -- so get_latest_frame() would keep
+        # returning the same stale FrameData forever, and this tick loop
+        # would silently keep re-analyzing and redrawing it, indefinitely
+        # indistinguishable from a genuinely live but static feed. Forces
+        # a real fatal error the same way a real disconnect would (the
+        # backend's own grab_one() raising a non-timeout CameraError, not
+        # a hand-set last_error), and confirms the fix: a message box,
+        # the fit overlay hidden/"N/A", and -- critically -- the scatter
+        # data frozen at its pre-disconnect value, never touched again.
+        warning_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning",
+            lambda *a, **k: warning_calls.append(a),
+        )
+        widget = _make_real_live_view_widget(
+            qtbot, started_camera_stream, update_interval_ms=10,
+        )
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._scatter.getData()[0].size > 500, timeout=3000)
+
+        def _raise_fatal(*a, **k):
+            raise CameraConnectionError("device disconnected")
+
+        monkeypatch.setattr(started_camera_stream._backend, "grab_one", _raise_fatal)
+
+        qtbot.waitUntil(lambda: widget._camera_disconnected is True, timeout=3000)
+
+        assert started_camera_stream.is_running is False
+        assert started_camera_stream.last_error is not None
+        assert len(warning_calls) == 1
+        assert warning_calls[0][1] == "Camera Disconnected"
+        assert widget._chi_squared_label.text() == "N/A"
+        assert widget._zeta_label.text() == "N/A"
+        assert widget._scatter.isVisible() is False
+        assert widget._error_bars.isVisible() is False
+        assert widget._fit_curve.isVisible() is False
+
+        # Captured only now, once the disconnected state is confirmed
+        # entered -- one or more real ticks with genuinely new frames can
+        # legitimately land between patching grab_one() and the
+        # background thread actually hitting it and dying, so capturing
+        # "frozen" data any earlier would race against those. A few more
+        # real tick intervals from here on must NOT touch the scatter
+        # data -- confirms get_latest_frame()'s stale-forever return
+        # value is never fed through analysis/display again, not just
+        # that the overlay was hidden once.
+        frozen_x, frozen_y = widget._scatter.getData()
+        qtbot.wait(100)
+        after_x, after_y = widget._scatter.getData()
+        assert np.array_equal(after_x, frozen_x)
+        assert np.array_equal(after_y, frozen_y)
+
+    def test_never_started_stream_does_not_trigger_disconnected_state(self, qtbot, monkeypatch):
+        # Regression test for a real bug caught while building the fix
+        # above: is_running alone is ALSO False for a stream that was
+        # simply never started (the common, harmless case every other
+        # placeholder-mode test in this file already relies on) -- an
+        # earlier version of this check used is_running alone and fired
+        # _enter_camera_disconnected_state() (a real, unmocked
+        # QMessageBox.warning()) on every such widget, which crashed the
+        # whole test process. last_error (None here, since start() was
+        # never called at all) is what must gate it instead. Still mocks
+        # QMessageBox.warning defensively (this file's usual convention)
+        # in case of a regression -- fails loudly, not by hanging/crashing.
+        def _fail_if_called(*a, **k):
+            raise AssertionError(f"unexpected warning dialog: {a!r}")
+
+        monkeypatch.setattr("pipeline.gui.live_view.QMessageBox.warning", _fail_if_called)
+        widget = _make_live_view_widget(qtbot)
+
+        widget._on_timer_tick()
+
+        assert widget._camera_disconnected is False
 
     def test_settings_drift_pauses_real_updates(self, qtbot, started_camera_stream, monkeypatch):
         monkeypatch.setattr(

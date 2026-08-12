@@ -33,6 +33,22 @@ hidden, diagnostics read "N/A") rather than silently freezing on the last
 good frame; the raw heatmap still updates on a skip, since preprocessing
 itself succeeded -- only the fit failed for lack of columns.
 
+camera_stream.last_error becoming non-None mid-session (a fatal
+CameraError -- e.g. the camera physically disconnects -- see
+CameraStream's own docstring) is checked explicitly, every tick, before
+ever calling get_latest_frame() -- that call would otherwise keep
+returning the same stale FrameData forever (CameraStream never clears it
+once its background thread has died), silently re-analyzing and
+redrawing one frozen frame indefinitely with nothing but a small
+status-label text change to indicate it. last_error, not is_running alone
+-- is_running is also False for the harmless, common "never started yet"
+case, which must keep falling through to the ordinary no-frame-yet
+handling unchanged. Detected, this instead pops a message box and gives
+the fit overlay the same hidden/"N/A" treatment as the insufficient-
+signal state (see _enter_camera_disconnected_state()) -- takes priority
+over the settings-drift check below, since a dead camera
+makes drift a moot question.
+
 The Acquisition Settings side-panel section (exposure_us/gain_db spin
 boxes, pre-filled from the loaded baseline's capture settings) still does
 NOT reconfigure camera_stream -- editing either field only re-evaluates a
@@ -332,6 +348,7 @@ class LiveViewWidget(QWidget):
         # Real-loop state -- see module docstring and _on_timer_tick().
         self._consecutive_skips = 0
         self._insufficient_signal = False
+        self._camera_disconnected = False
         self._strip_chart_history: list[tuple[float, float]] = []
         self._pixel_column_wavelength_axis = _PixelColumnWavelengthAxis()
 
@@ -1019,16 +1036,42 @@ class LiveViewWidget(QWidget):
         '''
         self._update_timer's timeout slot -- see module docstring for the
         full per-tick flow and the drift/skip-counter interactions.
-        Deliberately swallows every expected failure mode itself (missing
-        frame, bad-frame/settings-mismatch preprocessing errors,
-        insufficient-column fit errors) rather than letting any of them
-        escape as an uncaught exception out of a Qt slot -- plus a broad
-        catch-all around _display_shot_result() specifically, as a last-
-        resort safety net for whatever *isn't* one of those expected
-        modes (see that call site's own comment for why).
+        Deliberately swallows every expected failure mode itself (a dead
+        camera stream, missing frame, bad-frame/settings-mismatch
+        preprocessing errors, insufficient-column fit errors) rather than
+        letting any of them escape as an uncaught exception out of a Qt
+        slot -- plus a broad catch-all around _display_shot_result()
+        specifically, as a last-resort safety net for whatever *isn't*
+        one of those expected modes (see that call site's own comment for
+        why).
         '''
 
         self._update_status_label()
+
+        if self._camera_stream.last_error is not None:
+            # last_error, not is_running alone -- is_running is ALSO False
+            # for a stream that was simply never started (a normal,
+            # common state, e.g. right at construction, or in several of
+            # this widget's own tests), which must keep falling through
+            # to the ordinary "no frame yet" handling below, unchanged.
+            # last_error is the same signal _update_status_label() already
+            # uses to distinguish a genuine fatal CameraError (background
+            # thread died -- see CameraStream's own docstring) from that
+            # harmless case, and from a clean stop() (also is_running=
+            # False, but last_error stays None). Without this distinction,
+            # get_latest_frame() would keep returning the same stale
+            # FrameData forever after a real fatal error (CameraStream
+            # never clears it on thread death), so it's checked BEFORE
+            # ever calling get_latest_frame(), not discovered by its
+            # absence. Takes priority over the settings-drift check below:
+            # a dead camera is the more fundamental problem, and "are the
+            # entered settings still trustworthy" doesn't matter if
+            # there's no live stream to apply them to.
+            if not self._camera_disconnected:
+                self._enter_camera_disconnected_state()
+            return
+        if self._camera_disconnected:
+            self._exit_camera_disconnected_state()
 
         if self._settings_drifted:
             # Untrusted calibrations against the entered settings -- see
@@ -1244,6 +1287,80 @@ class LiveViewWidget(QWidget):
         '''
 
         self._insufficient_signal = False
+        self._scatter.setVisible(True)
+        self._error_bars.setVisible(True)
+        self._fit_curve.setVisible(True)
+
+    def _enter_camera_disconnected_state(self) -> None:
+
+        '''
+        Entered the first tick after self._camera_stream.last_error
+        becomes non-None -- the background acquisition thread has exited
+        from a fatal CameraError (see CameraStream's own docstring: "any
+        other CameraError is fatal immediately"). Deliberately keyed on
+        last_error, not is_running alone: is_running is also False for
+        the ordinary "never started yet" case, which must NOT trigger
+        this (see _on_timer_tick()'s own comment -- an earlier version of
+        this check used is_running alone and wrongly fired on every
+        widget built around a not-yet-started stream, in tests and
+        potentially in real use before the first frame arrives). Without
+        this, get_latest_frame() would keep returning the same stale
+        FrameData forever (CameraStream never clears it on thread death),
+        and this tick loop would just keep re-analyzing and redrawing
+        that one frame indefinitely -- indistinguishable from a genuinely
+        live but momentarily static feed, except for the small status-
+        label text _update_status_label() already sets, easy to miss.
+
+        Pops a message box (like _enter_drifted_state()'s) so the
+        disconnect is impossible to miss, and hides the fit overlay +
+        "N/A"s the diagnostics -- the same visual treatment
+        _enter_insufficient_signal_state() gives low signal. The raw
+        heatmap is deliberately left showing its last frame, as a
+        reference of what the beam looked like right before the
+        disconnect, not blanked -- same reasoning as the insufficient-
+        signal state leaving it alone.
+
+        Nothing in this codebase currently restarts a dead CameraStream
+        from inside LiveViewWidget itself -- the real recovery path is
+        the "Back to Calibration" button, which tears this whole widget
+        down and MainWindow builds a fresh one around a newly-started
+        stream (see app.py's _on_back_to_calibration_requested()) -- so
+        this message names that path explicitly rather than implying a
+        fix is possible from here.
+        '''
+
+        self._camera_disconnected = True
+        self._chi_squared_label.setText("N/A")
+        self._coefficients_label.setText("N/A")
+        self._zeta_label.setText("N/A")
+        self._zeta_note_label.setText("")
+        self._evaluated_at_label.setText("")
+        self._scatter.setVisible(False)
+        self._error_bars.setVisible(False)
+        self._fit_curve.setVisible(False)
+
+        QMessageBox.warning(
+            self,
+            "Camera Disconnected",
+            f"The camera stream has stopped responding: {self._camera_stream.last_error}\n\n"
+            f"Reconnect the camera, then use \"Back to Calibration\" to rebuild the connection.",
+        )
+
+    def _exit_camera_disconnected_state(self) -> None:
+
+        '''
+        Defensive symmetry with _enter_camera_disconnected_state(),
+        mirroring _exit_insufficient_signal_state()'s same role. Nothing
+        currently makes self._camera_stream.last_error go back to None on
+        an already-disconnected stream within one LiveViewWidget's
+        lifetime (a fresh start() would clear it, but nothing calls
+        start() again from inside this widget -- see that method's own
+        docstring for the real recovery path), so this realistically
+        never runs today -- kept so this doesn't become a silent trap if
+        that ever changes.
+        '''
+
+        self._camera_disconnected = False
         self._scatter.setVisible(True)
         self._error_bars.setVisible(True)
         self._fit_curve.setVisible(True)

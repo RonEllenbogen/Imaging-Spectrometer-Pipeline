@@ -744,6 +744,35 @@ pass, and every `.stop()` call is safe by design regardless of stream state (`Py
 docstring: "safe to call in any state, including if connect() was never called or failed partway
 through").
 
+**A fourth real-camera gap, distinct from the three above: a disconnect mid-session while already on live
+view, not just at connection time.** Those three fixes cover *starting* the camera; nothing covered the
+camera dying *while already streaming*. `CameraStream`'s background thread, on a fatal `CameraError`
+(anything other than a tolerated transient `CameraTimeoutError`), sets `last_error` and exits -- but never
+clears `_latest_frame`. `get_latest_frame()` therefore keeps returning the same stale `FrameData` forever,
+and `LiveViewWidget._on_timer_tick()` had no check for this: it would have kept re-running that one stale
+frame through `run_preprocessing()`/`analyze_shot()` and redrawing it every tick, indefinitely --
+indistinguishable from a genuinely live but momentarily static feed, with only a small status-label text
+change (`_update_status_label()` already correctly showed `"Status: Camera error -- ..."`) as any
+indication. Fixed with a third explicit state, `_camera_disconnected`, mirroring `_settings_drifted`/
+`_insufficient_signal`'s existing pattern: checked every tick, before ever calling `get_latest_frame()`;
+hides the fit overlay and "N/A"s the diagnostics like the insufficient-signal state; pops a message box
+like the drift state, naming the "Back to Calibration" button as the actual recovery path (nothing
+restarts a dead stream from inside `LiveViewWidget` itself). The raw heatmap is deliberately left showing
+its last frame as a reference, not blanked -- same reasoning as the insufficient-signal state.
+
+**Bug caught and fixed while building the fix above, before it ever reached `main`.** The first version
+keyed this new state on `camera_stream.is_running` alone -- but `is_running` is *also* `False` for the
+ordinary, harmless "never started yet" case (true at construction, and for several existing tests'
+deliberately-unstarted streams), which must keep falling through to the pre-existing "no frame yet, skip
+silently" handling, not trigger a disconnect warning. Running the full suite with this bug present
+crashed the test process outright: an existing test's widget ticked past 200ms with a never-started
+stream, wrongly entered the new "disconnected" state, and popped a real, unmocked `QMessageBox.warning()`
+-- fatal in offscreen mode, but this time as a genuine process crash during Qt teardown (a malloc
+corruption error), not the usual silent hang this project's other `QMessageBox`/`QDialog.exec()` mishaps
+produce. Fixed by keying the check on `camera_stream.last_error is not None` instead -- the same signal
+`_update_status_label()` already used to distinguish "genuine fatal error" from "not currently running"
+-- which only a real fatal `CameraError` ever sets, never a stream that's simply never been started.
+
 **Bug found and fixed post-merge, from real usage**: `LiveViewWidget._on_roi_changed()` (the
 `SpatialROIControl.roi_changed` handler) unconditionally called `_apply_roi_bounds()`, which repaints the
 scatter/error-bars/fit-curve/heatmap from `self._placeholder_*` — stale, randomly-generated,
