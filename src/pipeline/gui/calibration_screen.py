@@ -482,7 +482,8 @@ class CreatePage(QWidget):
 
         self.spectral_card = _CalibrationTypeCard(
             "Spectral",
-            "Create a sensor-column to wavelength mapping using an Argon lamp.",
+            "Create a sensor-column to wavelength mapping using an Argon lamp. "
+            "Measure spectral smile.",
             "Configure...",
             COLOR_ACCENT,
         )
