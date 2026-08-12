@@ -4,15 +4,18 @@ flow -- one per calibration type that needs its own form or step sequence,
 plus a shared error dialog for camera-connection and calibration-specific
 failures.
 
-PHASE 1 (VISUAL SKELETON) NOTE: every dialog here is laid out and styled
-but not wired to real calibration/acquisition calls yet -- "Start"/
-"Continue"/"Save" buttons currently just advance the dialog's own visual
-state (e.g. FlatFieldDialog's phase indicator) or accept()/reject() the
-dialog, with no CameraStream, build_*(), or save_*() call underneath. A
-follow-up pass wires each dialog's accept path to the real
-calibration/sensor/, calibration/spatial/ functions referenced in their
-docstrings below (see src/pipeline/cli/calibration.py for the reference
-call sequence each one mirrors).
+Every dialog's Start/Continue/Save path is wired to the real
+calibration/sensor/, calibration/spatial/, calibration/spectral/
+functions referenced in their docstrings below, mirroring
+src/pipeline/cli/calibration.py's own call sequence for each calibration
+type -- build_camera_stream() + start()/stop() bracketing the acquisition
+calls, real build_*()/save_*() underneath, no placeholder state left in
+any accept path. CameraError (and subclasses) route to
+show_camera_error_dialog(); SettingsMismatchError/InvalidFlatFieldError/
+InvalidConversionGainError/NoSignalError/LineMatchingError route to
+show_calibration_error_dialog() -- both leave the originating dialog open
+(no accept()/reject()) so the user can correct inputs and retry, per
+their own docstrings below.
 
 Kept separate from calibration_screen.py so the "which forms/dialogs
 exist for which calibration type" concern doesn't get lost inside the
@@ -20,6 +23,8 @@ top-level screen's page-navigation code.
 """
 
 # Imports
+
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -40,6 +45,46 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pipeline.acquisition import CameraError, CameraStream, FrameData
+from pipeline.calibration.exceptions import (
+    InvalidConversionGainError,
+    InvalidFlatFieldError,
+    LineMatchingError,
+    SettingsMismatchError,
+)
+from pipeline.calibration.sensor import (
+    build_bad_pixel_map,
+    capture_dark_frames,
+    capture_illuminated_frames,
+    finish_flat_field_calibration,
+    load_bad_pixel_map,
+    load_baseline,
+    load_flat_field,
+    run_baseline_calibration,
+    run_conversion_gain_calibration,
+    save_bad_pixel_map,
+)
+from pipeline.calibration.shared import CalibrationRecord
+from pipeline.calibration.spatial import ScaleFactorPositionCalibration, save_scale_factor
+from pipeline.calibration.spectral import (
+    build_manual_spectral_calibration,
+    run_spectral_calibration,
+    save_spectral_calibration,
+)
+from pipeline.cli.calibration import (
+    DEFAULT_ARTIFACT_DIR,
+    DEFAULT_BAD_PIXEL_MAP_FILENAME,
+    DEFAULT_BASELINE_FILENAME,
+    DEFAULT_CONVERSION_GAIN_FILENAME,
+    DEFAULT_FLAT_FIELD_FILENAME,
+    DEFAULT_GEOMETRIC_TILT_FILENAME,
+    DEFAULT_SCALE_FACTOR_FILENAME,
+    DEFAULT_SPECTRAL_FILENAME,
+    MANUAL_SPECTRAL_EXPOSURE_US,
+    MANUAL_SPECTRAL_GAIN_DB,
+    build_camera_stream,
+)
+from pipeline.preprocessing import CalibrationSet, NoSignalError
 from pipeline.gui.live_view import DEGREE_CHOICES, DEGREE_LABELS
 from pipeline.gui.theme import (
     COLOR_ACCENT,
@@ -71,6 +116,16 @@ DEFAULT_DEGREE = 3
 # (a combo box always has one of the two selected).
 EXPOSURE_MODE_AUTO = "Auto"
 EXPOSURE_MODE_MANUAL = "Manual"
+
+# Calibration-specific failures every camera-driven dialog below must route
+# to show_calibration_error_dialog() rather than show_camera_error_dialog()
+# (CameraError and subclasses) -- see module docstring.
+_CALIBRATION_ERROR_TYPES = (
+    SettingsMismatchError,
+    InvalidFlatFieldError,
+    InvalidConversionGainError,
+    NoSignalError,
+)
 
 _DIALOG_STYLE = f"""
 QDialog {{
@@ -198,6 +253,8 @@ class BaselineDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.start_button.clicked.connect(self._on_start_clicked)
+
     def _on_exposure_mode_changed(self, mode: str) -> None:
 
         '''
@@ -223,6 +280,49 @@ class BaselineDialog(QDialog):
         if self.auto_exposure():
             return None
         return self.exposure_us_spin.value()
+
+    def _on_start_clicked(self) -> None:
+
+        '''
+        Builds a real CameraStream and runs run_baseline_calibration()
+        against it -- mirrors cli/calibration.py's _cmd_baseline. Accepts
+        the dialog only once the artifact is actually built and saved;
+        any CameraError/calibration failure shows an error dialog and
+        leaves this dialog open (with Start Capture re-enabled) so the
+        user can retry.
+        '''
+
+        self.start_button.setEnabled(False)
+        self.status_label.setText("Capturing...")
+        try:
+            camera_stream = build_camera_stream(
+                self.gain_db_spin.value(),
+                exposure_us=self.exposure_us(),
+                auto_exposure=self.auto_exposure(),
+            )
+            camera_stream.start()
+            try:
+                run_baseline_calibration(
+                    camera_stream,
+                    self.n_frames_spin.value(),
+                    DEFAULT_ARTIFACT_DIR / DEFAULT_BASELINE_FILENAME,
+                )
+            finally:
+                if camera_stream.is_running:
+                    camera_stream.stop()
+        except CameraError as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_camera_error_dialog(self, str(error))
+            return
+        except _CALIBRATION_ERROR_TYPES as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_calibration_error_dialog(self, "Baseline Calibration Failed", str(error))
+            return
+
+        self.status_label.setText("Baseline calibration complete.")
+        self.accept()
 
 
 class FlatFieldDialog(QDialog):
@@ -309,7 +409,9 @@ class FlatFieldDialog(QDialog):
         layout.addWidget(buttons)
 
         self._phase = self.PHASE_DARK
-        self.continue_button.clicked.connect(self._advance_phase)
+        self._camera_stream: CameraStream | None = None
+        self._dark_frames: list[FrameData] | None = None
+        self.continue_button.clicked.connect(self._on_continue_clicked)
         self._render_phase()
 
     def _render_phase(self) -> None:
@@ -337,10 +439,120 @@ class FlatFieldDialog(QDialog):
             self.continue_button.setText("Done")
 
     def _advance_phase(self) -> None:
+        '''Visual-only phase step, kept for tests that only need to exercise
+        the phase stepper's own rendering (see _render_phase()) without
+        driving a real capture -- _on_continue_clicked() below is what the
+        Continue button is actually wired to.'''
         if self._phase == self.PHASE_FINISHING:
             self.accept()
             return
         self._phase += 1
+        self._render_phase()
+
+    def _reset_to_dark_phase(self) -> None:
+        '''Discards any in-progress capture state and returns to phase 1 --
+        used on failure so a retry starts the two-phase sequence over
+        rather than resuming from a stream/frames left in an unknown
+        state.'''
+        if self._camera_stream is not None and self._camera_stream.is_running:
+            self._camera_stream.stop()
+        self._camera_stream = None
+        self._dark_frames = None
+        self._phase = self.PHASE_DARK
+        self._render_phase()
+
+    def _on_continue_clicked(self) -> None:
+        if self._phase == self.PHASE_DARK:
+            self._capture_dark_phase()
+        elif self._phase == self.PHASE_ILLUMINATED:
+            self._capture_illuminated_and_finish()
+        else:
+            self.accept()
+
+    def _capture_dark_phase(self) -> None:
+
+        '''
+        Phase 1 -> 2: builds a real CameraStream, starts it, and captures
+        the dark frames -- mirrors cli/calibration.py's _cmd_flat_field
+        up through its first input() prompt. The stream is left running
+        (not stopped) on success, since phase 2 captures from the same
+        stream/physical setup.
+        '''
+
+        self.continue_button.setEnabled(False)
+        self.status_label.setText("Capturing dark frames...")
+        try:
+            camera_stream = build_camera_stream(
+                self.gain_db_spin.value(),
+                exposure_us=self.exposure_us(),
+                auto_exposure=self.auto_exposure(),
+            )
+            camera_stream.start()
+            self._camera_stream = camera_stream
+            self._dark_frames = capture_dark_frames(camera_stream, self.n_frames_spin.value())
+        except CameraError as error:
+            self._reset_to_dark_phase()
+            self.continue_button.setEnabled(True)
+            show_camera_error_dialog(self, str(error))
+            return
+
+        self.continue_button.setEnabled(True)
+        self._phase = self.PHASE_ILLUMINATED
+        self._render_phase()
+
+    def _capture_illuminated_and_finish(self) -> None:
+
+        '''
+        Phase 2 -> 3: captures illuminated frames from the same stream
+        _capture_dark_phase() started, then builds and saves the flat
+        field. finish_flat_field_calibration() itself only builds/saves
+        the flat field (build_flat_field() + save_flat_field(), per its
+        own docstring) -- it does NOT chain bad-pixel-map building, so
+        that's done explicitly here instead, the same load-then-build
+        sequence cli/calibration.py's separate `bad-pixel-map` subcommand
+        (_cmd_bad_pixel_map) uses. This is what makes bad-pixel-map have
+        no manual "create" entry point of its own anywhere in this screen
+        (see class docstring). Mirrors cli/calibration.py's
+        _cmd_flat_field from its second input() prompt onward, plus that
+        extra bad-pixel-map step. On any failure this resets back to
+        phase 1 (see _reset_to_dark_phase()) rather than leaving a
+        stopped stream/stale frames behind for a phase-2-only retry.
+        '''
+
+        self.continue_button.setEnabled(False)
+        self.status_label.setText("Capturing illuminated frames...")
+        camera_stream = self._camera_stream
+        try:
+            illuminated_frames = capture_illuminated_frames(
+                camera_stream, self.n_frames_spin.value()
+            )
+        except CameraError as error:
+            self._reset_to_dark_phase()
+            self.continue_button.setEnabled(True)
+            show_camera_error_dialog(self, str(error))
+            return
+
+        try:
+            flat_field_path = DEFAULT_ARTIFACT_DIR / DEFAULT_FLAT_FIELD_FILENAME
+            finish_flat_field_calibration(illuminated_frames, self._dark_frames, flat_field_path)
+            flat_field, flat_field_record = load_flat_field(flat_field_path)
+            bad_pixel_mask, bad_pixel_record = build_bad_pixel_map(flat_field, flat_field_record)
+            save_bad_pixel_map(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_BAD_PIXEL_MAP_FILENAME, bad_pixel_mask, bad_pixel_record
+            )
+        except _CALIBRATION_ERROR_TYPES as error:
+            self._reset_to_dark_phase()
+            self.continue_button.setEnabled(True)
+            show_calibration_error_dialog(self, "Flat-Field Calibration Failed", str(error))
+            return
+        finally:
+            if camera_stream.is_running:
+                camera_stream.stop()
+
+        self.continue_button.setEnabled(True)
+        self._camera_stream = None
+        self._dark_frames = None
+        self._phase = self.PHASE_FINISHING
         self._render_phase()
 
     def _on_exposure_mode_changed(self, mode: str) -> None:
@@ -452,6 +664,53 @@ class ConversionGainDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.start_button.clicked.connect(self._on_start_clicked)
+
+    def _on_start_clicked(self) -> None:
+
+        '''
+        Builds a real CameraStream (seeded at exposure_min_us -- see
+        cli/calibration.py's _cmd_conversion_gain for why that's exact,
+        not a guess) and runs run_conversion_gain_calibration() against
+        it. ValueError (e.g. a required field left at its unfilled
+        minimum) is routed the same way as the calibration-specific
+        exceptions below, since it's just as retryable by correcting the
+        form's inputs.
+        '''
+
+        self.start_button.setEnabled(False)
+        self.status_label.setText("Sweeping exposure...")
+        try:
+            camera_stream = build_camera_stream(
+                self.gain_db_spin.value(), exposure_us=self.exposure_min_spin.value(),
+            )
+            camera_stream.start()
+            try:
+                run_conversion_gain_calibration(
+                    camera_stream,
+                    self.exposure_min_spin.value(),
+                    self.exposure_max_spin.value(),
+                    self.n_levels_spin.value(),
+                    self.n_frames_per_level_spin.value(),
+                    DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME,
+                )
+            finally:
+                if camera_stream.is_running:
+                    camera_stream.stop()
+        except CameraError as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_camera_error_dialog(self, str(error))
+            return
+        except (ValueError, *_CALIBRATION_ERROR_TYPES) as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_calibration_error_dialog(self, "Conversion-Gain Calibration Failed", str(error))
+            return
+
+        self.status_label.setText("Conversion-gain calibration complete.")
+        self.accept()
+
 
 class SpatialCalibrationDialog(QDialog):
 
@@ -464,8 +723,8 @@ class SpatialCalibrationDialog(QDialog):
     "Start Capture", no frame-count/gain fields, no phase stepper) since
     it has no acquisition step at all.
 
-    Will eventually call save_scale_factor()/load_scale_factor() and
-    construct a ScaleFactorPositionCalibration from the entered value.
+    Saves a ScaleFactorPositionCalibration built from the entered value
+    via save_scale_factor() -- mirrors cli/calibration.py's _cmd_spatial.
     '''
 
     def __init__(self, current_scale_factor: float, parent: QWidget | None = None) -> None:
@@ -526,6 +785,18 @@ class SpatialCalibrationDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self.save_button.clicked.connect(self._on_save_clicked)
+
+    def _on_save_clicked(self) -> None:
+        '''Builds a ScaleFactorPositionCalibration from the entered value
+        and persists it with source="manual" -- no camera/build_*() step,
+        so nothing here can raise a CameraError or CalibrationError.'''
+        calibration = ScaleFactorPositionCalibration(scale_factor=self.scale_factor_spin.value())
+        save_scale_factor(
+            DEFAULT_ARTIFACT_DIR / DEFAULT_SCALE_FACTOR_FILENAME, calibration, source="manual"
+        )
+        self.accept()
+
 
 class SpectralCalibrationDialog(QDialog):
 
@@ -535,10 +806,15 @@ class SpectralCalibrationDialog(QDialog):
     the dialog, each showing its own section of a QStackedWidget below:
 
     "Capture from Lamp" mirrors BaselineDialog's single-phase capture
-    form (frame count + gain_db), plus a fit-degree selector -- will
-    eventually call calibration/spectral/workflow.py's
-    run_spectral_calibration(camera_stream, n_frames, sensor_calibration,
-    path, degree) against an already-built CalibrationSet.
+    form (frame count + gain_db), plus a fit-degree selector, and calls
+    calibration/spectral/workflow.py's run_spectral_calibration(
+    camera_stream, n_frames, sensor_calibration, path,
+    geometric_tilt_path, degree) against a CalibrationSet loaded fresh
+    from DEFAULT_ARTIFACT_DIR (baseline + flat field + bad-pixel map --
+    see _on_start_clicked()'s docstring for what happens if those don't
+    exist yet). This dialog has no exposure-mode selector of its own (see
+    _on_start_clicked()), unlike BaselineDialog/FlatFieldDialog -- always
+    auto-exposure.
 
     "Manual Entry" mirrors SpatialCalibrationDialog's no-camera,
     direct-value style, but for a variable-length pixel->wavelength_nm
@@ -548,12 +824,8 @@ class SpectralCalibrationDialog(QDialog):
     build_manual_spectral_calibration() docstring for why
     coefficient_sigma can't be optional or defaulted (no fit residual
     exists to estimate it from). Changing the degree selector rebuilds
-    the coefficient/sigma row list to match.
-
-    Like every other dialog in this file, both modes' accept paths are
-    still UI-only placeholders (see module docstring) -- neither
-    run_spectral_calibration() nor build_manual_spectral_calibration() is
-    actually called yet.
+    the coefficient/sigma row list to match. Calls
+    build_manual_spectral_calibration() + save_spectral_calibration().
     '''
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -601,6 +873,9 @@ class SpectralCalibrationDialog(QDialog):
         self.save_button.setVisible(False)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+        self.start_button.clicked.connect(self._on_start_clicked)
+        self.save_button.clicked.connect(self._on_save_clicked)
 
     def _build_capture_page(self) -> QWidget:
         page = QWidget()
@@ -750,6 +1025,124 @@ class SpectralCalibrationDialog(QDialog):
         '''Current manual-mode per-coefficient 1-sigma uncertainties, same order as coefficients().'''
 
         return [sigma_spin.value() for _, sigma_spin in self._coefficient_rows]
+
+    def _load_sensor_calibration(self) -> CalibrationSet | None:
+
+        '''
+        Loads baseline + flat field + bad-pixel map from DEFAULT_ARTIFACT_DIR
+        -- the same paths CalibrationScreen's own "load existing
+        calibrations" flow reads from -- and bundles them into a
+        CalibrationSet for run_spectral_calibration() to preprocess lamp
+        frames with. Returns None (having already shown an explanatory
+        error dialog) if baseline and/or flat field haven't been created
+        yet, rather than letting the resulting FileNotFoundError propagate.
+        '''
+
+        try:
+            baseline_result, baseline_record = load_baseline(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_BASELINE_FILENAME
+            )
+            flat_field, flat_field_record = load_flat_field(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_FLAT_FIELD_FILENAME
+            )
+            bad_pixel_mask, _ = load_bad_pixel_map(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_BAD_PIXEL_MAP_FILENAME
+            )
+        except FileNotFoundError:
+            show_calibration_error_dialog(
+                self,
+                "Missing Sensor Calibration",
+                "Baseline and flat-field calibrations must be created before "
+                "spectral calibration can run. Create them first, then retry.",
+            )
+            return None
+
+        return CalibrationSet(
+            baseline=baseline_result.baseline,
+            baseline_record=baseline_record,
+            flat_field=flat_field,
+            flat_field_record=flat_field_record,
+            bad_pixel_mask=bad_pixel_mask,
+            background_sigma=baseline_result.background_sigma,
+        )
+
+    def _on_start_clicked(self) -> None:
+
+        '''
+        Capture-mode accept path: loads the already-built sensor
+        CalibrationSet (see _load_sensor_calibration()), then builds a
+        CameraStream and runs run_spectral_calibration() against it --
+        mirrors cli/calibration.py's _cmd_spectral_capture. This dialog
+        has no exposure-mode selector (unlike BaselineDialog/
+        FlatFieldDialog), so the stream always uses auto-exposure.
+        run_spectral_calibration() also builds and saves the geometric
+        tilt calibration as a side effect (see its own docstring) -- not
+        duplicated here.
+        '''
+
+        sensor_calibration = self._load_sensor_calibration()
+        if sensor_calibration is None:
+            return
+
+        self.start_button.setEnabled(False)
+        self.status_label.setText("Capturing...")
+        try:
+            camera_stream = build_camera_stream(self.gain_db_spin.value(), auto_exposure=True)
+            camera_stream.start()
+            try:
+                run_spectral_calibration(
+                    camera_stream,
+                    self.n_frames_spin.value(),
+                    sensor_calibration,
+                    DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME,
+                    DEFAULT_ARTIFACT_DIR / DEFAULT_GEOMETRIC_TILT_FILENAME,
+                    degree=self.capture_degree_selector.currentData(),
+                )
+            finally:
+                if camera_stream.is_running:
+                    camera_stream.stop()
+        except CameraError as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_camera_error_dialog(self, str(error))
+            return
+        except (ValueError, LineMatchingError, *_CALIBRATION_ERROR_TYPES) as error:
+            self.status_label.setText("Not started.")
+            self.start_button.setEnabled(True)
+            show_calibration_error_dialog(self, "Spectral Calibration Failed", str(error))
+            return
+
+        self.status_label.setText("Spectral calibration complete.")
+        self.accept()
+
+    def _on_save_clicked(self) -> None:
+
+        '''
+        Manual-mode accept path: builds a WavelengthCalibrationResult
+        directly from the entered coefficients/coefficient_sigma via
+        build_manual_spectral_calibration() and saves it -- mirrors
+        cli/calibration.py's _cmd_spectral_manual. MANUAL_SPECTRAL_
+        EXPOSURE_US/MANUAL_SPECTRAL_GAIN_DB are the same "not applicable"
+        CalibrationRecord placeholders the CLI uses (no frame was
+        actually captured).
+        '''
+
+        record = CalibrationRecord(
+            exposure_us=MANUAL_SPECTRAL_EXPOSURE_US,
+            gain_db=MANUAL_SPECTRAL_GAIN_DB,
+            timestamp=time.time(),
+            source_frame_count=1,
+        )
+        try:
+            result = build_manual_spectral_calibration(
+                self.coefficients(), self.coefficient_sigma(), record
+            )
+        except ValueError as error:
+            show_calibration_error_dialog(self, "Spectral Calibration Failed", str(error))
+            return
+
+        save_spectral_calibration(DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME, result)
+        self.accept()
 
 
 # Functions
