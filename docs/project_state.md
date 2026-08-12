@@ -53,7 +53,7 @@ only tested via a throwaway venv, not a real second machine, until this lab sess
 | `calibration/spectral/` | Complete, tested (synthetic only) — `line_matching.py` now built (Argon lamp), see §3 |
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
 | `cli/` | Calibration subcommands complete, import/argparse-tested — real hardware paths unverified — see §4 |
-| `gui/` | Phase-1 visual skeleton built and tested (offscreen), not wired to real acquisition/analysis calls — see §5 |
+| `gui/` | Fully wired to real acquisition/calibration/analysis calls, tested offscreen (`SyntheticBackend`) — see §5 |
 | `main.py` | Not started |
 
 ---
@@ -594,39 +594,97 @@ extra) are optional, so a CLI-only checkout doesn't need to install Qt at all.
 
 ---
 
-## 5. `gui/` — Phase-1 visual skeleton built
+## 5. `gui/` — fully wired to real backend calls
 
 Extensively designed in discussion first (recorded in full below, still the reference for *why* things
-are shaped the way they are), then actually built as a real, tested Phase-1 skeleton — not "nothing in
-code yet" any more, though still not wired to real acquisition/analysis calls end-to-end (each file's own
-"PHASE 1" module docstring says exactly what is/isn't real in that file).
+are shaped the way they are), built as a tested Phase-1 visual skeleton, then — in a dedicated
+multi-agent wiring pass (Team-Lead-orchestrated: one agent per screen, each in its own worktree, merged
+sequentially with a full-suite check after each merge, plus a Team-Lead-only foundation stage before and
+integration/review/end-to-end-smoke-test stage after) — wired end-to-end to the real
+`acquisition`/`calibration`/`preprocessing`/`analysis` backend. Every screen now calls the real
+`build_*()`/`run_preprocessing()`/`analyze_shot()`/`combine_shots()` functions; nothing left in
+`src/pipeline/gui/` generates random placeholder data as its primary behavior (the one deliberate
+exception — `LiveViewWidget._populate_placeholder_data()` — is documented below, since it's a genuine
+design choice, not leftover scaffolding).
 
 Built as:
 
 ```
 src/pipeline/gui/
-├── theme.py                Shared dark-palette color/spacing/font constants + load_bundled_font()
-├── assets/fonts/            Bundled Latin Modern Roman .otf files (OFL-licensed)
-├── calibration_screen.py    CalibrationScreen (WelcomePage -> CreatePage), CalibrationBundle
-├── calibration_dialogs.py   BaselineDialog, FlatFieldDialog, ConversionGainDialog,
-│                            SpatialCalibrationDialog, SpectralCalibrationDialog, error dialogs
-└── live_view.py             LiveViewWidget (scatter/fit/heatmap + strip chart + side panel) plus
-                             several pure/non-Qt helper functions
+├── app.py                    MainWindow -- CalibrationScreen -> LiveViewWidget -> ExtendedMeasurementScreen
+│                              navigation, owns the one shared CameraStream both downstream screens use
+├── theme.py                  Shared dark-palette color/spacing/font constants + load_bundled_font()
+├── assets/fonts/              Bundled Latin Modern Roman .otf files (OFL-licensed)
+├── calibration_screen.py      CalibrationScreen (WelcomePage -> CreatePage), CalibrationBundle
+├── calibration_dialogs.py     BaselineDialog, FlatFieldDialog, ConversionGainDialog,
+│                              SpatialCalibrationDialog, SpectralCalibrationDialog, error dialogs
+├── live_view.py               LiveViewWidget -- real-time QTimer polling loop (scatter/fit/heatmap +
+│                              strip chart + side panel) plus several pure/non-Qt helper functions
+├── extended_measurement.py    ExtendedMeasurementScreen -- N-shot acquire + combine workflow
+└── roi_control.py             SpatialROIControl, shared by live_view.py and extended_measurement.py
 ```
 
-`tests/test_gui.py` covers both screens as pytest-qt offscreen smoke tests (structure/state-transition
-checks, not real acquisition behavior) plus ordinary unit tests for the pure helper functions.
-`scripts/demo_live_view.py` opens both screens as real interactive windows in one run
-(`python scripts/demo_live_view.py`), or saves offscreen screenshots of both
-(`QT_QPA_PLATFORM=offscreen python scripts/demo_live_view.py --screenshot`).
+`tests/test_calibration_screen.py`/`test_live_view.py`/`test_extended_measurement.py` (split out of one
+originally-monolithic `tests/test_gui.py`, one file per screen, so the wiring agents below could work
+with zero merge-conflict risk) cover each screen's real backend calls as pytest-qt offscreen tests —
+`SyntheticBackend`-driven `CameraStream`s, real `build_*()`/`save_*()` calls against synthetic frame data
+wherever practical, mocked only where a real call needs preconditions `SyntheticBackend` can't produce
+(e.g. `SyntheticBackend`'s smooth Gaussian beam has no discrete lamp-line peaks for spectral-capture
+line-matching or geometric-tilt detection). `tests/gui_fixture_helpers.py` provides one shared, real
+(`build_*()`-constructed, not hand-typed) `CalibrationBundle` fixture for the live-view/extended-
+measurement test files. `tests/test_gui.py` now covers only `app.py`'s cross-cutting screen navigation.
+`tests/test_gui_end_to_end.py` (new) drives the full `MainWindow` flow — real calibration artifacts
+saved to disk, loaded via `WelcomePage`'s real load path, through a real polling `LiveViewWidget` and a
+real N-shot `ExtendedMeasurementScreen` run — specifically to catch cross-screen integration bugs
+isolated per-screen tests can't; it caught one for real (see the camera-lifecycle bug below).
+`scripts/demo_live_view.py`/`scripts/demo_app.py` remain useful for interactive/screenshot exploration
+against a placeholder (not real) bundle — see each script's own docstring.
 
-**WelcomePage's "Load Existing Calibrations" is the one flow already fully wired end-to-end**, not a
-placeholder: it loads baseline/flat-field/bad-pixel-map/conversion-gain/scale-factor from
-`calibration_artifacts/` for real, builds a `CalibrationBundle`, and emits `calibration_ready` — on
-failure (any required artifact missing) it shows "No existing calibrations found. Please create new
-calibrations." and stays on `WelcomePage`. Every dialog's accept path (create-new-calibration flows) and
-`LiveViewWidget`'s update loop are still Phase-1 placeholder UI, not wired to real
-`build_*()`/`analyze_shot()` calls yet.
+**Every screen's real flow, in outline:**
+- **`WelcomePage`'s "Load Existing Calibrations"** loads baseline/flat-field/bad-pixel-map/conversion-
+  gain/spectral (all hard-required — missing any shows "No existing calibrations found. Please create
+  new calibrations." and stays on `WelcomePage`) plus scale-factor and geometric-tilt (both soft-optional
+  — a physically valid default / "skipped" respectively) from `calibration_artifacts/`, builds a
+  `CalibrationBundle`, and emits `calibration_ready`.
+- **`CreatePage`**'s five dialogs each call their real backend function on Start/Save
+  (`run_baseline_calibration`, `capture_dark_frames`/`capture_illuminated_frames`/
+  `finish_flat_field_calibration` + a real `build_bad_pixel_map()`/`save_bad_pixel_map()` chained on,
+  `run_conversion_gain_calibration`, `save_scale_factor`, `run_spectral_calibration`/
+  `build_manual_spectral_calibration`), saving to the same `calibration_artifacts/` paths `WelcomePage`
+  reads from. `CameraError` routes to `show_camera_error_dialog()`; calibration-specific failures
+  (`SettingsMismatchError`/`InvalidFlatFieldError`/`InvalidConversionGainError`/`NoSignalError`/
+  `LineMatchingError`) route to `show_calibration_error_dialog()`, leaving the dialog open to retry rather
+  than closing on failure. `CreatePage` tracks per-type completion and enables "Continue to Main Window"
+  once baseline/flat-field/conversion-gain/spectral are all done (spatial isn't gated — it always has a
+  valid default); "Continue" reuses the exact same `_attempt_load_existing_calibrations()` re-read-from-
+  disk path `WelcomePage` uses, rather than threading each dialog's in-memory result through a second code
+  path.
+- **`LiveViewWidget`** runs a real `QTimer` (`DEFAULT_UPDATE_INTERVAL_MS = 200`, ~5Hz, overridable) polling
+  loop: each tick pulls `camera_stream.get_latest_frame()`, runs it through `run_preprocessing()` (using
+  the live-updated ROI bounds from `SpatialROIControl`) and `analyze_shot()`, and pushes the result into
+  the scatter/error-bars/fit-curve/heatmap/strip-chart/side-panel. `_populate_placeholder_data()` still
+  seeds the widget's very first paint (before the first real tick has anything to show) — the one
+  legitimate remaining placeholder use in this package, not a gap.
+- **`ExtendedMeasurementScreen`** needs no timer — "Run Measurement" is a synchronous acquire-then-analyze
+  flow: optionally reconfigures the shared camera stream (stop/set exposure+gain/restart, mirroring
+  conversion-gain calibration's own cycle) if the entered settings differ from the stream's current ones,
+  blocks on `camera_stream.collect_n_frames(n_shots)`, runs each frame through `run_preprocessing()` then
+  `analyze_shot()` at every selectable degree at once (so switching the degree dropdown afterward needs no
+  re-acquisition), and combines the results (see below).
+- **`app.py`'s `MainWindow`** owns the one shared `CameraStream` both downstream screens are built around:
+  builds it via `build_camera_stream()` and **starts it** in `_on_calibration_ready()` (see the bug note
+  below), stops it again in `closeEvent()`.
+
+**Bug found and fixed during the end-to-end integration pass**: `build_camera_stream()` explicitly does
+not start the stream it returns ("callers own stream lifecycle" — see its own docstring), and
+`MainWindow._on_calibration_ready()` built the shared `CameraStream` and handed it straight to
+`LiveViewWidget`/`ExtendedMeasurementScreen` without ever calling `.start()` on it. Neither Agent B's
+(live view) nor Agent C's (extended measurement) own tests caught this, since both start their own
+`CameraStream` directly rather than going through `MainWindow` — a live camera stream that's never
+started would have meant `get_latest_frame()` returning `None` forever and `collect_n_frames()` hanging
+indefinitely, in the real app, despite every screen's own isolated tests passing. Caught specifically by
+`tests/test_gui_end_to_end.py`'s cross-screen drive-through, which is the reason that test file exists
+as a distinct thing from the three per-screen files above.
 
 **Exposure/gain consistency between calibration and live view, now built** (the gap: nothing used to
 record what exposure/gain a calibration was captured under anywhere the live-view screen could see it,
@@ -643,17 +701,21 @@ so a live setting drifting from the calibrated one would silently produce wrong 
   discarding the `gain_db` the sweep was actually measured at.
 - `LiveViewWidget` gained an "Acquisition Settings" `QGroupBox` (exposure_us/gain_db spin boxes) at the
   top of the side panel, pre-filled from `calibration_set.baseline_record`, plus a new constructor
-  parameter `conversion_gain_record: ConversionGainRecord | None = None`. Editing either field is
-  skeleton-only (no real `CameraStream` reconfiguration yet) but the drift check itself is real:
-  `exposure_has_drifted()`/`gain_has_drifted()` (pure, non-Qt, reusing
+  parameter `conversion_gain_record: ConversionGainRecord | None = None`. Editing either field
+  **deliberately, permanently** never touches `camera_stream` — unlike `ExtendedMeasurementScreen`'s own
+  Acquisition Settings panel, which does reconfigure the camera on Run, live view's continuous polling
+  loop has no natural point to pause for a mid-stream reconfiguration, so this field only ever drives the
+  drift check: `exposure_has_drifted()`/`gain_has_drifted()` (pure, non-Qt, reusing
   `calibration.shared.metadata.EXPOSURE_MATCH_TOLERANCE_REL`/`GAIN_MATCH_TOLERANCE_ABS` exactly — the
   same tolerances `check_settings_match()` enforces at the preprocessing layer) compare the entered value
   against `baseline_record` (exposure and gain) and independently against `conversion_gain_record`'s
   `gain_db` (if supplied), since the two artifacts can drift apart from each other. On drift, a
-  `QMessageBox` prompt names the specific artifact and both values, asking to recalibrate; confirming
-  emits a new `recalibration_requested = Signal(str)` (`"baseline"` or `"conversion_gain"`) — deliberately
-  left unconnected, since `gui/app.py` doesn't exist yet to receive it (same not-yet-wired treatment as
-  `_extended_measurement_button`).
+  `QMessageBox` prompt names the specific artifact and both values, asking to recalibrate, and the real
+  polling loop skips its per-tick work entirely (raw display frozen, fit overlay hidden) until the entered
+  values are back in tolerance; confirming emits `recalibration_requested = Signal(str)` (`"baseline"` or
+  `"conversion_gain"`) — still deliberately left unconnected even now that `app.py` exists, since wiring
+  it would need a "go back to calibration screen" navigation path `MainWindow` doesn't have yet; noted as
+  an open item in §6, not silently dropped.
 
 **Overall structure.** On launch: choose between loading existing calibration artifacts, or creating new
 ones (per-type — the user picks which one, not an all-or-nothing choice). Calibration and live view are
@@ -662,21 +724,23 @@ connection-at-a-time hardware constraint without needing to special-case it.
 
 **Fixed layout, not responsive.** Every page's layout is designed to look best at a fixed default window
 size, not to reflow as the window is resized. Resizing the window should not rearrange widgets, change
-spacing, or restretch cards/panels — the current skeleton pages use stretch factors and layouts that
-reflow on resize, which needs revisiting on a future pass across `calibration_screen.py`, `live_view.py`,
-and any future page, likely by fixing the window size (disabling resize) or constraining layouts to hold
-their proportions rather than expand into extra space.
+spacing, or restretch cards/panels — every page still uses stretch factors and layouts that reflow on
+resize, which needs revisiting on a future pass across `calibration_screen.py`, `live_view.py`,
+`extended_measurement.py`, and any future page, likely by fixing the window size (disabling resize) or
+constraining layouts to hold their proportions rather than expand into extra space.
 
 **The calibration screen is not uniform across the five types:**
 - **Spatial** isn't a camera measurement at all — just a text field for a manually-measured scale-factor
   override (or accept `DEFAULT_SCALE_FACTOR`), a fundamentally different UI element from the other four.
 - **Spectral** — like spatial, offers a choice between two flows rather than one, via a two-mode
   `SpectralCalibrationDialog`: "Capture from Lamp" (mirrors `BaselineDialog`'s single-phase form, uses
-  the curated Argon 751.46-842.46nm window, §3) and "Manual Entry" (mirrors `SpatialCalibrationDialog`'s
-  manual-value style, but for a variable-length coefficient+sigma list, rebuilt per chosen degree, that
-  calls `build_manual_spectral_calibration()`). The `CreatePage` card is enabled like the other four;
-  both dialog modes' accept paths are still UI-only placeholders, same Phase-1 status as every other
-  dialog in this screen.
+  the curated Argon 751.46-842.46nm window, §3; needs an already-saved baseline+flat-field on disk first,
+  showing "Missing Sensor Calibration" if either is absent, and — as a side effect of calling
+  `run_spectral_calibration()` — builds and saves a real geometric-tilt calibration too, for free) and
+  "Manual Entry" (mirrors `SpatialCalibrationDialog`'s manual-value style, but for a variable-length
+  coefficient+sigma list, rebuilt per chosen degree, that calls `build_manual_spectral_calibration()`).
+  Both modes' Start/Save buttons call their real backend function, same as every other dialog in this
+  screen.
 - **Bad-pixel-map has no manual "create" option at all** — it runs automatically immediately after every
   flat-field capture (`build_bad_pixel_map()` + `save_bad_pixel_map()` chained onto
   `finish_flat_field_calibration()`), since it's derived purely from the flat field with no camera
@@ -725,51 +789,42 @@ their proportions rather than expand into extra space.
   because a single number overwritten 5 times a second doesn't show the trend the live view's whole
   stated purpose depends on (watching how upstream laser adjustments affect dispersion in real time).
 
-**The degree > 1 uncertainty gap — now closed at the statistics layer (§6).** ζ(λ) is an exactly linear
-function of the fit coefficients, so a *proper* uncertainty on it needs the coefficients' full covariance
-matrix, not just their marginal `coefficient_sigma` (the diagonal). `SpatialDispersionFitResult` now
+**The degree > 1 uncertainty gap — closed at both the statistics layer and the GUI layer.** ζ(λ) is an
+exactly linear function of the fit coefficients, so a *proper* uncertainty on it needs the coefficients'
+full covariance matrix, not just their marginal `coefficient_sigma` (the diagonal). `SpatialDispersionFitResult`
 carries `coefficient_covariance` (`scipy.odr`'s `cov_beta × res_var`) and a `sigma_zeta(wavelength_nm)`
 method implementing the exact propagation, built in `analysis/dispersion_fitting.py` +
 `analysis/results.py` — NOT `calibration/shared/`'s structurally-separate copy of the same machinery
 (§3), since the GUI's live/extended-measurement path runs through `analyze_shot()` → `analysis/`, not
-calibration's. What's still missing is the GUI wiring itself (below and elsewhere in this section) —
-`_placeholder_fits`/`_populate_placeholder_data()` don't call `sigma_zeta()` yet, so the interim
-"external-only" decision immediately below is still what the current skeleton actually shows.
+calibration's. Both `LiveViewWidget` and `ExtendedMeasurementScreen` now call `sigma_zeta()` for real at
+every degree — the old "external-uncertainty-only, with a caveat note" interim behavior for degree > 1 is
+gone; the caveat note is retired and both screens report a genuine internal uncertainty at every degree.
 
-**Interim decision for degree > 1, still in effect until the GUI is wired to real `sigma_zeta()` calls**:
-report only the *external* (empirical, cross-shot-scatter) uncertainty for extended measurements at
-degree > 1, with an explicit caveat note displayed next to it in the GUI stating it only accounts for
-external uncertainty — rather than fabricating an internal number. This is no longer because the internal
-number is statistically unsound (it now is sound, see above) but simply because the GUI doesn't call it
-yet; revisit this caveat note once that wiring happens.
-
-**Extended measurement:**
-- User picks a number of frames, optionally overriding exposure/other camera parameters — which forces
-  the same stop/reconfigure/restart cycle as conversion-gain calibration (§6), visibly freezing live view
-  for the duration; an accepted, expected interruption, not a bug.
-- Degree selection (linear/quadratic/cubic) applies here too, which runs into an existing, deliberate
-  design boundary: `analysis/combination.py`'s `combine_shots()` only combines the linear ζ across shots
-  by design (§2 already documents this — quadratic/cubic fits were explicitly kept per-shot-only, not
-  aggregated, when `analysis/` was designed). For degree 1, `combine_shots()` covers this exactly as
-  built. For the central-value combination at degree > 1: evaluating each shot's own
-  `zeta(wavelength_ref)` first (a well-defined scalar regardless of degree, using each shot's already-
-  computed fit) and then combining *those scalars* the same way `combine_shots()` already combines linear
-  ζ is mathematically sound for the point estimate — averaging coefficients first and evaluating
-  afterward gives an identical answer by linearity, as long as it's inverse-variance-weighted, not naive.
-  The internal-uncertainty half of that combination hits the same covariance gap described above.
+**Extended measurement — built as designed:**
+- User picks a number of frames, optionally overriding exposure/gain — which forces the same
+  stop/reconfigure/restart cycle as conversion-gain calibration (§6) around the shared `CameraStream`,
+  visibly freezing live view for the duration; an accepted, expected interruption, not a bug. Only
+  triggers when the entered values actually differ from the stream's current ones.
+- Degree selection (linear/quadratic/cubic) runs into the existing, deliberate design boundary that
+  `analysis/combination.py`'s `combine_shots()` only combines the linear ζ across shots by design (§2 —
+  quadratic/cubic fits were explicitly kept per-shot-only, not aggregated, when `analysis/` was designed).
+  For degree 1, `combine_shots()` is called directly. For degree > 1: each shot's own
+  `zeta(wavelength_ref)`/`sigma_zeta(wavelength_ref)` (evaluated at the "Evaluate At" reference point,
+  using each shot's own fit) are combined via the same `combine_shots()` call — it's generic over any
+  (value, sigma) pairs, so no separate weighting scheme was needed, and the internal-uncertainty half of
+  the combination is now real too (see above), not just the point estimate.
 - **Static graph**: NOT a re-fit of per-column-averaged centroid positions — that's exactly the
   alternative combination methodology considered and rejected when `analysis/`'s N-shot combination was
   originally designed (§2: "not per-column combination... reusing existing single-shot code"), and would
   risk the drawn line's slope visually disagreeing with the reported ζ_combined number sitting right next
-  to it. Instead: plot the full scatter (or column averages as a lighter reference layer) and draw the
-  line from the actually-reported combined result (slope = ζ_combined, anchored through the data), so the
-  picture and the number can never visually contradict each other.
-- **Residual plot beneath the graph.** When an extended measurement is run, add a residual subplot
-  underneath the main scatter/fit-curve graph (observed x0 minus the fitted curve, per column/shot,
-  sharing the same x-axis) — a standard fit-quality check, and a natural fit for extended measurement's
-  already-static (non-live-updating) graph. Not needed for the live single-shot view, which redraws too
-  fast for a residual panel to be readable. Noted here for whenever extended measurement itself is built
-  (§6 -- unwired placeholder button in the current skeleton).
+  to it. Built as one straight line of slope `zeta_combined`, anchored through all raw (shot, column)
+  points via a plain weighted-least-squares intercept — never a per-column-averaged refit — so the drawn
+  line's slope can't visually disagree with the reported number.
+- **Residual plot beneath the graph.** Built: a residual subplot underneath the main scatter/fit-curve
+  graph (observed x0 minus the fitted combined curve, per column/shot, sharing the same x-axis) — a
+  standard fit-quality check, and a natural fit for extended measurement's already-static
+  (non-live-updating) graph. Not needed for the live single-shot view, which redraws too fast for a
+  residual panel to be readable.
 
 **Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
 genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw
@@ -919,21 +974,26 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   passed, 17 skipped after this change. Built in a dispatched pass, reviewed and
   independently re-verified (diffs read in full, suite re-run) rather than trusting
   the initial report.
-- ~~**Build the GUI** per the design recorded in §5.~~ **Phase-1 skeleton done**, both screens, tested
-  and screenshotted (§5). Real wiring to `build_*()`/`analyze_shot()` calls is the remaining work,
-  tracked in the more specific items below (fixed layout, manual ROI entry, the fit-curve item just
-  below) rather than as one big remaining task.
-- **GUI live view: fit curve doesn't actually change shape with the selected degree.** Confirmed by
-  reading the code (not yet fixed): `_populate_placeholder_data()` builds `_fit_curve` from a single
-  fixed "true" trend function (`true_centroid_px`), completely independent of `self._current_degree` —
-  changing the Fit Degree dropdown only updates the side-panel numbers (`_placeholder_fits[degree]`), not
-  the drawn line. Consistent with this file's documented Phase-1 scope ("does not trigger any real
-  refit"), but will read as a bug to anyone testing the dropdown before the real fit is wired in. Belongs
-  with the future "wire up real `analyze_shot()` calls" pass, not a standalone patch, since it needs an
-  actual per-degree fit to plot rather than another placeholder.
+- ~~**Build the GUI** per the design recorded in §5.~~ **Done**, in two passes: a tested Phase-1 visual
+  skeleton first, then a full real-backend wiring pass (Team-Lead-orchestrated multi-agent effort — one
+  agent per screen, Team-Lead-only sequential merges with a full-suite check after each, a shared
+  end-to-end smoke test at the end). Every screen now calls real `build_*()`/`run_preprocessing()`/
+  `analyze_shot()`/`combine_shots()` — see §5 for the full breakdown, including the camera-lifecycle bug
+  the end-to-end pass found and fixed. Remaining GUI work is the more specific items below (fixed layout,
+  spectral-axis manual ROI entry, input validation, `recalibration_requested` routing), not "wire it up."
+- ~~**GUI live view: fit curve doesn't actually change shape with the selected degree.**~~ **Done** — was
+  a genuine bug in the Phase-1 placeholder path (`_populate_placeholder_data()` drew `_fit_curve` from a
+  single fixed "true" trend function, independent of `self._current_degree`); moot now that the real
+  polling loop draws `_fit_curve` from `analyze_shot()`'s actual per-degree fit each tick.
 - **GUI: fixed (non-responsive) layout across all pages.** Currently the calibration screen and live
   view both reflow on window resize (stretch factors, expanding layouts) — needs a pass to make every
   page hold a fixed layout tuned for its default window size regardless of resizing. See §5.
+- **GUI live view: `recalibration_requested` signal still unconnected.** Emitted for real by the
+  drift-detection logic in §5, but `MainWindow` has no "go back to CalibrationScreen from LiveViewWidget"
+  navigation path yet to receive it — deliberately left unconnected during the real-backend wiring pass
+  rather than building new cross-screen navigation as an unplanned extension of that work. The in-widget
+  drift UI (hidden overlay, "N/A" side-panel, paused polling) already handles the drifted state on its
+  own without this signal going anywhere.
 - **Input validation pass**, GUI and CLI both -- not yet done anywhere. Numeric
   fields (exposure_us, gain_db, scale factor, ROI bounds once built, etc.) and
   CLI arguments currently rely on Qt's own spin-box range clamping or accept
@@ -955,15 +1015,13 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   wiring happens (not yet -- see below). Wired into `live_view.py`'s side panel;
   entering new bounds narrows the plot's y-axis to exactly `[min, max]`
   (`setYRange(..., padding=0)`, which also disables pyqtgraph's autorange on that
-  axis) and crops the placeholder scatter/fit-curve/heatmap to match, zeroing
+  axis) and crops the displayed scatter/fit-curve/heatmap to match, zeroing
   heatmap rows outside the window rather than resizing the image -- mirroring
-  `apply_roi()`'s real zero-not-crop behavior for visual consistency, even though
-  this whole widget still only drives the Phase-1 placeholder data (`live_view.py`
-  has no real camera/`analyze_shot()` calls yet at all, per its own module
-  docstring -- wiring this control to a real per-frame `roi_bounds` argument is
-  part of that larger, still-pending "wire GUI to real backend" pass, not this
-  item). Spectral-column signal-threshold range entry (the other half of the
-  original combined to-do item below) is still open.
+  `apply_roi()`'s real zero-not-crop behavior for visual consistency. Now that
+  `live_view.py`'s polling loop is real (see above), this control's bounds are
+  genuinely fed into every tick's `run_preprocessing(roi_bounds=...)` call, not
+  just used for display cropping. Spectral-column signal-threshold range entry
+  (the other half of the original combined to-do item below) is still open.
 - **GUI live view: manual ROI entry -- spectral axis.** Add a field on the
   live-view screen for the user to manually enter a min/max spectral-column
   range, based on what they see in the live feed, overriding the automatic
