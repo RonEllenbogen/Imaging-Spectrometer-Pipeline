@@ -704,6 +704,21 @@ caller — before any real tick has ever landed (construction, or a stream that 
 yet), there's nothing real to preserve, so cropping the placeholder to the new bounds is still the right
 behavior.
 
+**The same bug class, found twice more in the same real-usage report**: `_on_degree_changed()` (the Fit
+Degree combo box's handler) and `_exit_drifted_state()` (restoring from a settings-drift episode) both
+unconditionally called `_update_fit_panel()` — the placeholder counterpart to
+`_update_fit_panel_from_result()`, reading `self._placeholder_fits` rather than a real result. Concretely
+reported as: switching to a quadratic/cubic fit degree while live view was already showing real data made
+the side panel immediately (and, if no further tick landed for any reason, indefinitely) show "Uncertainty
+not available for degree > 1 in live view" — a note that can *only* come from the placeholder path, since
+real data always has `sigma_zeta()` available at every degree (see the "degree > 1 uncertainty gap" note
+above). Also separately verified, per the same report: the plotted fit curve genuinely does update to a
+real quadratic/cubic shape on the next real tick (3/4 real coefficients, curve data changed) — that part
+was never broken, only the side-panel note was. Fixed the same way as `_on_roi_changed()`: both call sites
+now check `self._displayed_real_data` first and skip the placeholder repaint once real data exists,
+letting the next real tick's `_update_fit_panel_from_result()` supply genuine numbers instead. `_update_fit_panel()`
+itself is unchanged and still correct for construction time and for a still-drifted/never-yet-real state.
+
 **Exposure/gain consistency between calibration and live view, now built** (the gap: nothing used to
 record what exposure/gain a calibration was captured under anywhere the live-view screen could see it,
 so a live setting drifting from the calibrated one would silently produce wrong results):

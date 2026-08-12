@@ -48,11 +48,16 @@ the entered settings, so there's nothing valid to compute -- rather than
 fighting the drift UI's own hide/restore logic.
 
 Degree selection (the combo box) does NOT trigger a synchronous refit:
-_on_degree_changed() only swaps in this widget's placeholder numbers for
-the newly picked degree immediately, and the next timer tick (which reads
-self._current_degree fresh) supplies the real ones -- at most one tick
-interval later, close enough given the ~5Hz cadence that a dedicated
-refit path isn't worth the complexity.
+_on_degree_changed() only updates self._current_degree, and the next
+timer tick (which reads it fresh) supplies the real fit/curve/diagnostics
+for the new degree -- at most one tick interval later, close enough given
+the ~5Hz cadence that a dedicated refit path isn't worth the complexity.
+Before any real tick has ever landed, it also swaps in this widget's own
+placeholder numbers for the newly picked degree immediately, via
+_update_fit_panel() -- but only then; see that method's own docstring
+(and _on_roi_changed()'s/_exit_drifted_state()'s, which guard the same
+way) for why it must never repaint from placeholder data once real data
+already exists on screen.
 
 Real per-tick fits close the "degree > 1 has no internal zeta
 uncertainty" gap noted in docs/project_state.md: SpatialDispersionFitResult
@@ -685,15 +690,30 @@ class LiveViewWidget(QWidget):
 
         '''
         Entered on a True -> False self._settings_drifted transition:
-        restores the scatter/error-bar/fit-curve overlay's visibility and
-        recomputes the fit-diagnostics panel for the currently-selected
-        degree, undoing _enter_drifted_state()'s "N/A" placeholders.
+        restores the scatter/error-bar/fit-curve overlay's visibility.
+        Before any real tick has landed (self._displayed_real_data still
+        False), also recomputes the fit-diagnostics panel from
+        _placeholder_fits via _update_fit_panel(), undoing
+        _enter_drifted_state()'s "N/A" placeholders with this widget's own
+        pre-baked numbers -- there's nothing real yet to show instead.
+        Once real data has been displayed at least once, _update_fit_panel()
+        must NOT be called here -- same reasoning as _on_roi_changed()'s
+        and _on_degree_changed()'s own docstrings: it would replace
+        whatever real result was on screen before the drift episode with
+        stale placeholder numbers (including degree > 1's placeholder-only
+        "uncertainty not available" note, which isn't true of real data)
+        for however long until the next real tick lands. _on_timer_tick()
+        only skips real work while self._settings_drifted is True, so the
+        very next tick after this method runs will call
+        _update_fit_panel_from_result() with genuinely current numbers
+        anyway -- there's no gap to fill here once real data exists.
         '''
 
         self._scatter.setVisible(True)
         self._error_bars.setVisible(True)
         self._fit_curve.setVisible(True)
-        self._update_fit_panel(self._current_degree)
+        if not self._displayed_real_data:
+            self._update_fit_panel(self._current_degree)
 
     def _build_degree_selector_group(self) -> QGroupBox:
 
@@ -1203,17 +1223,32 @@ class LiveViewWidget(QWidget):
 
     def _on_degree_changed(self, index: int) -> None:
 
+        '''
+        Before any real tick has landed (self._displayed_real_data still
+        False), swaps in this widget's own pre-baked placeholder numbers
+        for the newly-selected degree via _update_fit_panel() -- there's
+        nothing real on screen yet to preserve. Once real data has been
+        displayed at least once, this must NOT call _update_fit_panel():
+        that method always shows _placeholder_fits[degree]'s stale,
+        construction-time-only content, including a "Uncertainty not
+        available for degree > 1" note that real data never actually has
+        (see _update_fit_panel_from_result(), which always clears that
+        note -- real sigma_zeta() is available at every degree). Calling
+        it here would replace genuine on-screen results with that stale
+        placeholder/note for however long until the next real tick lands
+        -- exactly the same class of bug _on_roi_changed() had (see that
+        method's own docstring). Once real data exists, self._current_degree
+        alone is enough: the next tick reads it fresh and calls
+        _update_fit_panel_from_result() with the real fit for the new
+        degree, curve included.
+        '''
+
         degree = self._degree_selector.itemData(index)
         if degree is None:
             return
         self._current_degree = degree
-        # NOTE: this only swaps in this widget's own pre-baked placeholder
-        # numbers for the newly-selected degree immediately -- it does not
-        # synchronously re-run analyze_shot()/refit anything. The next
-        # timer tick reads self._current_degree fresh and supplies the
-        # real numbers instead, at most one tick interval later (see
-        # module docstring).
-        self._update_fit_panel(degree)
+        if not self._displayed_real_data:
+            self._update_fit_panel(degree)
 
     def _update_fit_panel(self, degree: int) -> None:
 

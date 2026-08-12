@@ -930,3 +930,78 @@ class TestLiveViewRealUpdateLoop:
         assert np.array_equal(after_x, real_x)
         assert np.array_equal(after_y, real_y)
         assert np.array_equal(widget._image_item.image, real_image)
+
+    def test_degree_change_after_real_data_does_not_flash_placeholder_note(
+        self, qtbot, started_camera_stream
+    ):
+        # Regression test: _on_degree_changed() used to call
+        # _update_fit_panel() unconditionally, which always repaints from
+        # self._placeholder_fits -- including a "Uncertainty not available
+        # for degree > 1" note real data never actually has (real
+        # sigma_zeta() is available at every degree, see
+        # _update_fit_panel_from_result()). So switching to degree 2/3
+        # after real data was already on screen replaced the genuine
+        # diagnostics with that stale placeholder note until the next real
+        # tick overwrote it again. Confirms the fix: once real data has
+        # landed, changing the degree must only update
+        # self._current_degree, never repaint placeholder text.
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._scatter.getData()[0].size > 500, timeout=3000)
+        assert widget._zeta_note_label.text() == ""
+        real_chi_squared = widget._chi_squared_label.text()
+
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+        # No qtbot.wait()/processEvents() between the degree change and
+        # these assertions -- Qt dispatches currentIndexChanged ->
+        # _on_degree_changed() synchronously inside setCurrentIndex(), so
+        # if it had wrongly fallen back to _update_fit_panel(), the
+        # placeholder note would already be showing by this point.
+        assert widget._current_degree == 2
+        assert widget._zeta_note_label.text() == ""
+        assert widget._chi_squared_label.text() == real_chi_squared
+
+        # A subsequent real tick must genuinely refit at the new degree --
+        # not just leave the pre-switch degree-1 numbers in place.
+        qtbot.waitUntil(
+            lambda: widget._chi_squared_label.text() != real_chi_squared, timeout=3000
+        )
+        assert widget._zeta_note_label.text() == ""
+        assert widget._coefficients_label.text().count("c<sub>") == 3
+
+    def test_drift_exit_at_degree_gt_1_after_real_data_does_not_flash_placeholder_note(
+        self, qtbot, started_camera_stream, monkeypatch
+    ):
+        # Regression test: _exit_drifted_state() had the same bug as
+        # _on_degree_changed() above -- unconditionally calling
+        # _update_fit_panel(), which shows the placeholder-only
+        # "Uncertainty not available for degree > 1" note. Exercises it at
+        # degree 2, where the bug would actually be visible (the note only
+        # ever appears for degree > 1).
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._scatter.getData()[0].size > 500, timeout=3000)
+        widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+        qtbot.waitUntil(lambda: widget._coefficients_label.text().count("c<sub>") == 3, timeout=3000)
+
+        drifted_gain_db = FIXTURE_GAIN_DB + GAIN_MATCH_TOLERANCE_ABS * 2
+        widget._gain_spin.setValue(drifted_gain_db)
+        assert widget._settings_drifted is True
+
+        widget._gain_spin.setValue(FIXTURE_GAIN_DB)
+        assert widget._settings_drifted is False
+
+        # No qtbot.wait()/processEvents() between exiting the drifted state
+        # and this assertion -- _exit_drifted_state() runs synchronously
+        # inside the setValue() call above, so if it had wrongly fallen
+        # back to _update_fit_panel(), the placeholder note would already
+        # be showing by this point.
+        assert widget._zeta_note_label.text() == ""
