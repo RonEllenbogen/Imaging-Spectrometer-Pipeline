@@ -65,7 +65,12 @@ from pipeline.acquisition import CameraStream
 
 from ..shared.metadata import CalibrationRecord
 from .calibrate import calibrate_spectral, WavelengthCalibrationResult
-from .geometric_tilt import build_geometric_tilt, save_geometric_tilt, GeometricTiltResult
+from .geometric_tilt import (
+    build_geometric_tilt,
+    save_geometric_tilt,
+    GeometricTiltResult,
+    PLACEHOLDER_GAIN_E_PER_ADU,
+)
 from .io import save_spectral_calibration
 from .line_matching import match_lines
 
@@ -87,6 +92,7 @@ def run_spectral_calibration(
     path: str | Path,
     geometric_tilt_path: str | Path,
     degree: int = 1,
+    gain_e_per_adu: float = PLACEHOLDER_GAIN_E_PER_ADU,
 ) -> tuple[WavelengthCalibrationResult, GeometricTiltResult]:
 
     '''
@@ -119,6 +125,18 @@ def run_spectral_calibration(
     degree
         Polynomial degree for the pixel->wavelength_nm fit -- see
         calibrate.calibrate_spectral().
+    gain_e_per_adu
+        Real measured conversion gain (calibration/sensor/conversion_
+        gain.py), passed through to build_geometric_tilt() alongside
+        sensor_calibration.background_sigma (always threaded through
+        unconditionally -- it's a required CalibrationSet field, so
+        there's no reason not to) for the Thompson-Larson-Webb centroid
+        uncertainty its shared row_shift curve is now weighted by (see
+        build_geometric_tilt()'s own docstring). Defaults to
+        PLACEHOLDER_GAIN_E_PER_ADU for a caller with no real conversion-
+        gain calibration to pass -- real callers (cli/calibration.py's
+        spectral-capture, gui/calibration_dialogs.py's
+        SpectralCalibrationDialog) always load one and pass it.
 
     Returns
     -------
@@ -156,7 +174,9 @@ def run_spectral_calibration(
                 f"all lamp frames in one batch must share identical settings"
             )
 
-    tilt_result = build_geometric_tilt(frames)
+    tilt_result = build_geometric_tilt(
+        frames, gain_e_per_adu=gain_e_per_adu, background_sigma=sensor_calibration.background_sigma,
+    )
     save_geometric_tilt(geometric_tilt_path, tilt_result)
     calibration_with_tilt = dataclasses.replace(sensor_calibration, geometric_tilt=tilt_result)
 

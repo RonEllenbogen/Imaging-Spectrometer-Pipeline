@@ -366,10 +366,17 @@ def _cmd_spectral_capture(args: argparse.Namespace) -> None:
         )
     else:
         bad_pixel_map_path = Path(args.bad_pixel_map)
+    if args.conversion_gain is None:
+        conversion_gain_path = resolve_artifact_path(
+            args.output_dir, None, DEFAULT_CONVERSION_GAIN_FILENAME
+        )
+    else:
+        conversion_gain_path = Path(args.conversion_gain)
 
     baseline_result, baseline_record = load_baseline(baseline_path)
     flat_field, flat_field_record = load_flat_field(flat_field_path)
     bad_pixel_mask, _ = load_bad_pixel_map(bad_pixel_map_path)
+    conversion_gain_result, _ = load_conversion_gain(conversion_gain_path)
     sensor_calibration = CalibrationSet(
         baseline=baseline_result.baseline,
         baseline_record=baseline_record,
@@ -386,7 +393,7 @@ def _cmd_spectral_capture(args: argparse.Namespace) -> None:
     try:
         run_spectral_calibration(
             stream, args.n_frames, sensor_calibration, path, geometric_tilt_path,
-            degree=args.degree,
+            degree=args.degree, gain_e_per_adu=conversion_gain_result.gain_e_per_adu,
         )
     finally:
         if stream.is_running:
@@ -600,6 +607,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"Bad-pixel-map artifact to preprocess lamp frames with (default: "
             f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_BAD_PIXEL_MAP_FILENAME})."
+        ),
+    )
+    spectral_capture_parser.add_argument(
+        "--conversion-gain",
+        default=None,
+        dest="conversion_gain",
+        help=(
+            f"Conversion-gain artifact, used for the built geometric-tilt calibration's "
+            f"centroid-uncertainty weighting (default: "
+            f"{DEFAULT_ARTIFACT_DIR}/{DEFAULT_CONVERSION_GAIN_FILENAME})."
         ),
     )
     spectral_capture_parser.add_argument(

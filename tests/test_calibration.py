@@ -50,6 +50,7 @@ from pipeline.calibration.spatial import (
     ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR, PIXEL_PITCH_UM,
     ScaleFactorRecord, save_scale_factor, load_scale_factor,
 )
+import pipeline.calibration.spectral.geometric_tilt as geometric_tilt_module
 from pipeline.calibration.spectral import (
     calibrate_spectral, build_manual_spectral_calibration, WavelengthCalibrationResult,
     GeometricTiltResult, build_geometric_tilt, save_geometric_tilt, load_geometric_tilt,
@@ -1066,6 +1067,91 @@ class TestBuildGeometricTilt:
         assert result.reference_row == CANONICAL_SHAPE[0] // 2
         assert np.max(np.abs(result.row_shift - true_shift)) < 0.5
 
+    def test_shared_curve_weights_bright_lines_over_a_noisy_outlier(self, monkeypatch):
+        '''
+        Regression test for the shared row_shift curve's inverse-variance
+        weighting (build_geometric_tilt() -- previously a plain
+        np.nanmean() across lines, giving a noisy line exactly as much
+        say as a bright, tightly-centroided one). Two bright lines share
+        one true shift function; a third, much dimmer (and so much
+        noisier) line has a genuinely different one.
+
+        Isolates the weighting mechanism itself rather than hand-deriving
+        what an unweighted mean "should" produce (edge/coverage effects
+        make that fragile to get exactly right by hand): runs the same
+        frames through build_geometric_tilt() twice, once normally (real,
+        non-uniform per-row sigma_x0) and once with _row_centroids()
+        patched to report uniform sigma_x0 -- which makes the *same*
+        inverse-variance-weighted-mean code path mathematically collapse
+        to a plain average, since every weight becomes equal. Comparing
+        those two real runs -- not a hand-derived formula -- is the
+        direct test that non-uniform sigma actually changes the result.
+        '''
+        n_rows, n_cols = CANONICAL_SHAPE
+        rows = np.arange(n_rows)
+        reference_row = n_rows // 2
+
+        def majority_shift(rows):
+            return 0.01 * (rows - reference_row)
+
+        def outlier_shift(rows):
+            return 0.02 * (rows - reference_row)
+
+        columns = np.arange(n_cols)
+        peak_sigma_px = 2.5
+        # outlier's peak_height is tuned low enough to give it visibly
+        # worse per-row centroid precision than the two majority lines,
+        # but not so low find_peaks() fails to detect it at all (its
+        # column-summed height, diluted by its own row-dependent spread,
+        # must still clear PEAK_HEIGHT_FRACTION of the majority lines'
+        # much taller, much less spread peaks) -- empirically tuned
+        # against this exact seed/frame count, not a value with any
+        # independent physical meaning.
+        lines = [
+            (300.0, majority_shift, 180.0),
+            (700.0, majority_shift, 180.0),
+            (1100.0, outlier_shift, 90.0),   # dimmer, genuinely different shape
+        ]
+
+        image = np.zeros((n_rows, n_cols))
+        for pixel_position, shift_fn, peak_height in lines:
+            target = pixel_position + shift_fn(rows)
+            image += peak_height * np.exp(
+                -0.5 * ((columns[np.newaxis, :] - target[:, np.newaxis]) / peak_sigma_px) ** 2
+            )
+
+        rng = np.random.default_rng(0)
+        frames = [
+            _frame(np.clip(image + rng.normal(scale=2.0, size=CANONICAL_SHAPE), 0, None), frame_id=i)
+            for i in range(3)
+        ]
+
+        weighted_result = build_geometric_tilt(frames)
+        assert weighted_result.reference_row == reference_row
+
+        original_row_centroids = geometric_tilt_module._row_centroids
+
+        def _uniform_sigma_row_centroids(*args, **kwargs):
+            centroid_rows, x0, sigma_x0 = original_row_centroids(*args, **kwargs)
+            return centroid_rows, x0, np.ones_like(sigma_x0)
+
+        monkeypatch.setattr(geometric_tilt_module, "_row_centroids", _uniform_sigma_row_centroids)
+        unweighted_equivalent_result = build_geometric_tilt(frames)
+
+        true_majority = majority_shift(rows)
+        true_majority -= true_majority[reference_row]
+
+        weighted_error = np.max(np.abs(weighted_result.row_shift - true_majority))
+        unweighted_error = np.max(np.abs(unweighted_equivalent_result.row_shift - true_majority))
+
+        # Sanity check the two runs actually differ -- otherwise the
+        # comparison below would be vacuous.
+        assert not np.allclose(weighted_result.row_shift, unweighted_equivalent_result.row_shift)
+        # The real point: real (non-uniform) sigma weighting must land
+        # measurably closer to the bright lines' true shape than the
+        # uniform-sigma (~unweighted) equivalent does.
+        assert weighted_error < 0.8 * unweighted_error
+
     def test_no_injected_per_line_difference_gives_near_zero_residual(self):
         # Every line shares the exact same row_shift_fn -- residual slope
         # (leftover after subtracting the shared curve) should be ~0.
@@ -1246,24 +1332,39 @@ class TestRunSpectralCalibration:
             lambda image: (pixel, wavelength_nm, sigma_pixel, sigma_wavelength_nm),
         )
         stub_tilt = self._stub_geometric_tilt()
+        build_geometric_tilt_calls = []
+
+        def _stub_build_geometric_tilt(frames, gain_e_per_adu=None, background_sigma=None):
+            build_geometric_tilt_calls.append((gain_e_per_adu, background_sigma))
+            return stub_tilt
+
         monkeypatch.setattr(
             "pipeline.calibration.spectral.workflow.build_geometric_tilt",
-            lambda frames: stub_tilt,
+            _stub_build_geometric_tilt,
         )
 
+        sensor_calibration = _sensor_calibration_set()
         stream = _make_running_stream()
         try:
             path = tmp_path / "spectral.npz"
             tilt_path = tmp_path / "geometric_tilt.npz"
             result, tilt_result = run_spectral_calibration(
-                stream, n_frames=3, sensor_calibration=_sensor_calibration_set(),
+                stream, n_frames=3, sensor_calibration=sensor_calibration,
                 path=path, geometric_tilt_path=tilt_path, degree=1,
+                gain_e_per_adu=2.5,
             )
 
             assert path.exists()
             assert tilt_path.exists()
             assert tilt_result is stub_tilt
             assert result.record.source_frame_count == 3
+            # The real point of this test: real noise parameters -- not
+            # geometric_tilt.py's own placeholders -- must reach
+            # build_geometric_tilt(), sourced from the caller-supplied
+            # gain_e_per_adu and from sensor_calibration.background_sigma
+            # (always threaded through unconditionally, since it's a
+            # required CalibrationSet field).
+            assert build_geometric_tilt_calls == [(2.5, sensor_calibration.background_sigma)]
 
             loaded = load_spectral_calibration(path)
             assert np.allclose(loaded.fit.coefficients, result.fit.coefficients)

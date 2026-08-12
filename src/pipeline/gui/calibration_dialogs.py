@@ -59,6 +59,7 @@ from pipeline.calibration.sensor import (
     finish_flat_field_calibration,
     load_bad_pixel_map,
     load_baseline,
+    load_conversion_gain,
     load_flat_field,
     run_baseline_calibration,
     run_conversion_gain_calibration,
@@ -809,10 +810,14 @@ class SpectralCalibrationDialog(QDialog):
     form (frame count + Auto/Manual exposure choice + gain_db), plus a
     fit-degree selector, and calls calibration/spectral/workflow.py's
     run_spectral_calibration(camera_stream, n_frames, sensor_calibration,
-    path, geometric_tilt_path, degree) against a CalibrationSet loaded
-    fresh from DEFAULT_ARTIFACT_DIR (baseline + flat field + bad-pixel map
-    -- see _on_start_clicked()'s docstring for what happens if those
-    don't exist yet). Manual exposure matters here specifically because
+    path, geometric_tilt_path, degree, gain_e_per_adu) against a
+    CalibrationSet + real gain_e_per_adu loaded fresh from
+    DEFAULT_ARTIFACT_DIR (baseline + flat field + bad-pixel map +
+    conversion gain -- see _on_start_clicked()'s docstring for what
+    happens if any of those don't exist yet; conversion gain specifically
+    is what lets the geometric-tilt calibration built alongside spectral
+    use real centroid-uncertainty weighting instead of a placeholder).
+    Manual exposure matters here specifically because
     the lamp frames get preprocessed through that loaded baseline before
     line-matching -- check_settings_match() rejects a lamp frame whose
     actual exposure_us drifts from the baseline artifact's tagged value,
@@ -1042,16 +1047,23 @@ class SpectralCalibrationDialog(QDialog):
 
         return [sigma_spin.value() for _, sigma_spin in self._coefficient_rows]
 
-    def _load_sensor_calibration(self) -> CalibrationSet | None:
+    def _load_sensor_calibration(self) -> tuple[CalibrationSet, float] | None:
 
         '''
-        Loads baseline + flat field + bad-pixel map from DEFAULT_ARTIFACT_DIR
-        -- the same paths CalibrationScreen's own "load existing
-        calibrations" flow reads from -- and bundles them into a
-        CalibrationSet for run_spectral_calibration() to preprocess lamp
-        frames with. Returns None (having already shown an explanatory
-        error dialog) if baseline and/or flat field haven't been created
-        yet, rather than letting the resulting FileNotFoundError propagate.
+        Loads baseline + flat field + bad-pixel map + conversion gain
+        from DEFAULT_ARTIFACT_DIR -- the same paths CalibrationScreen's
+        own "load existing calibrations" flow reads from -- and bundles
+        the first three into a CalibrationSet for run_spectral_
+        calibration() to preprocess lamp frames with. conversion_gain
+        is returned separately (as gain_e_per_adu, not folded into
+        CalibrationSet, which has no field for it) for the caller to pass
+        into run_spectral_calibration() directly -- it's what lets the
+        geometric-tilt calibration built alongside spectral use real
+        Thompson-Larson-Webb centroid weighting instead of
+        build_geometric_tilt()'s own placeholder (see that function's
+        docstring). Returns None (having already shown an explanatory
+        error dialog) if any of the four haven't been created yet, rather
+        than letting the resulting FileNotFoundError propagate.
         '''
 
         try:
@@ -1064,16 +1076,19 @@ class SpectralCalibrationDialog(QDialog):
             bad_pixel_mask, _ = load_bad_pixel_map(
                 DEFAULT_ARTIFACT_DIR / DEFAULT_BAD_PIXEL_MAP_FILENAME
             )
+            conversion_gain_result, _ = load_conversion_gain(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME
+            )
         except FileNotFoundError:
             show_calibration_error_dialog(
                 self,
                 "Missing Sensor Calibration",
-                "Baseline and flat-field calibrations must be created before "
-                "spectral calibration can run. Create them first, then retry.",
+                "Baseline, flat-field, and conversion-gain calibrations must be created "
+                "before spectral calibration can run. Create them first, then retry.",
             )
             return None
 
-        return CalibrationSet(
+        sensor_calibration = CalibrationSet(
             baseline=baseline_result.baseline,
             baseline_record=baseline_record,
             flat_field=flat_field,
@@ -1081,6 +1096,7 @@ class SpectralCalibrationDialog(QDialog):
             bad_pixel_mask=bad_pixel_mask,
             background_sigma=baseline_result.background_sigma,
         )
+        return sensor_calibration, conversion_gain_result.gain_e_per_adu
 
     def _on_exposure_mode_changed(self, mode: str) -> None:
 
@@ -1112,20 +1128,22 @@ class SpectralCalibrationDialog(QDialog):
 
         '''
         Capture-mode accept path: loads the already-built sensor
-        CalibrationSet (see _load_sensor_calibration()), then builds a
-        CameraStream and runs run_spectral_calibration() against it --
-        mirrors cli/calibration.py's _cmd_spectral_capture. Manual
-        exposure (see auto_exposure()/exposure_us() above) matters here
-        specifically so the lamp frames' actual exposure_us can be made to
-        match the loaded baseline's -- see class docstring.
-        run_spectral_calibration() also builds and saves the geometric
-        tilt calibration as a side effect (see its own docstring) -- not
+        CalibrationSet + real gain_e_per_adu (see
+        _load_sensor_calibration()), then builds a CameraStream and runs
+        run_spectral_calibration() against it -- mirrors
+        cli/calibration.py's _cmd_spectral_capture. Manual exposure (see
+        auto_exposure()/exposure_us() above) matters here specifically so
+        the lamp frames' actual exposure_us can be made to match the
+        loaded baseline's -- see class docstring. run_spectral_
+        calibration() also builds and saves the geometric tilt
+        calibration as a side effect (see its own docstring) -- not
         duplicated here.
         '''
 
-        sensor_calibration = self._load_sensor_calibration()
-        if sensor_calibration is None:
+        loaded = self._load_sensor_calibration()
+        if loaded is None:
             return
+        sensor_calibration, gain_e_per_adu = loaded
 
         self.start_button.setEnabled(False)
         self.status_label.setText("Capturing...")
@@ -1144,6 +1162,7 @@ class SpectralCalibrationDialog(QDialog):
                     DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME,
                     DEFAULT_ARTIFACT_DIR / DEFAULT_GEOMETRIC_TILT_FILENAME,
                     degree=self.capture_degree_selector.currentData(),
+                    gain_e_per_adu=gain_e_per_adu,
                 )
             finally:
                 if camera_stream.is_running:
