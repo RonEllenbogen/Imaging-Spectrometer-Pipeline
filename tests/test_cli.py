@@ -312,6 +312,7 @@ class TestSpectralCaptureArgumentParsing:
             "--baseline", "custom_baseline.npz",
             "--flat-field", "custom_flat.npz",
             "--bad-pixel-map", "custom_mask.npz",
+            "--conversion-gain", "custom_conversion_gain.npz",
             "--path", str(tmp_path / "spectral.npz"),
             "--geometric-tilt-path", str(tmp_path / "tilt.npz"),
         ])
@@ -322,6 +323,7 @@ class TestSpectralCaptureArgumentParsing:
         assert captured["baseline"] == "custom_baseline.npz"
         assert captured["flat_field"] == "custom_flat.npz"
         assert captured["bad_pixel_map"] == "custom_mask.npz"
+        assert captured["conversion_gain"] == "custom_conversion_gain.npz"
         assert captured["geometric_tilt_path"] == str(tmp_path / "tilt.npz")
 
     def test_defaults(self, monkeypatch):
@@ -335,6 +337,7 @@ class TestSpectralCaptureArgumentParsing:
         assert captured["baseline"] is None
         assert captured["flat_field"] is None
         assert captured["bad_pixel_map"] is None
+        assert captured["conversion_gain"] is None
         assert captured["path"] is None
         assert captured["geometric_tilt_path"] is None
         assert captured["auto_exposure"] is True
@@ -378,6 +381,10 @@ class TestSpectralCapturePathResolution:
             recorded["bad_pixel_map_path"] = path
             return np.zeros((2, 2), dtype=bool), "bad_pixel_record"
 
+        def fake_load_conversion_gain(path):
+            recorded["conversion_gain_path"] = path
+            return SimpleNamespace(gain_e_per_adu=2.5), "conversion_gain_record"
+
         class FakeStream:
             is_running = False
 
@@ -395,16 +402,19 @@ class TestSpectralCapturePathResolution:
 
         def fake_run_spectral_calibration(
             stream, n_frames, sensor_calibration, path, geometric_tilt_path, degree=1,
+            gain_e_per_adu=None,
         ):
             recorded["n_frames"] = n_frames
             recorded["degree"] = degree
             recorded["path"] = path
             recorded["geometric_tilt_path"] = geometric_tilt_path
             recorded["sensor_calibration"] = sensor_calibration
+            recorded["gain_e_per_adu"] = gain_e_per_adu
 
         monkeypatch.setattr(cli, "load_baseline", fake_load_baseline)
         monkeypatch.setattr(cli, "load_flat_field", fake_load_flat_field)
         monkeypatch.setattr(cli, "load_bad_pixel_map", fake_load_bad_pixel_map)
+        monkeypatch.setattr(cli, "load_conversion_gain", fake_load_conversion_gain)
         monkeypatch.setattr(cli, "build_camera_stream", fake_build_camera_stream)
         monkeypatch.setattr(cli, "run_spectral_calibration", fake_run_spectral_calibration)
 
@@ -420,11 +430,16 @@ class TestSpectralCapturePathResolution:
         assert recorded["baseline_path"] == tmp_path / cli.DEFAULT_BASELINE_FILENAME
         assert recorded["flat_field_path"] == tmp_path / cli.DEFAULT_FLAT_FIELD_FILENAME
         assert recorded["bad_pixel_map_path"] == tmp_path / cli.DEFAULT_BAD_PIXEL_MAP_FILENAME
+        assert recorded["conversion_gain_path"] == tmp_path / cli.DEFAULT_CONVERSION_GAIN_FILENAME
         assert recorded["path"] == tmp_path / cli.DEFAULT_SPECTRAL_FILENAME
         assert recorded["geometric_tilt_path"] == tmp_path / cli.DEFAULT_GEOMETRIC_TILT_FILENAME
         assert recorded["n_frames"] == cli.DEFAULT_N_FRAMES
         assert recorded["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
         assert recorded["sensor_calibration"].background_sigma == 1.0
+        # The real point of this test: real conversion-gain -- not
+        # build_geometric_tilt()'s own placeholder -- must reach
+        # run_spectral_calibration().
+        assert recorded["gain_e_per_adu"] == 2.5
 
     def test_explicit_artifact_paths_override_defaults(self, monkeypatch, tmp_path):
         recorded = {}
@@ -442,6 +457,19 @@ class TestSpectralCapturePathResolution:
             Path(cli.DEFAULT_ARTIFACT_DIR) / cli.DEFAULT_GEOMETRIC_TILT_FILENAME
         )
         assert recorded["stream_started"] is True
+
+    def test_explicit_conversion_gain_path_overrides_default(self, monkeypatch, tmp_path):
+        recorded = {}
+        self._patch_collaborators(monkeypatch, recorded)
+
+        custom_conversion_gain = tmp_path / "my_conversion_gain.npz"
+        cli.main([
+            "spectral-capture", "--gain-db", "1.0", "--auto-exposure",
+            "--conversion-gain", str(custom_conversion_gain),
+        ])
+
+        assert recorded["conversion_gain_path"] == custom_conversion_gain
+        assert recorded["gain_e_per_adu"] == 2.5
 
     def test_explicit_geometric_tilt_path_overrides_default(self, monkeypatch, tmp_path):
         recorded = {}

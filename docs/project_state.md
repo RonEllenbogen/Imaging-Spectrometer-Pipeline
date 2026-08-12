@@ -519,6 +519,21 @@ derivations (θ_m(800nm)≈−12.8°, full 1920-column sensor spans ~108nm).
   centroid-plus-Thompson-Larson-Webb formula locally rather than importing it (`calibration/` must not
   depend on `analysis/`, same rule `shared/fitting.py` follows) -- accepts plain
   `gain_e_per_adu`/`background_sigma` floats rather than a `SensorNoiseModel` for the same reason.
+  The shared `row_shift` curve is an inverse-variance-weighted mean across lines at each row (each
+  line's own per-row Thompson-Larson-Webb `sigma_x0`, already computed for the residual-slope fits,
+  now also weights this step) -- previously a plain `np.nanmean()`, which gave a dim/noisy line exactly
+  as much say as a bright, tightly-centroided one. `gain_e_per_adu`/`background_sigma` were, until a
+  real lab session existed to supply them, always this module's own placeholders (`gain=1.0`,
+  `background_sigma=0.0`) -- `run_spectral_calibration()` now threads real values through
+  unconditionally for `background_sigma` (a required `CalibrationSet` field, always available) and via
+  a new `gain_e_per_adu` parameter for the caller-supplied conversion gain; both real GUI/CLI callers
+  (`SpectralCalibrationDialog`, `spectral-capture`) now load a `conversion_gain.npz` alongside
+  baseline/flat-field/bad-pixel-map (a new required artifact for spectral capture, where it was
+  previously not needed) and pass its `gain_e_per_adu` through. Found empirically not to be a small
+  effect: reproducibility between two independent lamp captures (diffing `row_shift`) showed up to 46px
+  of disagreement against the curve's own ~52px total range -- prompted by a real lab-PC session where
+  live view's measured "spatial dispersion" dropped by roughly half once tilt correction was applied at
+  all, but still didn't reproduce cleanly between two independently-measured tilt calibrations.
   `save_geometric_tilt()`/`load_geometric_tilt()` persist it via `shared/io.py`. Applied by
   `preprocessing/steps/geometric_tilt.py`'s `apply_geometric_tilt_correction()` (a resample via
   `scipy.ndimage.map_coordinates`, not just an intensity correction -- the one preprocessing step that

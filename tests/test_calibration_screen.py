@@ -75,11 +75,17 @@ from pipeline.calibration.exceptions import (  # noqa: E402
 from pipeline.calibration.sensor import (  # noqa: E402
     BaselineResult,
     ConversionGainRecord,
+    ConversionGainResult,
     save_bad_pixel_map,
     save_baseline,
+    save_conversion_gain,
     save_flat_field,
 )
-from pipeline.calibration.shared import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS  # noqa: E402
+from pipeline.calibration.shared import (  # noqa: E402
+    CalibrationRecord,
+    GAIN_MATCH_TOLERANCE_ABS,
+    PolynomialFitResult,
+)
 from pipeline.calibration.spatial import (  # noqa: E402
     DEFAULT_SCALE_FACTOR,
     ScaleFactorPositionCalibration,
@@ -315,11 +321,12 @@ def _record() -> CalibrationRecord:
 
 
 def _save_sensor_artifacts(artifact_dir) -> None:
-    '''Writes minimal, valid baseline/flat-field/bad-pixel-map artifacts
-    to artifact_dir (at the same DEFAULT_*_FILENAME paths calibration_
-    dialogs.py's dialogs read from/write to) -- enough for
+    '''Writes minimal, valid baseline/flat-field/bad-pixel-map/conversion-
+    gain artifacts to artifact_dir (at the same DEFAULT_*_FILENAME paths
+    calibration_dialogs.py's dialogs read from/write to) -- enough for
     SpectralCalibrationDialog's capture-mode _load_sensor_calibration()
-    to succeed without needing a full real flat-field capture session.'''
+    to succeed without needing a full real flat-field/conversion-gain
+    capture session.'''
     artifact_dir.mkdir(parents=True, exist_ok=True)
     record = _record()
     save_baseline(
@@ -330,6 +337,18 @@ def _save_sensor_artifacts(artifact_dir) -> None:
     save_flat_field(artifact_dir / DEFAULT_FLAT_FIELD_FILENAME, np.ones(CANONICAL_SHAPE), record)
     save_bad_pixel_map(
         artifact_dir / DEFAULT_BAD_PIXEL_MAP_FILENAME, np.zeros(CANONICAL_SHAPE, dtype=bool), record
+    )
+    save_conversion_gain(
+        artifact_dir / DEFAULT_CONVERSION_GAIN_FILENAME,
+        ConversionGainResult(fit=PolynomialFitResult(
+            degree=1,
+            coefficients=np.array([0.5, 0.4]),
+            coefficient_sigma=np.array([0.1, 0.05]),
+            reduced_chi_squared=1.0,
+            residuals=np.zeros(3),
+            normalized_residuals=np.zeros(3),
+        )),
+        ConversionGainRecord(gain_db=FIXTURE_GAIN_DB, timestamp=time.time(), n_illumination_levels=5),
     )
 
 

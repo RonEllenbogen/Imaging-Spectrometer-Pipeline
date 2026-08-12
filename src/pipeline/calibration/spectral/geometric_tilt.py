@@ -336,10 +336,18 @@ def build_geometric_tilt(
     gain_e_per_adu, background_sigma
         Sensor noise parameters for the Thompson-Larson-Webb centroid
         uncertainty (see module docstring's note on why this duplicates
-        rather than imports analysis/centroiding.py's version). Default
-        to this module's own placeholders -- no real conversion-gain/
-        baseline calibration exists yet for every camera this might run
-        against; pass real measured values once one does.
+        rather than imports analysis/centroiding.py's version). Feed
+        directly into two places, not just one: each line's own per-row
+        sigma_x0 (used, as before, to weight that line's residual-slope
+        fit), and -- since real values are now threaded through by every
+        real caller (calibration/spectral/workflow.py's
+        run_spectral_calibration()) -- the inverse-variance weighting of
+        the shared row_shift curve itself (see below), so a wrong noise
+        estimate here now measurably skews row_shift, not just each
+        line's reported uncertainty. Default to this module's own
+        placeholders only for a caller with no real conversion-gain/
+        baseline calibration to pass (e.g. a bring-up script against a
+        brand new camera); pass real measured values whenever they exist.
     fitter
         PolynomialFitter for each line's row-vs-centroid fit. Defaults to
         TotalLeastSquaresFit.
@@ -414,11 +422,26 @@ def build_geometric_tilt(
         )
 
     displacement_grid = np.full((len(line_columns), n_rows), np.nan)
-    for i, (rows, displacement) in enumerate(zip(line_rows, line_displacement)):
+    sigma_grid = np.full((len(line_columns), n_rows), np.nan)
+    for i, (rows, displacement, sigma_x0) in enumerate(
+        zip(line_rows, line_displacement, line_sigma)
+    ):
         displacement_grid[i, rows.astype(int)] = displacement
+        sigma_grid[i, rows.astype(int)] = sigma_x0
 
-    with np.errstate(invalid="ignore"):
-        mean_displacement = np.nanmean(displacement_grid, axis=0)
+    # Inverse-variance weighted mean, not a plain average -- a row covered
+    # by one bright, tightly-centroided line and one dim, noisy one should
+    # trust the bright line's displacement more, not split the difference
+    # evenly. weight_grid/displacement_grid/sigma_grid all share the same
+    # NaN-for-"this line has no data at this row" pattern, so nansum
+    # naturally excludes absent lines the same way nanmean used to; a row
+    # with zero coverage from every line still comes out NaN (0/0), same
+    # as nanmean's own behavior there, handled below the same way it
+    # always was.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        weight_grid = 1.0 / sigma_grid ** 2
+        weight_sum = np.nansum(weight_grid, axis=0)
+        mean_displacement = np.nansum(weight_grid * displacement_grid, axis=0) / weight_sum
 
     valid_rows = np.flatnonzero(~np.isnan(mean_displacement))
     row_shift = np.interp(np.arange(n_rows), valid_rows, mean_displacement[valid_rows])
