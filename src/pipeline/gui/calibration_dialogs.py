@@ -806,15 +806,19 @@ class SpectralCalibrationDialog(QDialog):
     the dialog, each showing its own section of a QStackedWidget below:
 
     "Capture from Lamp" mirrors BaselineDialog's single-phase capture
-    form (frame count + gain_db), plus a fit-degree selector, and calls
-    calibration/spectral/workflow.py's run_spectral_calibration(
-    camera_stream, n_frames, sensor_calibration, path,
-    geometric_tilt_path, degree) against a CalibrationSet loaded fresh
-    from DEFAULT_ARTIFACT_DIR (baseline + flat field + bad-pixel map --
-    see _on_start_clicked()'s docstring for what happens if those don't
-    exist yet). This dialog has no exposure-mode selector of its own (see
-    _on_start_clicked()), unlike BaselineDialog/FlatFieldDialog -- always
-    auto-exposure.
+    form (frame count + Auto/Manual exposure choice + gain_db), plus a
+    fit-degree selector, and calls calibration/spectral/workflow.py's
+    run_spectral_calibration(camera_stream, n_frames, sensor_calibration,
+    path, geometric_tilt_path, degree) against a CalibrationSet loaded
+    fresh from DEFAULT_ARTIFACT_DIR (baseline + flat field + bad-pixel map
+    -- see _on_start_clicked()'s docstring for what happens if those
+    don't exist yet). Manual exposure matters here specifically because
+    the lamp frames get preprocessed through that loaded baseline before
+    line-matching -- check_settings_match() rejects a lamp frame whose
+    actual exposure_us drifts from the baseline artifact's tagged value,
+    which auto-exposure convergence (picking whatever the dim lamp needs)
+    has no way to guarantee; entering the same exposure_us the baseline
+    was captured at avoids the mismatch outright.
 
     "Manual Entry" mirrors SpatialCalibrationDialog's no-camera,
     direct-value style, but for a variable-length pixel->wavelength_nm
@@ -907,11 +911,23 @@ class SpectralCalibrationDialog(QDialog):
         self.n_frames_spin.setValue(DEFAULT_N_FRAMES)
         form.addRow("Number of frames:", self.n_frames_spin)
 
+        self.exposure_mode_combo = QComboBox()
+        self.exposure_mode_combo.addItems([EXPOSURE_MODE_AUTO, EXPOSURE_MODE_MANUAL])
+        form.addRow("Exposure:", self.exposure_mode_combo)
+
+        self.exposure_us_spin = QDoubleSpinBox()
+        self.exposure_us_spin.setRange(1.0, 1_000_000.0)
+        self.exposure_us_spin.setSuffix(" us")
+        form.addRow("Exposure (exposure_us):", self.exposure_us_spin)
+
         self.gain_db_spin = QDoubleSpinBox()
         self.gain_db_spin.setRange(0.0, 48.0)
         self.gain_db_spin.setSingleStep(0.1)
         self.gain_db_spin.setSuffix(" dB")
         form.addRow("Gain (gain_db):", self.gain_db_spin)
+
+        self.exposure_mode_combo.currentTextChanged.connect(self._on_exposure_mode_changed)
+        self._on_exposure_mode_changed(self.exposure_mode_combo.currentText())
 
         self.capture_degree_selector = QComboBox()
         for degree in DEGREE_CHOICES:
@@ -1066,15 +1082,42 @@ class SpectralCalibrationDialog(QDialog):
             background_sigma=baseline_result.background_sigma,
         )
 
+    def _on_exposure_mode_changed(self, mode: str) -> None:
+
+        '''
+        "Auto": disables exposure_us_spin (its value is ignored -- real
+        auto-exposure convergence decides exposure_us at capture time) and
+        resets gain_db_spin to 0.0 as a starting suggestion, re-applied
+        every time Auto is (re-)selected, not just once.
+
+        "Manual": enables exposure_us_spin; gain_db_spin is left as-is.
+        '''
+
+        is_auto = mode == EXPOSURE_MODE_AUTO
+        self.exposure_us_spin.setEnabled(not is_auto)
+        if is_auto:
+            self.gain_db_spin.setValue(0.0)
+
+    def auto_exposure(self) -> bool:
+        '''True if "Auto" exposure is currently selected.'''
+        return self.exposure_mode_combo.currentText() == EXPOSURE_MODE_AUTO
+
+    def exposure_us(self) -> float | None:
+        '''Manually-entered exposure_us, or None if "Auto" is selected.'''
+        if self.auto_exposure():
+            return None
+        return self.exposure_us_spin.value()
+
     def _on_start_clicked(self) -> None:
 
         '''
         Capture-mode accept path: loads the already-built sensor
         CalibrationSet (see _load_sensor_calibration()), then builds a
         CameraStream and runs run_spectral_calibration() against it --
-        mirrors cli/calibration.py's _cmd_spectral_capture. This dialog
-        has no exposure-mode selector (unlike BaselineDialog/
-        FlatFieldDialog), so the stream always uses auto-exposure.
+        mirrors cli/calibration.py's _cmd_spectral_capture. Manual
+        exposure (see auto_exposure()/exposure_us() above) matters here
+        specifically so the lamp frames' actual exposure_us can be made to
+        match the loaded baseline's -- see class docstring.
         run_spectral_calibration() also builds and saves the geometric
         tilt calibration as a side effect (see its own docstring) -- not
         duplicated here.
@@ -1087,7 +1130,11 @@ class SpectralCalibrationDialog(QDialog):
         self.start_button.setEnabled(False)
         self.status_label.setText("Capturing...")
         try:
-            camera_stream = build_camera_stream(self.gain_db_spin.value(), auto_exposure=True)
+            camera_stream = build_camera_stream(
+                self.gain_db_spin.value(),
+                exposure_us=self.exposure_us(),
+                auto_exposure=self.auto_exposure(),
+            )
             camera_stream.start()
             try:
                 run_spectral_calibration(
