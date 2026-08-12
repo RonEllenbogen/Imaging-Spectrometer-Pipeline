@@ -483,8 +483,7 @@ class LiveViewWidget(QWidget):
         )
         self._extended_measurement_button.setToolTip(
             "Opens the Extended Measurement screen (N-shot combination "
-            "workflow) -- itself still a Phase 1 visual skeleton, see "
-            "gui/extended_measurement.py's module docstring."
+            "workflow)."
         )
         self._extended_measurement_button.clicked.connect(
             self.extended_measurement_requested
@@ -497,22 +496,27 @@ class LiveViewWidget(QWidget):
 
         '''
         Exposure/gain display+entry, pre-filled from
-        calibration_set.baseline_record. SKELETON (see module docstring):
-        editing either field never touches camera_stream -- it only
-        drives the drift check below, warning when the entered value
-        diverges from what the loaded calibrations were actually captured
-        under.
+        calibration_set.baseline_record. Editing either field never
+        touches camera_stream -- unlike ExtendedMeasurementScreen's own
+        Acquisition Settings panel, which does reconfigure the camera on
+        Run, live view's continuous polling loop has no natural point to
+        pause for a mid-stream reconfiguration, so this deliberately stays
+        read-only-to-the-camera and only drives the drift check below,
+        warning when the entered value diverges from what the loaded
+        calibrations were actually captured under.
         '''
 
         group = QGroupBox("Acquisition Settings")
         group.setFont(load_bundled_font(10))
         group.setStyleSheet(group_box_stylesheet())
         group.setToolTip(
-            "Skeleton only -- does not reconfigure the camera. Pre-filled "
-            "from the loaded baseline's capture settings; drifting past "
-            "tolerance from the loaded calibrations hides the fit "
-            "diagnostics and overlay (reading \"N/A\", raw heatmap still "
-            "shown) and shows an informational recalibration message."
+            "Does not reconfigure the camera -- entering a different "
+            "exposure/gain here only checks it against the loaded "
+            "calibrations. Pre-filled from the loaded baseline's capture "
+            "settings; drifting past tolerance from the loaded "
+            "calibrations hides the fit diagnostics and overlay (reading "
+            "\"N/A\", raw heatmap still shown) and shows an informational "
+            "recalibration message."
         )
         form = QFormLayout(group)
 
