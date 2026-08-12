@@ -27,7 +27,14 @@ only ever reads via get_latest_frame(); ExtendedMeasurementScreen's own
 _maybe_reconfigure_camera_stream() stops/reconfigures/restarts it around a
 settings change, but assumes it was already running to begin with). It's
 stopped again in closeEvent(), so a running background acquisition thread
-never outlives the window.
+never outlives the window -- and also in _on_back_to_calibration_requested,
+since the project's one-camera-connection-at-a-time constraint means it
+must be free again before CalibrationScreen's own dialogs can reconnect.
+That handler tears LiveViewWidget/ExtendedMeasurementScreen down entirely
+(not just hides them) rather than leaving them parked mid-stack, since
+_on_calibration_ready can now genuinely fire more than once in one
+MainWindow's lifetime -- every previous round-trip's stale instances must
+be gone first, not just hidden behind a fresh pair.
 '''
 
 # Imports
@@ -83,7 +90,12 @@ class MainWindow(QMainWindow):
 
         By the time this handler runs, bundle.calibration_set and
         bundle.noise_model are guaranteed non-None (see
-        CalibrationScreen's class docstring's hand-off contract).
+        CalibrationScreen's class docstring's hand-off contract). Can fire
+        more than once per MainWindow -- once after a
+        back_to_calibration_requested round-trip, self._live_view/
+        self._extended_measurement/self._camera_stream are already torn
+        down and None (see _on_back_to_calibration_requested), so this
+        just runs the same fresh-build path it does the first time.
         '''
 
         self._bundle = bundle
@@ -103,6 +115,9 @@ class MainWindow(QMainWindow):
         )
         self._live_view.extended_measurement_requested.connect(
             self._on_extended_measurement_requested
+        )
+        self._live_view.back_to_calibration_requested.connect(
+            self._on_back_to_calibration_requested
         )
         self._stack.addWidget(self._live_view)
         self._stack.setCurrentWidget(self._live_view)
@@ -133,6 +148,40 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(self._extended_measurement)
 
         self._stack.setCurrentWidget(self._extended_measurement)
+
+    def _on_back_to_calibration_requested(self) -> None:
+
+        '''
+        Handler for LiveViewWidget.back_to_calibration_requested: stops
+        the shared CameraStream -- freeing it for CalibrationScreen's own
+        dialogs, per the project's one-camera-connection-at-a-time
+        constraint -- then tears down LiveViewWidget and (if it was ever
+        built) ExtendedMeasurementScreen entirely, removing them from
+        self._stack and dropping every reference, before switching back
+        to CalibrationScreen. Full teardown rather than just hiding them:
+        both were built around this specific (now-stopped) CameraStream
+        and CalibrationBundle, so leaving them alive would either show
+        stale state if reused, or silently leak a second live pair
+        alongside whatever _on_calibration_ready builds next if a fresh
+        calibration is completed from here.
+        '''
+
+        if self._camera_stream is not None and self._camera_stream.is_running:
+            self._camera_stream.stop()
+        self._camera_stream = None
+        self._bundle = None
+
+        if self._extended_measurement is not None:
+            self._stack.removeWidget(self._extended_measurement)
+            self._extended_measurement.deleteLater()
+            self._extended_measurement = None
+
+        if self._live_view is not None:
+            self._stack.removeWidget(self._live_view)
+            self._live_view.deleteLater()
+            self._live_view = None
+
+        self._stack.setCurrentWidget(self._calibration_screen)
 
     def closeEvent(self, event) -> None:
 

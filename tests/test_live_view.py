@@ -377,6 +377,13 @@ class TestLiveViewWidgetSmoke:
         with qtbot.waitSignal(widget.extended_measurement_requested, timeout=1000):
             button.click()
 
+    def test_back_to_calibration_button_emits_signal(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+        button = widget._back_to_calibration_button
+        assert button.text() == "Back to Calibration"
+        with qtbot.waitSignal(widget.back_to_calibration_requested, timeout=1000):
+            button.click()
+
 
 # ---------------------------------------------------------------------------
 # live_view.py -- Phase-1 review refinements (colormap, mm conversion,
@@ -894,3 +901,32 @@ class TestLiveViewRealUpdateLoop:
         assert widget._scatter.isVisible() is False
         assert widget._error_bars.isVisible() is False
         assert widget._fit_curve.isVisible() is False
+
+    def test_roi_change_after_real_data_does_not_flash_placeholder(self, qtbot, started_camera_stream):
+        # Regression test: _on_roi_changed() used to call _apply_roi_bounds()
+        # unconditionally, which always repaints from self._placeholder_*
+        # (stale, fake construction-time data) -- so touching the ROI
+        # control after real data was already on screen replaced it with
+        # placeholder data until the next tick overwrote it again. Confirms
+        # the fix: once real data has landed, changing the ROI must only
+        # rescale the plot's y-range, never touch the scatter/heatmap data.
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._scatter.getData()[0].size > 500, timeout=3000)
+        real_x, real_y = widget._scatter.getData()
+        real_image = widget._image_item.image.copy()
+
+        widget._roi_control._min_spin.setValue(1.0)
+
+        # No qtbot.wait()/processEvents() between the ROI edit and these
+        # assertions -- Qt dispatches roi_changed -> _on_roi_changed()
+        # synchronously inside setValue(), so if it had wrongly fallen back
+        # to _apply_roi_bounds(), the scatter would already have shrunk to
+        # the placeholder's ~127-point array by this point.
+        after_x, after_y = widget._scatter.getData()
+        assert len(after_x) == len(real_x)
+        assert np.array_equal(after_x, real_x)
+        assert np.array_equal(after_y, real_y)
+        assert np.array_equal(widget._image_item.image, real_image)

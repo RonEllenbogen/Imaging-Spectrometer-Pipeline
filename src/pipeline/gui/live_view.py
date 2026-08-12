@@ -296,6 +296,7 @@ class LiveViewWidget(QWidget):
 
     recalibration_requested = Signal(str)
     extended_measurement_requested = Signal()
+    back_to_calibration_requested = Signal()
 
     def __init__(
         self,
@@ -325,6 +326,11 @@ class LiveViewWidget(QWidget):
         self._insufficient_signal = False
         self._strip_chart_history: list[tuple[float, float]] = []
         self._pixel_column_wavelength_axis = _PixelColumnWavelengthAxis()
+
+        # Flips permanently False->True the first time _display_shot_result()
+        # draws a real analyze_shot() result -- see _on_roi_changed()'s own
+        # docstring for why this matters.
+        self._displayed_real_data = False
 
         self._apply_pyqtgraph_theme()
         self._build_ui()
@@ -489,6 +495,19 @@ class LiveViewWidget(QWidget):
             self.extended_measurement_requested
         )
         layout.addWidget(self._extended_measurement_button)
+
+        self._back_to_calibration_button = QPushButton("Back to Calibration")
+        self._back_to_calibration_button.setFont(load_bundled_font(12, bold=True))
+        self._back_to_calibration_button.setMinimumHeight(48)
+        self._back_to_calibration_button.setToolTip(
+            "Returns to the calibration screen. Stops this screen's camera "
+            "stream first, freeing it for a new baseline/flat-field/"
+            "conversion-gain/spectral capture."
+        )
+        self._back_to_calibration_button.clicked.connect(
+            self.back_to_calibration_requested
+        )
+        layout.addWidget(self._back_to_calibration_button)
 
         return panel
 
@@ -857,8 +876,13 @@ class LiveViewWidget(QWidget):
         preprocessing/steps/roi.py's apply_roi() zeroing rows outside the
         spatial ROI (no valid centroid there), so out-of-window scatter/
         fit points are dropped entirely rather than merely clipped from
-        view. Callable both at startup (_populate_placeholder_data()) and
-        on every self._roi_control.roi_changed signal (_on_roi_changed()).
+        view. Callable both at startup (_populate_placeholder_data()) and,
+        ONLY before the first real tick has landed, from
+        self._roi_control's roi_changed signal (_on_roi_changed()) -- see
+        that method's own docstring for why it must stop calling this once
+        self._displayed_real_data is True (this always repaints from
+        self._placeholder_*, which would overwrite real on-screen data
+        with stale fake data on every ROI edit otherwise).
 
         Sets BOTH axis ranges via one setRange() call, even though the ROI
         only ever changes the y-range -- pinning x explicitly (rather than
@@ -908,7 +932,30 @@ class LiveViewWidget(QWidget):
 
     def _on_roi_changed(self, min_mm: float, max_mm: float) -> None:
 
-        self._apply_roi_bounds(min_mm, max_mm)
+        '''
+        Handler for self._roi_control.roi_changed. Before any real tick
+        has ever landed (self._displayed_real_data still False -- e.g.
+        the camera hasn't produced a frame yet), re-renders the
+        placeholder data cropped to the new bounds via
+        _apply_roi_bounds(), exactly as before. Once real data has been
+        displayed at least once, _apply_roi_bounds() must NOT be called
+        here: it unconditionally repaints the scatter/error-bars/
+        fit-curve/heatmap from self._placeholder_* -- stale, fake data
+        generated once at construction -- which would overwrite whatever
+        real result is currently on screen with it, every single time the
+        ROI control changes, until the next timer tick redraws real data
+        over it again. Only the plot's y-range needs to change here in
+        that case; the heatmap/scatter/fit-curve themselves will reflect
+        the new ROI on the next real tick, once run_preprocessing() has
+        actually re-masked a frame against it.
+        '''
+
+        if self._displayed_real_data:
+            self._main_plot.setRange(
+                xRange=self._main_plot_x_extent, yRange=(min_mm, max_mm), padding=0
+            )
+        else:
+            self._apply_roi_bounds(min_mm, max_mm)
 
     def _update_strip_chart_placeholder(self, rng: np.random.Generator) -> None:
 
@@ -1026,6 +1073,8 @@ class LiveViewWidget(QWidget):
         values (physical position) go through self._convert_to_mm(), to
         match the main plot's "Relative Physical Position (mm)" y-axis.
         '''
+
+        self._displayed_real_data = True
 
         fit = result.fits[self._current_degree]
         columns = result.centroids.columns
