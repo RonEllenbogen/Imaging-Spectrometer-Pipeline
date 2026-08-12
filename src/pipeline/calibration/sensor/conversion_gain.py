@@ -50,8 +50,12 @@ logger = logging.getLogger(__name__)
 # is undefined at n=1, same reasoning as build_baseline()'s minimum.
 MIN_FRAMES_PER_LEVEL = 2
 
-# Minimum exposure levels -- a degree-1 fit needs at least 2 points.
-MIN_ILLUMINATION_LEVELS = 2
+# Minimum exposure levels -- a degree-1 fit needs at least 3 points for a
+# meaningful (non-degenerate) uncertainty estimate: 2 points is enough to
+# solve for the line itself, but leaves zero residual degrees of freedom,
+# so the fit's reported variance/uncertainty comes out as exactly zero
+# rather than a real number (see calibration.exceptions.InsufficientDataError).
+MIN_ILLUMINATION_LEVELS = 3
 
 # Classes
 

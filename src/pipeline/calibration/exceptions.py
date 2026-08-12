@@ -66,17 +66,27 @@ class InvalidConversionGainError(CalibrationError):
 
 class InsufficientDataError(CalibrationError):
     """Raised when shared/fitting.py's polynomial fit is asked to solve for
-    more coefficients than it has data points for -- a hard mathematical
-    requirement (degree + 1 points minimum), not a configurable threshold.
-    Mirrors analysis/exceptions.py's InsufficientDataError; kept as a
-    separate CalibrationError subclass rather than reused directly, since
+    more coefficients than it has data points to usefully estimate them
+    from -- a hard mathematical requirement (degree + 2 points minimum,
+    not degree + 1), not a configurable threshold. degree + 1 points is
+    enough to solve for the coefficients themselves (an exact
+    interpolation), but leaves zero residual degrees of freedom -- no
+    excess data to estimate a reduced chi-squared or a coefficient
+    uncertainty FROM, so scipy.odr reports both as (near-)zero rather
+    than a real number. degree + 2 is the smallest point count with at
+    least one residual degree of freedom, so a fit's reported uncertainty
+    is always statistically meaningful, never degenerate. Mirrors
+    analysis/exceptions.py's InsufficientDataError; kept as a separate
+    CalibrationError subclass rather than reused directly, since
     calibration/ must not depend on analysis/ (see shared/fitting.py's
     module docstring)."""
 
     def __init__(self, degree: int, n_points: int):
         super().__init__(
             f"cannot fit degree-{degree} polynomial with only {n_points} "
-            f"point(s); need at least {degree + 1}"
+            f"point(s); need at least {degree + 2} for a meaningful "
+            f"uncertainty estimate (degree + 1 alone is an exact "
+            f"interpolation with no residual degrees of freedom)"
         )
         self.degree = degree
         self.n_points = n_points

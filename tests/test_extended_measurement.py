@@ -42,7 +42,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QSpinBox  # noqa: E402
 
 from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
-from pipeline.analysis import SensorNoiseModel  # noqa: E402
+from pipeline.analysis import InsufficientDataError, SensorNoiseModel  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
@@ -372,6 +372,48 @@ class TestExtendedMeasurementRealMeasurement:
             assert len(widget._residual_scatter.data) > 0
             # Acquisition Settings left untouched -> no camera reconfigure.
             assert stream.exposure_us == pytest.approx(REALISTIC_FIXTURE_EXPOSURE_US)
+        finally:
+            stream.stop()
+
+    def test_run_measurement_insufficient_data_aborts_without_partial_update(
+        self, qtbot, monkeypatch
+    ):
+        # Regression test: analyze_shot() (via TotalLeastSquaresFit) can
+        # raise InsufficientDataError for a genuinely marginal shot -- a
+        # real session hit exactly this (an uncaught crash) via
+        # LiveViewWidget's polling loop; this screen had the identical
+        # unguarded analyze_shot() call with no protection at all, a
+        # button click away from the same crash. Confirms the fix: the
+        # error is caught, reported via QMessageBox, and the run aborts
+        # cleanly -- no partial/inconsistent shot_results.
+        warning_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning",
+            lambda *a, **k: warning_calls.append(a),
+        )
+
+        def _raise_insufficient_data(*args, **kwargs):
+            raise InsufficientDataError(degree=3, n_points=4)
+
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.analyze_shot", _raise_insufficient_data
+        )
+
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            assert widget._shot_results is None
+
+            widget._run_button.click()
+
+            assert widget._shot_results is None
+            assert widget._n_shots_label.text() == "--"
+            assert len(warning_calls) == 1
+            title, message = warning_calls[0][1], warning_calls[0][2]
+            assert title == "Measurement Failed"
+            assert "could not be analyzed" in message
         finally:
             stream.stop()
 

@@ -874,6 +874,37 @@ class TestLiveViewRealUpdateLoop:
         # _on_timer_tick()'s InsufficientDataError branch).
         assert widget._image_item.isVisible() is True
 
+    def test_display_error_is_caught_and_treated_as_a_skip(
+        self, qtbot, started_camera_stream, monkeypatch, caplog
+    ):
+        # Regression test for the last-resort try/except around
+        # _display_shot_result() in _on_timer_tick(): a real session hit
+        # an uncaught ValueError there (a degenerate degree+1-column fit
+        # producing a zero coefficient_sigma, since fixed at its source in
+        # analysis/dispersion_fitting.py) that escaped the QTimer slot.
+        # Simulates *some* future display-layer error the same way, and
+        # confirms the loop survives it -- treated exactly like
+        # InsufficientDataError (counted as a skip, eventually entering
+        # the insufficient-signal state), logged rather than silently
+        # dropped, and crucially: never propagates out and kills the test
+        # process/QTimer.
+        widget = _make_real_live_view_widget(
+            qtbot, started_camera_stream, update_interval_ms=10,
+        )
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        def _raise(*args, **kwargs):
+            raise ValueError("simulated display-layer failure")
+
+        monkeypatch.setattr(widget, "_display_shot_result", _raise)
+
+        with caplog.at_level("ERROR", logger="pipeline.gui.live_view"):
+            qtbot.waitUntil(lambda: widget._insufficient_signal is True, timeout=5000)
+
+        assert widget._consecutive_skips >= MAX_CONSECUTIVE_SKIPS
+        assert any("error displaying frame" in message for message in caplog.messages)
+
     def test_settings_drift_pauses_real_updates(self, qtbot, started_camera_stream, monkeypatch):
         monkeypatch.setattr(
             "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None

@@ -406,6 +406,51 @@ class TestTotalLeastSquaresFit:
         with pytest.raises(InsufficientDataError):
             TotalLeastSquaresFit().fit(wavelength_nm, x0, sigma, sigma, degree=1)
 
+    @pytest.mark.parametrize("degree", [1, 2, 3])
+    def test_exactly_degree_plus_one_points_raises(self, degree):
+        # Regression test: degree + 1 points is enough to solve for the
+        # coefficients (an exact interpolation), but leaves zero residual
+        # degrees of freedom -- scipy.odr then reports coefficient_sigma
+        # as (near-)zero rather than a real number, which crashes anything
+        # downstream that requires a strictly positive sigma (e.g.
+        # gui/formatting.py's format_value_with_uncertainty(), which is
+        # exactly how this was first caught: a real live-view session hit
+        # a tick with precisely degree + 1 valid columns and crashed on
+        # display). InsufficientDataError must fire here instead, at
+        # degree + 1, not just below it.
+        n = degree + 1
+        rng = np.random.default_rng(0)
+        wavelength_nm = np.sort(rng.uniform(700.0, 900.0, size=n))
+        x0 = np.polynomial.polynomial.polyval(wavelength_nm, rng.normal(size=degree + 1))
+        sigma_wavelength_nm = np.full(n, 0.05)
+        sigma_x0 = np.full(n, 0.5)
+
+        with pytest.raises(InsufficientDataError):
+            TotalLeastSquaresFit().fit(wavelength_nm, x0, sigma_wavelength_nm, sigma_x0, degree=degree)
+
+    @pytest.mark.parametrize("degree", [1, 2, 3])
+    def test_exactly_degree_plus_two_points_succeeds_with_positive_sigma(self, degree):
+        # The smallest point count with at least one residual degree of
+        # freedom -- must succeed, and every coefficient_sigma must be
+        # finite and strictly positive (a real, non-degenerate uncertainty
+        # estimate), matching format_value_with_uncertainty()'s own
+        # contract.
+        n = degree + 2
+        rng = np.random.default_rng(0)
+        wavelength_nm = np.sort(rng.uniform(700.0, 900.0, size=n))
+        true_coefficients = rng.normal(size=degree + 1)
+        x0 = np.polynomial.polynomial.polyval(wavelength_nm, true_coefficients)
+        x0 += rng.normal(scale=0.01, size=n)   # tiny noise -- avoids an exactly-zero residual by chance
+        sigma_wavelength_nm = np.full(n, 0.05)
+        sigma_x0 = np.full(n, 0.5)
+
+        result = TotalLeastSquaresFit().fit(
+            wavelength_nm, x0, sigma_wavelength_nm, sigma_x0, degree=degree
+        )
+
+        assert np.all(np.isfinite(result.coefficient_sigma))
+        assert np.all(result.coefficient_sigma > 0)
+
     def test_residuals_shape_matches_input(self):
         wavelength_nm = np.linspace(0.0, 10.0, 20)
         x0 = 5.0 + 0.3 * wavelength_nm

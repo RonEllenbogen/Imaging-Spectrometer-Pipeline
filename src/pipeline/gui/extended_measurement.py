@@ -105,12 +105,14 @@ from PySide6.QtWidgets import (
 from pipeline.acquisition import CameraStream, CANONICAL_SHAPE, SPATIAL_AXIS, SPECTRAL_AXIS
 from pipeline.analysis import (
     analyze_shot, combine_shots, CombinedSpatialDispersionResult,
-    SensorNoiseModel, ShotAnalysisResult,
+    InsufficientDataError, SensorNoiseModel, ShotAnalysisResult,
 )
 from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.sensor import ConversionGainRecord
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
-from pipeline.preprocessing import CalibrationSet, run_preprocessing
+from pipeline.preprocessing import (
+    CalibrationSet, NoSignalError, SettingsMismatchError, run_preprocessing,
+)
 
 from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
 from pipeline.gui.live_view import (
@@ -715,6 +717,18 @@ class ExtendedMeasurementScreen(QWidget):
         even though it cannot actually change mid-acquisition -- this
         call blocks the Qt event loop for its entire duration, so no user
         interaction with the ROI control can happen until it returns.
+
+        Unlike LiveViewWidget's continuous polling loop -- where a single
+        bad frame is just skipped and the next tick tries again --
+        NoSignalError/SettingsMismatchError/InsufficientDataError from any
+        one shot in the batch aborts the whole run: there's no "next tick"
+        here to self-correct, and silently dropping just that one shot
+        would understate n_shots in the combined result without saying
+        so. Reported via a QMessageBox naming which shot and why (matching
+        _enter_drifted_state()'s existing message-box convention), and the
+        display is left exactly as it was before this click -- no partial
+        _set_measurement_data()/_refresh_measurement_display() call with
+        an incomplete shot_results list.
         '''
 
         self._maybe_reconfigure_camera_stream()
@@ -724,15 +738,24 @@ class ExtendedMeasurementScreen(QWidget):
 
         shot_results: list[ShotAnalysisResult] = []
         for frame in frames:
-            processed, _saturation_result = run_preprocessing(
-                frame, self._calibration_set, roi_bounds=self._roi_control.roi_bounds_px()
-            )
-            shot_results.append(
-                analyze_shot(
-                    processed, self._axis_for_fit, noise_model=self._noise_model,
-                    degrees=DEGREE_CHOICES,
+            try:
+                processed, _saturation_result = run_preprocessing(
+                    frame, self._calibration_set, roi_bounds=self._roi_control.roi_bounds_px()
                 )
-            )
+                shot_results.append(
+                    analyze_shot(
+                        processed, self._axis_for_fit, noise_model=self._noise_model,
+                        degrees=DEGREE_CHOICES,
+                    )
+                )
+            except (NoSignalError, SettingsMismatchError, InsufficientDataError) as error:
+                QMessageBox.warning(
+                    self,
+                    "Measurement Failed",
+                    f"Shot {frame.frame_id} could not be analyzed ({error}). "
+                    f"Run aborted -- no results were updated.",
+                )
+                return
 
         self._set_measurement_data(shot_results)
         self._refresh_measurement_display()

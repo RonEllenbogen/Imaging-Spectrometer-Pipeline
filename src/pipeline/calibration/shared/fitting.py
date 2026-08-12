@@ -63,7 +63,10 @@ class PolynomialFitter(Protocol):
         Raises
         ------
         InsufficientDataError
-            If fewer than degree + 1 points are supplied.
+            If fewer than degree + 2 points are supplied -- degree + 1
+            alone is an exact interpolation with zero residual degrees of
+            freedom, leaving no meaningful uncertainty to report (see
+            InsufficientDataError's own docstring).
         '''
 
         ...
@@ -90,7 +93,7 @@ class TotalLeastSquaresFit:
 
         '''See PolynomialFitter.fit for parameters/returns/raises.'''
 
-        if x.shape[0] < degree + 1:
+        if x.shape[0] < degree + 2:
             raise InsufficientDataError(degree, x.shape[0])
 
         # Seeded with an ordinary (uncertainty-blind) polynomial fit --

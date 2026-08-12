@@ -69,6 +69,7 @@ on a real result.
 
 # Imports
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -125,6 +126,8 @@ from pipeline.gui.theme import (
 
 
 # Constants
+
+logger = logging.getLogger(__name__)
 
 # Polynomial degree choices for the fit-curve overlay / degree selector,
 # in the order they appear in the combo box.
@@ -1019,7 +1022,10 @@ class LiveViewWidget(QWidget):
         Deliberately swallows every expected failure mode itself (missing
         frame, bad-frame/settings-mismatch preprocessing errors,
         insufficient-column fit errors) rather than letting any of them
-        escape as an uncaught exception out of a Qt slot.
+        escape as an uncaught exception out of a Qt slot -- plus a broad
+        catch-all around _display_shot_result() specifically, as a last-
+        resort safety net for whatever *isn't* one of those expected
+        modes (see that call site's own comment for why).
         '''
 
         self._update_status_label()
@@ -1074,11 +1080,34 @@ class LiveViewWidget(QWidget):
                 self._enter_insufficient_signal_state()
             return
 
+        try:
+            self._display_shot_result(processed, result)
+        except Exception:
+            # Last-resort safety net, not the primary handling for any
+            # *expected* failure mode (those are the specific except
+            # clauses above) -- this method's own docstring promises every
+            # expected failure is swallowed here rather than escaping a
+            # Qt slot, and a broken display update for one tick is exactly
+            # as recoverable as a bad frame or an under-subscribed fit, so
+            # it gets the same skip/counter treatment. Logged (not
+            # silently dropped) so a genuine bug is still visible to
+            # whoever's running this session, even though the GUI itself
+            # keeps running. Concretely: this is what would have caught
+            # the exact-degree+1-columns crash before analysis/
+            # dispersion_fitting.py's InsufficientDataError threshold was
+            # corrected to exclude that degenerate case -- kept as
+            # defense-in-depth against whatever the next unforeseen edge
+            # case turns out to be, not a substitute for fixing this one
+            # at its source.
+            logger.exception("live view: error displaying frame %d's analysis result", processed.frame_id)
+            self._consecutive_skips += 1
+            if self._consecutive_skips >= MAX_CONSECUTIVE_SKIPS and not self._insufficient_signal:
+                self._enter_insufficient_signal_state()
+            return
+
         self._consecutive_skips = 0
         if self._insufficient_signal:
             self._exit_insufficient_signal_state()
-
-        self._display_shot_result(processed, result)
 
     def _display_shot_result(self, processed: ProcessedFrame, result: ShotAnalysisResult) -> None:
 

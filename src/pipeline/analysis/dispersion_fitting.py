@@ -69,7 +69,10 @@ class SpatialDispersionFitter(Protocol):
         Raises
         ------
         InsufficientDataError
-            If fewer than degree + 1 columns are supplied.
+            If fewer than degree + 2 columns are supplied -- degree + 1
+            alone is an exact interpolation with zero residual degrees of
+            freedom, leaving no meaningful uncertainty to report (see
+            InsufficientDataError's own docstring).
         '''
 
         ...
@@ -96,7 +99,7 @@ class TotalLeastSquaresFit:
 
         '''See SpatialDispersionFitter.fit for parameters/returns/raises.'''
 
-        if wavelength_nm.shape[0] < degree + 1:
+        if wavelength_nm.shape[0] < degree + 2:
             raise InsufficientDataError(degree, wavelength_nm.shape[0])
 
         # Seeded with an ordinary (uncertainty-blind) polynomial fit --

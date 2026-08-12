@@ -199,6 +199,35 @@ method (the fitted polynomial's derivative, evaluated at any λ) rather
 than a single constant once degree > 1; it collapses to the familiar
 constant for the linear case.
 
+**Bug found and fixed, from real GUI usage — `InsufficientDataError`'s point-count threshold was one
+point too low.** `TotalLeastSquaresFit.fit()` (both this package's copy and `calibration/shared/
+fitting.py`'s structurally-separate one) originally required only `degree + 1` points before attempting
+a fit — exactly enough to solve for the polynomial's coefficients (an exact interpolation), but leaving
+**zero residual degrees of freedom**. With no excess data to estimate a variance from, `scipy.odr`
+reports both the reduced chi-squared and every `coefficient_sigma` as (near-)zero rather than a real
+number — confirmed empirically, and in the cubic case observed as *exactly* `0.0`, not just small.
+That zero then crashed downstream: `gui/formatting.py`'s `format_value_with_uncertainty()` requires a
+strictly positive sigma by design (the rounding convention has no meaning for one that isn't) and raised
+`ValueError`, uncaught, out of `live_view.py`'s `_on_timer_tick()` — a real QTimer slot in a live,
+unattended-capable lab tool. Reported as a recurring terminal traceback during real GUI testing. Fixed by
+raising the threshold to `degree + 2` (the smallest point count with at least one residual degree of
+freedom) in both `InsufficientDataError`-raising call sites, with matching updates to both
+`InsufficientDataError` classes' (`analysis/exceptions.py` and `calibration/exceptions.py`) messages and
+docstrings, and to `calibration/sensor/conversion_gain.py`'s own `MIN_ILLUMINATION_LEVELS` (2 → 3, since
+its degree-1 photon-transfer-curve fit needs the same +1 point to stay non-degenerate — its previous
+value of 2 would now always hit the corrected threshold and fail). `calibration/spectral/line_matching.py`'s
+`MIN_MATCHED_LINES = 3` already happened to match the corrected threshold exactly for `calibrate_spectral()`'s
+default degree (1), so no change was needed there. `live_view.py`'s `_on_timer_tick()` also gained a
+last-resort `try`/`except Exception` around `_display_shot_result()` specifically (logged via
+`logging`, not silently dropped) — defense-in-depth against whatever the *next* unforeseen edge case
+turns out to be, fulfilling that method's own docstring, which already promised to swallow every
+failure mode rather than let one escape a Qt slot but didn't fully live up to it before this fix.
+`extended_measurement.py`'s `_on_run_clicked()` had the identical unguarded `analyze_shot()` call (a
+button click away from the same crash, just synchronous rather than in a background timer) and gained
+matching `NoSignalError`/`SettingsMismatchError`/`InsufficientDataError` handling — reported via
+`QMessageBox`, aborting the run cleanly with no partial `shot_results` update, mirroring
+`_enter_drifted_state()`'s existing message-box convention in the same file.
+
 **N per measurement**: no minimum enforced. `analysis/`'s own inverse-
 variance combination function is agnostic to N — it just combines
 whatever (ζ, σζ) pairs it's given. Live mode aggregates/plots every

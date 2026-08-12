@@ -469,20 +469,34 @@ class TestConversionGain:
             build_conversion_gain(frames_by_exposure)
 
     def test_rejects_saturated_frame(self):
+        # A third, otherwise-valid level (3000.0) is required so this
+        # clears MIN_ILLUMINATION_LEVELS (now 3, see conversion_gain.py) --
+        # the saturated 2000.0 level is still processed (and rejected)
+        # before the fitter ever runs, since check_saturation() is checked
+        # per-frame, in exposure order, ahead of the fit itself.
         frames_by_exposure = _ptc_frames_by_exposure([1000.0], [2])
         frames_by_exposure[2000.0] = [
             _frame(_uniform(CANONICAL_MAX_VALUE), exposure_us=2000.0),
             _frame(_uniform(CANONICAL_MAX_VALUE), exposure_us=2000.0),
         ]
+        frames_by_exposure[3000.0] = [
+            _frame(_uniform(40), exposure_us=3000.0), _frame(_uniform(50), exposure_us=3000.0),
+        ]
         with pytest.raises(InvalidConversionGainError):
             build_conversion_gain(frames_by_exposure)
 
     def test_rejects_non_positive_slope(self):
-        # mean increases 20 -> 80 while variance DECREASES 200 -> 50 --
-        # physically invalid (noise variance can't fall as signal rises).
+        # mean increases 20 -> 80 -> 95 while variance DECREASES
+        # 200 -> 50 -> 8 -- physically invalid (noise variance can't fall
+        # as signal rises). Three levels (not two) so this clears
+        # MIN_ILLUMINATION_LEVELS (now 3, see conversion_gain.py) and
+        # reaches a real, non-degenerate fit that genuinely evaluates the
+        # slope's sign, rather than being rejected by the level-count
+        # check before the slope is ever computed.
         frames_by_exposure = {
             1000.0: [_frame(_uniform(10), exposure_us=1000.0), _frame(_uniform(30), exposure_us=1000.0)],
             2000.0: [_frame(_uniform(75), exposure_us=2000.0), _frame(_uniform(85), exposure_us=2000.0)],
+            3000.0: [_frame(_uniform(93), exposure_us=3000.0), _frame(_uniform(97), exposure_us=3000.0)],
         }
         with pytest.raises(InvalidConversionGainError):
             build_conversion_gain(frames_by_exposure)
@@ -503,7 +517,7 @@ class TestConversionGain:
 class TestCheckConversionGainMatchesBaseline:
 
     def _conversion_gain_record(self, gain_db: float) -> ConversionGainRecord:
-        return ConversionGainRecord(gain_db=gain_db, timestamp=time.time(), n_illumination_levels=2)
+        return ConversionGainRecord(gain_db=gain_db, timestamp=time.time(), n_illumination_levels=3)
 
     def test_passes_on_exact_gain_match(self):
         baseline_record = _record(gain_db=0.0)
@@ -641,8 +655,8 @@ class TestRunConversionGainCalibration:
         stream.stop()
         with pytest.raises(RuntimeError):
             run_conversion_gain_calibration(
-                stream, exposure_min_us=1000.0, exposure_max_us=2000.0,
-                n_levels=2, n_frames_per_level=2, path=tmp_path / "cg.npz",
+                stream, exposure_min_us=1000.0, exposure_max_us=3000.0,
+                n_levels=3, n_frames_per_level=2, path=tmp_path / "cg.npz",
             )
 
     def test_rejects_too_few_levels(self):
@@ -663,8 +677,8 @@ class TestRunConversionGainCalibration:
         )
         with pytest.raises(ValueError):
             run_conversion_gain_calibration(
-                stream, exposure_min_us=1000.0, exposure_max_us=2000.0,
-                n_levels=2, n_frames_per_level=1, path="unused",
+                stream, exposure_min_us=1000.0, exposure_max_us=3000.0,
+                n_levels=3, n_frames_per_level=1, path="unused",
             )
 
     def test_rejects_invalid_exposure_range(self):
@@ -675,7 +689,7 @@ class TestRunConversionGainCalibration:
         with pytest.raises(ValueError):
             run_conversion_gain_calibration(
                 stream, exposure_min_us=2000.0, exposure_max_us=1000.0,
-                n_levels=2, n_frames_per_level=2, path="unused",
+                n_levels=3, n_frames_per_level=2, path="unused",
             )
 
 
@@ -706,6 +720,37 @@ class TestTotalLeastSquaresFit:
         sigma = np.array([0.1])
         with pytest.raises(InsufficientDataError):
             TotalLeastSquaresFit().fit(x, y, sigma, sigma, degree=1)
+
+    @pytest.mark.parametrize("degree", [1, 2, 3])
+    def test_exactly_degree_plus_one_points_raises(self, degree):
+        # Regression test, mirroring analysis/dispersion_fitting.py's own
+        # copy of this same TLS machinery (see that test's docstring for
+        # the full "why"): degree + 1 points is an exact interpolation
+        # with zero residual degrees of freedom, so coefficient_sigma
+        # comes out (near-)zero -- InsufficientDataError must fire here,
+        # not just below it.
+        n = degree + 1
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0.0, 10.0, size=n))
+        y = np.polynomial.polynomial.polyval(x, rng.normal(size=degree + 1))
+        sigma = np.full(n, 0.1)
+
+        with pytest.raises(InsufficientDataError):
+            TotalLeastSquaresFit().fit(x, y, sigma, sigma, degree=degree)
+
+    @pytest.mark.parametrize("degree", [1, 2, 3])
+    def test_exactly_degree_plus_two_points_succeeds_with_positive_sigma(self, degree):
+        n = degree + 2
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0.0, 10.0, size=n))
+        y = np.polynomial.polynomial.polyval(x, rng.normal(size=degree + 1))
+        y += rng.normal(scale=0.01, size=n)   # tiny noise -- avoids an exactly-zero residual by chance
+        sigma = np.full(n, 0.1)
+
+        fit = TotalLeastSquaresFit().fit(x, y, sigma, sigma, degree=degree)
+
+        assert np.all(np.isfinite(fit.coefficient_sigma))
+        assert np.all(fit.coefficient_sigma > 0)
 
     def test_evaluate_and_derivative(self):
         true_intercept, true_slope = 3.0, 4.0
