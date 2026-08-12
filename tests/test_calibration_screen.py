@@ -513,6 +513,70 @@ def test_create_page_has_five_enabled_type_cards_and_no_bad_pixel_option(qtbot):
     assert not hasattr(create_page, "bad_pixel_card")
 
 
+def test_create_page_no_existing_calibrations_leaves_cards_unmarked(qtbot, monkeypatch):
+    _patch_missing_calibration_load(monkeypatch)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    create_page = screen.create_page
+
+    for card in (
+        create_page.baseline_card,
+        create_page.flat_field_card,
+        create_page.conversion_gain_card,
+        create_page.spectral_card,
+    ):
+        assert card.status_label.isHidden()
+    assert not create_page.continue_button.isEnabled()
+
+
+def test_create_page_preloads_existing_calibrations_from_disk(qtbot, monkeypatch):
+    '''
+    Regression test: a user who created baseline/flat-field/conversion-
+    gain/spectral calibrations in an earlier app run, then closed and
+    relaunched, must not have to redo them just to reach "Continue to Main
+    Window" again -- see CreatePage._mark_existing_calibrations().
+    '''
+    _patch_successful_calibration_load(monkeypatch)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    create_page = screen.create_page
+
+    for card in (
+        create_page.baseline_card,
+        create_page.flat_field_card,
+        create_page.conversion_gain_card,
+        create_page.spectral_card,
+    ):
+        # isHidden() rather than isVisible() -- see
+        # test_spectral_dialog_defaults_to_capture_mode()'s comment.
+        assert not card.status_label.isHidden()
+        assert "existing calibration" in card.status_label.text().lower()
+
+    # every gated type was found on disk -- Continue is enabled without
+    # the user ever opening a single dialog this session
+    assert create_page.continue_button.isEnabled()
+
+
+def test_create_page_partial_existing_calibrations_does_not_enable_continue(qtbot, monkeypatch):
+    _patch_successful_calibration_load(monkeypatch)
+
+    def _raise_missing(path):
+        raise FileNotFoundError(path)
+
+    # spectral was never captured in the previous session
+    monkeypatch.setattr(calibration_screen_module, "load_spectral_calibration", _raise_missing)
+
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    create_page = screen.create_page
+
+    assert not create_page.baseline_card.status_label.isHidden()
+    assert not create_page.flat_field_card.status_label.isHidden()
+    assert not create_page.conversion_gain_card.status_label.isHidden()
+    assert create_page.spectral_card.status_label.isHidden()
+    assert not create_page.continue_button.isEnabled()
+
+
 def test_spectral_card_has_real_action_button(qtbot):
     screen = CalibrationScreen()
     qtbot.addWidget(screen)

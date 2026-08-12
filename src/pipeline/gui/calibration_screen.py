@@ -324,6 +324,16 @@ class _CalibrationTypeCard(QFrame):
         self.description_label.setWordWrap(True)
         layout.addWidget(self.description_label)
 
+        # Hidden until mark_existing_on_disk() reveals it -- most cards
+        # never show this, only the ones CreatePage finds an artifact for
+        # already saved from a previous session (see
+        # CreatePage._mark_existing_calibrations()).
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {COLOR_SUCCESS};")
+        self.status_label.setWordWrap(True)
+        self.status_label.setVisible(False)
+        layout.addWidget(self.status_label)
+
         layout.addStretch(1)
 
         self.action_button = QPushButton(action_text if enabled else "Unavailable")
@@ -332,6 +342,19 @@ class _CalibrationTypeCard(QFrame):
             role = "primary" if accent == COLOR_ACCENT else "primary-alt"
             self.action_button.setProperty("role", role)
         layout.addWidget(self.action_button)
+
+    def mark_existing_on_disk(self) -> None:
+
+        '''
+        Reveals a small note that a valid artifact for this calibration
+        type was already found on disk at CreatePage construction time
+        (see CreatePage._mark_existing_calibrations()) -- the card and its
+        action button are otherwise unchanged, since re-running it is
+        still how the user recalibrates.
+        '''
+
+        self.status_label.setText("Existing calibration found on disk.")
+        self.status_label.setVisible(True)
 
 
 class WelcomePage(QWidget):
@@ -398,6 +421,14 @@ class CreatePage(QWidget):
     calibration/spatial/calibrate.py's module docstring). Bad-pixel-map
     is likewise not gated on directly -- it's built automatically as part
     of flat-field calibration (see FlatFieldDialog's docstring).
+
+    These four flags start out True, not just False, for whichever types
+    _mark_existing_calibrations() finds an already-saved artifact for at
+    construction time -- otherwise a user who created some calibrations in
+    an earlier app run, then closed and relaunched, would have to redo
+    perfectly good captures just to flip this page's session-only flags
+    back on (the artifacts themselves persist across restarts in
+    DEFAULT_ARTIFACT_DIR; these flags previously did not).
 
     continue_requested is emitted when the user clicks "Continue to Main
     Window" (only reachable once every gated type is done) -- see
@@ -503,6 +534,60 @@ class CreatePage(QWidget):
         )
         self.continue_button.clicked.connect(self.continue_requested)
         layout.addWidget(self.continue_button)
+
+        self._mark_existing_calibrations()
+        self._update_continue_button()
+
+    def _mark_existing_calibrations(self) -> None:
+
+        '''
+        Probes DEFAULT_ARTIFACT_DIR for each gated calibration type's
+        artifact left over from a previous app run and, for each one that
+        loads successfully, pre-satisfies that type's "done" flag and
+        reveals its card's "Existing calibration found on disk." note (see
+        class docstring for why session-only flags otherwise can't see
+        what's already on disk). Each of the four loads is independent --
+        a missing file for one type (FileNotFoundError, the expected
+        "not built yet" case -- the same failure
+        CalibrationScreen._attempt_load_existing_calibrations() treats as
+        ordinary) doesn't block detection of the others. Called once, at
+        construction time; nothing here re-checks disk later, since the
+        only way an artifact changes during this page's lifetime is
+        through this page's own dialogs, which already update these flags
+        directly on accept().
+        '''
+
+        try:
+            load_baseline(DEFAULT_ARTIFACT_DIR / DEFAULT_BASELINE_FILENAME)
+        except FileNotFoundError:
+            pass
+        else:
+            self._baseline_done = True
+            self.baseline_card.mark_existing_on_disk()
+
+        try:
+            load_flat_field(DEFAULT_ARTIFACT_DIR / DEFAULT_FLAT_FIELD_FILENAME)
+        except FileNotFoundError:
+            pass
+        else:
+            self._flat_field_done = True
+            self.flat_field_card.mark_existing_on_disk()
+
+        try:
+            load_conversion_gain(DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME)
+        except FileNotFoundError:
+            pass
+        else:
+            self._conversion_gain_done = True
+            self.conversion_gain_card.mark_existing_on_disk()
+
+        try:
+            load_spectral_calibration(DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME)
+        except FileNotFoundError:
+            pass
+        else:
+            self._spectral_done = True
+            self.spectral_card.mark_existing_on_disk()
 
     def _update_continue_button(self) -> None:
         '''Enables continue_button once every gated calibration type has
