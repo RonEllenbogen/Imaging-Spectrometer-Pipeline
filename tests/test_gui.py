@@ -30,7 +30,7 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pipeline.acquisition import CANONICAL_SHAPE  # noqa: E402
+from pipeline.acquisition import CameraStream, SyntheticBackend, CANONICAL_SHAPE  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 import pipeline.gui.calibration_screen as calibration_screen_module  # noqa: E402
@@ -44,13 +44,30 @@ FIXTURE_GAIN_DB = 0.0
 
 # Classes
 
+class _FakeWavelengthAxis:
+
+    '''Minimal WavelengthAxis stand-in -- a trivial linear pixel->nm map.
+    Local copy of tests/test_live_view.py's own copy -- see this file's
+    module docstring for why these small per-file duplicates exist rather
+    than a shared import.'''
+
+    def wavelength_nm(self, pixel):
+        return 500.0 + 0.01 * np.asarray(pixel, dtype=float)
+
+    def sigma_wavelength_nm(self, pixel):
+        return np.full_like(np.asarray(pixel, dtype=float), 0.05)
+
+
 # Functions
 
 def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, SimpleNamespace, ScaleFactorPositionCalibration]:
     '''
     Patches calibration_screen's load_baseline()/load_flat_field()/
-    load_bad_pixel_map()/load_conversion_gain()/load_scale_factor() calls
-    to all succeed with synthetic data. Returns (baseline_result,
+    load_bad_pixel_map()/load_conversion_gain()/load_spectral_calibration()/
+    load_scale_factor()/load_geometric_tilt() calls to all succeed (or, for
+    geometric tilt, to cleanly report "not built yet" -- see
+    CalibrationBundle's own docstring for why that's a valid outcome, not
+    a failure) with synthetic data. Returns (baseline_result,
     conversion_gain_result, position_calibration) so callers can assert
     the returned CalibrationBundle was actually built from these values.
     Mirrors tests/test_calibration_screen.py's own copy of this helper --
@@ -58,6 +75,14 @@ def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, Si
     this codebase's existing per-file test-helper convention (e.g.
     tests/test_calibration.py and tests/test_preprocessing.py each define
     their own local _frame()/_uniform() rather than sharing one module).
+    Every load_*() call calibration_screen.py makes must be covered here --
+    missing even one turns "succeeds" into a real FileNotFoundError deep
+    inside a Qt signal handler, which surfaces as a real (unmocked)
+    show_calibration_error_dialog() call and hangs the whole test on
+    QDialog.exec() rather than failing cleanly (this happened for real
+    while wiring the geometric-tilt/spectral load calls in -- see
+    TestMainWindowNavigation's own defensive show_calibration_error_dialog
+    patch below).
     '''
     record = CalibrationRecord(
         exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
@@ -86,9 +111,19 @@ def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, Si
         lambda path: (conversion_gain_result, record),
     )
     monkeypatch.setattr(
+        calibration_screen_module, "load_spectral_calibration", lambda path: _FakeWavelengthAxis()
+    )
+    monkeypatch.setattr(
         calibration_screen_module,
         "load_scale_factor",
         lambda path: (position_calibration, object()),
+    )
+
+    def _raise_missing_geometric_tilt(path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(
+        calibration_screen_module, "load_geometric_tilt", _raise_missing_geometric_tilt
     )
     return baseline_result, conversion_gain_result, position_calibration
 
@@ -97,12 +132,48 @@ def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, Si
 # app.py -- MainWindow navigation (pytest-qt, offscreen)
 # ---------------------------------------------------------------------------
 
+def _fake_build_camera_stream(gain_db, *, exposure_us=None, auto_exposure=False):
+    '''
+    A SyntheticBackend-driven CameraStream standing in for
+    cli.calibration.build_camera_stream() -- the real one constructs a
+    PylonBackend (see its own docstring: "CameraStream configured for the
+    real PylonBackend"), which without a physical camera connected can
+    block for an unpredictable, sometimes very long time on device
+    enumeration. app.py's MainWindow._on_calibration_ready() calls the
+    real one unconditionally, so any test exercising that real code path
+    -- like this one -- needs this substitute the same way every other
+    camera-touching path in this test suite avoids real hardware.
+    '''
+    return CameraStream(
+        exposure_us=exposure_us if exposure_us is not None else FIXTURE_EXPOSURE_US,
+        gain_db=gain_db, pixel_format="Mono8", timeout_ms=5000,
+        backend=SyntheticBackend(seed=0),
+    )
+
+
 class TestMainWindowNavigation:
 
     def test_calibration_to_live_view_to_extended_measurement_and_back(
         self, qtbot, monkeypatch
     ):
         _patch_successful_calibration_load(monkeypatch)
+        monkeypatch.setattr("pipeline.gui.app.build_camera_stream", _fake_build_camera_stream)
+        # Any real (unmocked) modal QDialog/QMessageBox.exec() blocks
+        # forever waiting for user interaction that will never come in an
+        # offscreen/automated run -- diagnosed via lldb backtrace showing
+        # the process parked in QDialog::exec(). None of these are
+        # expected to actually fire on the success path this test
+        # exercises; patched to raise loudly (not hang) if one does.
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError(f"unexpected error dialog: {args!r} {kwargs!r}")
+
+        monkeypatch.setattr(
+            "pipeline.gui.live_view.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(calibration_screen_module, "show_calibration_error_dialog", _fail_if_called)
         window = MainWindow()
         qtbot.addWidget(window)
 

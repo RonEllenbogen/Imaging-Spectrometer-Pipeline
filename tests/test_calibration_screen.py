@@ -71,18 +71,47 @@ from pipeline.gui.live_view import DEGREE_CHOICES  # noqa: E402
 FIXTURE_EXPOSURE_US = 2000.0
 FIXTURE_GAIN_DB = 0.0
 
+# Distinguishes "caller didn't pass geometric_tilt" (-> default to a
+# present artifact) from "caller explicitly passed None" (-> simulate a
+# missing geometric_tilt.npz) in _patch_successful_calibration_load().
+_MISSING = object()
+
 # Classes
+
+class _FakeWavelengthAxis:
+
+    '''Minimal WavelengthAxis stand-in -- a trivial linear pixel->nm map.
+    Local copy of tests/test_live_view.py's own copy -- see this file's
+    module docstring for why these small per-file duplicates exist rather
+    than a shared import.'''
+
+    def wavelength_nm(self, pixel):
+        return 500.0 + 0.01 * np.asarray(pixel, dtype=float)
+
+    def sigma_wavelength_nm(self, pixel):
+        return np.full_like(np.asarray(pixel, dtype=float), 0.05)
+
 
 # Functions
 
-def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, SimpleNamespace, ScaleFactorPositionCalibration]:
+def _patch_successful_calibration_load(
+    monkeypatch, geometric_tilt=_MISSING,
+) -> tuple[SimpleNamespace, SimpleNamespace, ScaleFactorPositionCalibration, _FakeWavelengthAxis]:
     '''
     Patches calibration_screen's load_baseline()/load_flat_field()/
-    load_bad_pixel_map()/load_conversion_gain()/load_scale_factor() calls
-    to all succeed with synthetic data, mirroring _calibration_set() above.
-    Returns (baseline_result, conversion_gain_result, position_calibration)
-    so callers can assert the returned CalibrationBundle was actually built
-    from these values.
+    load_bad_pixel_map()/load_conversion_gain()/load_spectral_calibration()/
+    load_scale_factor()/load_geometric_tilt() calls to all succeed with
+    synthetic data, mirroring _calibration_set() above. Returns
+    (baseline_result, conversion_gain_result, position_calibration,
+    wavelength_axis) so callers can assert the returned CalibrationBundle
+    was actually built from these values.
+
+    geometric_tilt
+        The value load_geometric_tilt() should return. Defaults to a
+        sentinel object (not None) so tests can also cover the "artifact
+        genuinely exists" path -- pass None explicitly to instead make
+        load_geometric_tilt() raise FileNotFoundError (the "not built
+        yet" case CalibrationBundle's docstring says is fine).
     '''
     record = CalibrationRecord(
         exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
@@ -95,6 +124,8 @@ def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, Si
     bad_pixel_mask = np.zeros(CANONICAL_SHAPE, dtype=bool)
     conversion_gain_result = SimpleNamespace(gain_e_per_adu=2.2)
     position_calibration = ScaleFactorPositionCalibration()
+    wavelength_axis = _FakeWavelengthAxis()
+    tilt_result = object() if geometric_tilt is _MISSING else geometric_tilt
 
     monkeypatch.setattr(
         calibration_screen_module, "load_baseline", lambda path: (baseline_result, record)
@@ -111,25 +142,39 @@ def _patch_successful_calibration_load(monkeypatch) -> tuple[SimpleNamespace, Si
         lambda path: (conversion_gain_result, record),
     )
     monkeypatch.setattr(
+        calibration_screen_module, "load_spectral_calibration", lambda path: wavelength_axis
+    )
+    monkeypatch.setattr(
         calibration_screen_module,
         "load_scale_factor",
         lambda path: (position_calibration, object()),
     )
-    return baseline_result, conversion_gain_result, position_calibration
+
+    def _load_geometric_tilt(path):
+        if tilt_result is None:
+            raise FileNotFoundError(path)
+        return tilt_result
+
+    monkeypatch.setattr(calibration_screen_module, "load_geometric_tilt", _load_geometric_tilt)
+
+    return baseline_result, conversion_gain_result, position_calibration, wavelength_axis
 
 
 def _patch_missing_calibration_load(monkeypatch) -> list:
     '''
-    Patches every load_*() call calibration_screen makes to raise
-    FileNotFoundError, and show_calibration_error_dialog() to record its
-    arguments instead of opening a real modal dialog. Returns the list
+    Patches every hard-required load_*() call calibration_screen makes to
+    raise FileNotFoundError, and show_calibration_error_dialog() to record
+    its arguments instead of opening a real modal dialog. Returns the list
     show_calibration_error_dialog() calls get appended to, as
     (title, message) tuples.
     '''
     def _raise_missing(path):
         raise FileNotFoundError(path)
 
-    for name in ("load_baseline", "load_flat_field", "load_bad_pixel_map", "load_conversion_gain"):
+    for name in (
+        "load_baseline", "load_flat_field", "load_bad_pixel_map",
+        "load_conversion_gain", "load_spectral_calibration",
+    ):
         monkeypatch.setattr(calibration_screen_module, name, _raise_missing)
 
     error_calls = []
@@ -185,6 +230,13 @@ def _patch_mismatched_gain_calibration_load(monkeypatch) -> list:
         "load_conversion_gain",
         lambda path: (conversion_gain_result, conversion_gain_record),
     )
+    # Reached before the gain-mismatch check runs (see
+    # _attempt_load_existing_calibrations()'s load order) -- must succeed
+    # so the flow reaches that check rather than failing earlier as
+    # "No Existing Calibrations".
+    monkeypatch.setattr(
+        calibration_screen_module, "load_spectral_calibration", lambda path: _FakeWavelengthAxis()
+    )
 
     error_calls = []
     monkeypatch.setattr(
@@ -216,7 +268,7 @@ def test_welcome_page_create_requested_navigates_to_create_page(qtbot):
 
 
 def test_load_existing_calibrations_success_emits_calibration_ready(qtbot, monkeypatch):
-    baseline_result, conversion_gain_result, position_calibration = (
+    baseline_result, conversion_gain_result, position_calibration, wavelength_axis = (
         _patch_successful_calibration_load(monkeypatch)
     )
     screen = CalibrationScreen()
@@ -241,6 +293,65 @@ def test_load_existing_calibrations_success_emits_calibration_ready(qtbot, monke
         conversion_gain_result.gain_e_per_adu
     )
     assert bundle.position_calibration is position_calibration
+    assert bundle.wavelength_axis is wavelength_axis
+
+
+def test_load_existing_calibrations_missing_spectral_shows_error(qtbot, monkeypatch):
+    # Spectral is hard-required, same as baseline/flat-field/bad-pixel-map/
+    # conversion-gain -- unlike geometric tilt (see the soft-optional test
+    # below), a missing spectral.npz must block the load.
+    def _raise_missing(path):
+        raise FileNotFoundError(path)
+
+    _patch_successful_calibration_load(monkeypatch)
+    monkeypatch.setattr(calibration_screen_module, "load_spectral_calibration", _raise_missing)
+    error_calls = []
+    monkeypatch.setattr(
+        calibration_screen_module,
+        "show_calibration_error_dialog",
+        lambda parent, title, message: error_calls.append((title, message)),
+    )
+
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    assert received == []
+    assert screen.get_calibration_bundle() is None
+    assert len(error_calls) == 1
+
+
+def test_load_existing_calibrations_missing_geometric_tilt_still_succeeds(qtbot, monkeypatch):
+    # Geometric tilt is soft-optional (see CalibrationBundle's own
+    # docstring): a missing geometric_tilt.npz must NOT block the load --
+    # it just leaves CalibrationSet.geometric_tilt as None.
+    _patch_successful_calibration_load(monkeypatch, geometric_tilt=None)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    assert len(received) == 1
+    assert received[0].calibration_set.geometric_tilt is None
+
+
+def test_load_existing_calibrations_present_geometric_tilt_is_threaded_through(qtbot, monkeypatch):
+    sentinel_tilt = object()
+    _patch_successful_calibration_load(monkeypatch, geometric_tilt=sentinel_tilt)
+    screen = CalibrationScreen()
+    qtbot.addWidget(screen)
+    received = []
+    screen.calibration_ready.connect(received.append)
+
+    screen.welcome_page.load_requested.emit()
+
+    assert len(received) == 1
+    assert received[0].calibration_set.geometric_tilt is sentinel_tilt
 
 
 def test_load_existing_calibrations_missing_artifact_shows_error(qtbot, monkeypatch):

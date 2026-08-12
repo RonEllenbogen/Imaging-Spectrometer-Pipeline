@@ -27,13 +27,16 @@ calibration_artifacts/ on disk yet. A follow-up pass wires:
 WelcomePage's "Load Existing Calibrations" flow is fully wired, by
 contrast: clicking it immediately attempts to load every artifact from
 DEFAULT_ARTIFACT_DIR (baseline, flat field, bad-pixel map, conversion
-gain, spatial scale factor) via CalibrationScreen._attempt_load_existing_
-calibrations(), with no intermediate review page. Success builds a
-CalibrationBundle and emits calibration_ready right away; failure (any of
-baseline/flat-field/bad-pixel-map/conversion-gain missing -- spatial's
-scale factor always falls back to a physically valid default, so it alone
-missing doesn't count) shows an error dialog and leaves the user on
-WelcomePage.
+gain, spectral, spatial scale factor, geometric tilt) via
+CalibrationScreen._attempt_load_existing_calibrations(), with no
+intermediate review page. Success builds a CalibrationBundle and emits
+calibration_ready right away; failure (any of baseline/flat-field/
+bad-pixel-map/conversion-gain/spectral missing) shows an error dialog and
+leaves the user on WelcomePage. Two artifacts are allowed to be missing
+without failing the load: spatial's scale factor always falls back to a
+physically valid default, and geometric tilt (built alongside spectral
+only when it was captured from the lamp, not entered manually) is simply
+left unset on CalibrationSet -- see CalibrationBundle's own docstring.
 
 Bad-pixel-map is deliberately absent from CreatePage's card list -- it has
 no manual "create new" entry point anywhere in this screen (see
@@ -71,12 +74,15 @@ from pipeline.calibration.spatial import (
     ScaleFactorPositionCalibration,
     load_scale_factor,
 )
+from pipeline.calibration.spectral import load_geometric_tilt, load_spectral_calibration
 from pipeline.cli.calibration import (
     DEFAULT_ARTIFACT_DIR,
     DEFAULT_BAD_PIXEL_MAP_FILENAME,
     DEFAULT_BASELINE_FILENAME,
     DEFAULT_CONVERSION_GAIN_FILENAME,
     DEFAULT_FLAT_FIELD_FILENAME,
+    DEFAULT_GEOMETRIC_TILT_FILENAME,
+    DEFAULT_SPECTRAL_FILENAME,
 )
 from pipeline.gui.calibration_dialogs import (
     BaselineDialog,
@@ -219,7 +225,16 @@ class CalibrationBundle:
     calibration_set
         Baseline + flat field + bad-pixel mask (+ background_sigma), for
         pipeline.preprocessing.run_preprocessing(). None until the
-        relevant artifacts are loaded/built.
+        relevant artifacts are loaded/built. Its geometric_tilt field is
+        populated when a geometric_tilt.npz exists alongside the other
+        artifacts, and left None otherwise (see
+        _attempt_load_existing_calibrations()) -- unlike the four
+        camera-driven artifacts above, a missing geometric tilt
+        calibration is not itself a load failure: run_preprocessing()
+        already treats CalibrationSet.geometric_tilt=None as "skip that
+        correction" cleanly, and a manually-entered spectral calibration
+        (build_manual_spectral_calibration(), bypassing lamp capture)
+        never produces one at all.
     noise_model
         SensorNoiseModel(gain_e_per_adu=..., background_sigma=...), built
         from the loaded baseline + conversion-gain artifacts. None until
@@ -230,11 +245,14 @@ class CalibrationBundle:
         other fields, a physically valid default always exists -- see
         calibration/spatial/calibrate.py).
     wavelength_axis
-        Always None for now -- calibration/spectral/line_matching.py itself
-        is built, but SpectralCalibrationDialog's accept path is still a
-        UI-only placeholder (see calibration_dialogs.py's module docstring),
-        so no real WavelengthCalibrationResult is built yet to construct
-        one from.
+        The loaded WavelengthCalibrationResult (implements WavelengthAxis
+        directly). Stays Optional at the type level, matching
+        calibration_set/noise_model above, but in practice
+        _attempt_load_existing_calibrations() treats a missing
+        spectral.npz as a load failure the same way it does baseline/
+        flat-field/bad-pixel-map/conversion-gain -- a real wavelength
+        axis is the whole point of getting this calibration in the first
+        place, so it's never silently left None by that flow.
     conversion_gain_record
         The ConversionGainRecord tagging the loaded conversion-gain
         artifact (gain_db/timestamp/n_illumination_levels it was measured
@@ -567,20 +585,25 @@ class CalibrationScreen(QWidget):
         SensorNoiseModel from the loaded baseline + conversion gain,
         exactly as _cmd_noise_model does) and emits calibration_ready.
 
-        On failure -- baseline, flat field, bad-pixel map, or conversion
-        gain missing -- shows an error dialog and leaves the user on
-        WelcomePage. Spatial's scale factor is not part of this check:
-        load_scale_factor() always falls back to DEFAULT_SCALE_FACTOR
-        rather than raising, so it alone missing is never a failure.
+        On failure -- baseline, flat field, bad-pixel map, conversion
+        gain, or spectral missing -- shows an error dialog and leaves the
+        user on WelcomePage. Two artifacts are NOT part of this hard-
+        failure check: spatial's scale factor (load_scale_factor() always
+        falls back to DEFAULT_SCALE_FACTOR rather than raising) and
+        geometric tilt (load_geometric_tilt() raising FileNotFoundError is
+        caught separately and just leaves CalibrationSet.geometric_tilt
+        as None -- see CalibrationBundle's own docstring for why that's
+        the right default, not a failure).
 
-        A second, separate check runs once all four artifacts load
-        successfully: check_conversion_gain_matches_baseline() cross-checks
-        the two independently-recorded gain_db values (baseline's and
-        conversion-gain's) against each other, since nothing else in this
-        method compares them directly. If they've drifted apart by more
-        than GAIN_MATCH_TOLERANCE_ABS, this also shows an error dialog and
-        leaves the user on WelcomePage, without building or emitting a
-        CalibrationBundle from the (settings-inconsistent) artifacts.
+        A second, separate check runs once the four camera-driven
+        artifacts load successfully: check_conversion_gain_matches_baseline()
+        cross-checks the two independently-recorded gain_db values
+        (baseline's and conversion-gain's) against each other, since
+        nothing else in this method compares them directly. If they've
+        drifted apart by more than GAIN_MATCH_TOLERANCE_ABS, this also
+        shows an error dialog and leaves the user on WelcomePage, without
+        building or emitting a CalibrationBundle from the
+        (settings-inconsistent) artifacts.
         '''
 
         try:
@@ -595,6 +618,9 @@ class CalibrationScreen(QWidget):
             )
             conversion_gain_result, conversion_gain_record = load_conversion_gain(
                 DEFAULT_ARTIFACT_DIR / DEFAULT_CONVERSION_GAIN_FILENAME
+            )
+            wavelength_axis = load_spectral_calibration(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME
             )
         except FileNotFoundError:
             show_calibration_error_dialog(
@@ -611,6 +637,12 @@ class CalibrationScreen(QWidget):
         position_calibration, _ = load_scale_factor(
             DEFAULT_ARTIFACT_DIR / _DEFAULT_SCALE_FACTOR_FILENAME
         )
+        try:
+            geometric_tilt = load_geometric_tilt(
+                DEFAULT_ARTIFACT_DIR / DEFAULT_GEOMETRIC_TILT_FILENAME
+            )
+        except FileNotFoundError:
+            geometric_tilt = None
 
         calibration_set = CalibrationSet(
             baseline=baseline_result.baseline,
@@ -619,6 +651,7 @@ class CalibrationScreen(QWidget):
             flat_field_record=flat_field_record,
             bad_pixel_mask=bad_pixel_mask,
             background_sigma=baseline_result.background_sigma,
+            geometric_tilt=geometric_tilt,
         )
         noise_model = SensorNoiseModel(
             gain_e_per_adu=conversion_gain_result.gain_e_per_adu,
@@ -628,6 +661,7 @@ class CalibrationScreen(QWidget):
             calibration_set=calibration_set,
             noise_model=noise_model,
             position_calibration=position_calibration,
+            wavelength_axis=wavelength_axis,
             conversion_gain_record=conversion_gain_record,
         )
         self.calibration_ready.emit(self._bundle)
