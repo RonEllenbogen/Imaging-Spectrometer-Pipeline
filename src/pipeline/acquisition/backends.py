@@ -12,6 +12,16 @@ from .pixel_formats import PIXEL_FORMAT_INFO, max_value_for_pixel_format, dtype_
 
 # Constants
 
+# Caps SyntheticBackend's frame rate to roughly the real camera's own
+# documented ceiling (~51fps, ~20ms/frame -- see camera.py's
+# COLLECT_POLL_INTERVAL_S comment). Without this, grab_one() has nothing
+# to block on the way a real GigE grab does, so CameraStream's background
+# thread busy-loops as fast as the CPU allows -- harmless in isolation,
+# but on constrained hardware it can starve the GIL badly enough to make
+# unrelated main-thread work (e.g. a live-view tick's preprocessing call)
+# take orders of magnitude longer than it does standalone.
+DEFAULT_SYNTHETIC_FRAME_INTERVAL_S = 1.0 / 51.0
+
 # Classes
 
 class CameraBackend(Protocol):
@@ -365,6 +375,7 @@ class SyntheticBackend:
         noise_std: float = 5.0,
         timeout_probability: float = 0.0,
         seed: int | None = None,
+        frame_interval_s: float = DEFAULT_SYNTHETIC_FRAME_INTERVAL_S,
     ): # Default parameters
         self.shape = shape
         self.centroid0_px = centroid0_px
@@ -373,10 +384,12 @@ class SyntheticBackend:
         self.peak_counts = peak_counts
         self.noise_std = noise_std
         self.timeout_probability = timeout_probability
+        self.frame_interval_s = frame_interval_s
         self._rng = np.random.default_rng(seed)
 
         self._connected = False
         self._dtype: np.dtype | None = None
+        self._last_grab_time: float | None = None
 
     def connect(self) -> None:
 
@@ -428,7 +441,7 @@ class SyntheticBackend:
         ----------
         timeout_ms
             The maximum time to wait for a frame in milliseconds. If no frame is available within this time, a CameraTimeoutError is raised.
-        
+
         Returns
         -------
         frame.astype(self._dtype)
@@ -438,6 +451,19 @@ class SyntheticBackend:
         # Guard against being called before connect() and configure()
         if not self._connected or self._dtype is None:
             raise RuntimeError("grab_one() called before connect()/configure()")
+
+        # Paces successive grabs to frame_interval_s apart -- unlike a real
+        # backend, nothing here blocks on hardware/network I/O, so without
+        # this CameraStream's background thread would busy-loop as fast as
+        # the CPU allows (see DEFAULT_SYNTHETIC_FRAME_INTERVAL_S). Sleeps
+        # only the remainder of the interval, not the whole thing, so the
+        # cost of building the frame itself doesn't compound across calls.
+        now = time.monotonic()
+        if self._last_grab_time is not None:
+            remaining = self.frame_interval_s - (now - self._last_grab_time)
+            if remaining > 0:
+                time.sleep(remaining)
+        self._last_grab_time = time.monotonic()
 
         # Simulate a timeout with the specified probability
         if self._rng.random() < self.timeout_probability:
