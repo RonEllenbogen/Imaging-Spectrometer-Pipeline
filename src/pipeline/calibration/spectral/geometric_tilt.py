@@ -311,50 +311,31 @@ def _fit_slope(
     return float(fit.coefficients[1])
 
 
-def build_geometric_tilt(
-    frames: list[FrameData],
-    gain_e_per_adu: float = PLACEHOLDER_GAIN_E_PER_ADU,
-    background_sigma: float = PLACEHOLDER_BACKGROUND_SIGMA,
-    fitter: PolynomialFitter | None = None,
-) -> GeometricTiltResult:
+def _measure_line_displacements(
+    frames: list[FrameData], gain_e_per_adu: float, background_sigma: float,
+) -> tuple[
+    list[int], list[np.ndarray], list[np.ndarray], list[np.ndarray],
+    np.ndarray, np.ndarray, int, float, float,
+]:
 
     '''
-    Measures the shared row-dependent geometric tilt from several lamp
-    (or any narrow-line-source) calibration frames -- see module
-    docstring for the method and scripts/measure_spectrometer_tilt.py for
-    the exploratory analysis this productionizes.
-
-    Parameters
-    ----------
-    frames
-        Lamp-only calibration frames (no other light source), all
-        captured under identical exposure_us/gain_db -- same requirement
-        as calibration/sensor/baseline.py's build_baseline(). At least 1
-        frame is accepted (unlike build_baseline(), nothing here needs a
-        sample standard deviation across frames), but more frames improve
-        each line's centroid SNR via stacking.
-    gain_e_per_adu, background_sigma
-        Sensor noise parameters for the Thompson-Larson-Webb centroid
-        uncertainty (see module docstring's note on why this duplicates
-        rather than imports analysis/centroiding.py's version). Feed
-        directly into two places, not just one: each line's own per-row
-        sigma_x0 (used, as before, to weight that line's residual-slope
-        fit), and -- since real values are now threaded through by every
-        real caller (calibration/spectral/workflow.py's
-        run_spectral_calibration()) -- the inverse-variance weighting of
-        the shared row_shift curve itself (see below), so a wrong noise
-        estimate here now measurably skews row_shift, not just each
-        line's reported uncertainty. Default to this module's own
-        placeholders only for a caller with no real conversion-gain/
-        baseline calibration to pass (e.g. a bring-up script against a
-        brand new camera); pass real measured values whenever they exist.
-    fitter
-        PolynomialFitter for each line's row-vs-centroid fit. Defaults to
-        TotalLeastSquaresFit.
+    Shared first stage of build_geometric_tilt() and
+    build_geometric_tilt_linear(): validates the frames, detects lamp
+    lines, centroids each one per row, anchors each line's displacement
+    to zero at the reference row, and combines every line into a single
+    per-row inverse-variance-weighted mean displacement. The two public
+    functions diverge only in what they do with that per-row mean --
+    build_geometric_tilt() interpolates across any row no line covered;
+    build_geometric_tilt_linear() fits a straight line through it.
 
     Returns
     -------
-    GeometricTiltResult
+    tuple
+        (line_columns, line_rows, line_displacement, line_sigma,
+        mean_displacement, weight_sum, reference_row, reference_exposure,
+        reference_gain). mean_displacement and weight_sum have shape
+        (CANONICAL_SHAPE[SPATIAL_AXIS],); both are NaN at any row no line
+        covered.
 
     Raises
     ------
@@ -369,7 +350,7 @@ def build_geometric_tilt(
     '''
 
     if len(frames) < 1:
-        raise ValueError("build_geometric_tilt() requires at least 1 frame")
+        raise ValueError("requires at least 1 frame")
 
     reference_exposure = frames[0].exposure_us
     reference_gain = frames[0].gain_db
@@ -379,8 +360,6 @@ def build_geometric_tilt(
                 "all frames must share identical exposure_us and gain_db -- got a mismatch "
                 "against the first frame"
             )
-
-    fitter = fitter if fitter is not None else TotalLeastSquaresFit()
 
     n_rows = CANONICAL_SHAPE[SPATIAL_AXIS]
     stacked = np.mean([f.image.astype(np.float64) for f in frames], axis=0)
@@ -443,8 +422,18 @@ def build_geometric_tilt(
         weight_sum = np.nansum(weight_grid, axis=0)
         mean_displacement = np.nansum(weight_grid * displacement_grid, axis=0) / weight_sum
 
-    valid_rows = np.flatnonzero(~np.isnan(mean_displacement))
-    row_shift = np.interp(np.arange(n_rows), valid_rows, mean_displacement[valid_rows])
+    return (
+        line_columns, line_rows, line_displacement, line_sigma,
+        mean_displacement, weight_sum, reference_row, reference_exposure, reference_gain,
+    )
+
+
+def _fit_line_residuals(
+    line_columns: list[int], line_rows: list[np.ndarray], line_displacement: list[np.ndarray],
+    line_sigma: list[np.ndarray], row_shift: np.ndarray, fitter: PolynomialFitter,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    '''Per-line residual slope (px/row) left over after row_shift is subtracted, sorted by column.'''
 
     residual_columns = []
     residual_slopes = []
@@ -458,6 +447,172 @@ def build_geometric_tilt(
     order = np.argsort(residual_columns)
     residual_slope_columns = np.array(residual_columns, dtype=np.float64)[order]
     residual_slope_values = np.array(residual_slopes, dtype=np.float64)[order]
+    return residual_slope_columns, residual_slope_values
+
+
+def build_geometric_tilt(
+    frames: list[FrameData],
+    gain_e_per_adu: float = PLACEHOLDER_GAIN_E_PER_ADU,
+    background_sigma: float = PLACEHOLDER_BACKGROUND_SIGMA,
+    fitter: PolynomialFitter | None = None,
+) -> GeometricTiltResult:
+
+    '''
+    Measures the shared row-dependent geometric tilt from several lamp
+    (or any narrow-line-source) calibration frames -- see module
+    docstring for the method and scripts/measure_spectrometer_tilt.py for
+    the exploratory analysis this productionizes.
+
+    Parameters
+    ----------
+    frames
+        Lamp-only calibration frames (no other light source), all
+        captured under identical exposure_us/gain_db -- same requirement
+        as calibration/sensor/baseline.py's build_baseline(). At least 1
+        frame is accepted (unlike build_baseline(), nothing here needs a
+        sample standard deviation across frames), but more frames improve
+        each line's centroid SNR via stacking.
+    gain_e_per_adu, background_sigma
+        Sensor noise parameters for the Thompson-Larson-Webb centroid
+        uncertainty (see module docstring's note on why this duplicates
+        rather than imports analysis/centroiding.py's version). Feed
+        directly into two places, not just one: each line's own per-row
+        sigma_x0 (used, as before, to weight that line's residual-slope
+        fit), and -- since real values are now threaded through by every
+        real caller (calibration/spectral/workflow.py's
+        run_spectral_calibration()) -- the inverse-variance weighting of
+        the shared row_shift curve itself (see below), so a wrong noise
+        estimate here now measurably skews row_shift, not just each
+        line's reported uncertainty. Default to this module's own
+        placeholders only for a caller with no real conversion-gain/
+        baseline calibration to pass (e.g. a bring-up script against a
+        brand new camera); pass real measured values whenever they exist.
+    fitter
+        PolynomialFitter for each line's row-vs-centroid fit. Defaults to
+        TotalLeastSquaresFit.
+
+    Returns
+    -------
+    GeometricTiltResult
+
+    Raises
+    ------
+    ValueError
+        If frames is empty, or any frame's exposure_us/gain_db differs
+        from the first frame's (mirrors build_baseline()'s check).
+    LineMatchingError
+        If fewer than MIN_LINES_REQUIRED lines are detected with enough
+        valid rows to fit -- same failure mode line_matching.py's
+        match_lines() raises this for (too few usable peaks in the lamp
+        image), reused here rather than duplicated.
+    '''
+
+    fitter = fitter if fitter is not None else TotalLeastSquaresFit()
+
+    (
+        line_columns, line_rows, line_displacement, line_sigma,
+        mean_displacement, weight_sum, reference_row, reference_exposure, reference_gain,
+    ) = _measure_line_displacements(frames, gain_e_per_adu, background_sigma)
+
+    n_rows = CANONICAL_SHAPE[SPATIAL_AXIS]
+    valid_rows = np.flatnonzero(~np.isnan(mean_displacement))
+    row_shift = np.interp(np.arange(n_rows), valid_rows, mean_displacement[valid_rows])
+
+    residual_slope_columns, residual_slope_values = _fit_line_residuals(
+        line_columns, line_rows, line_displacement, line_sigma, row_shift, fitter,
+    )
+
+    record = CalibrationRecord(
+        exposure_us=reference_exposure, gain_db=reference_gain,
+        timestamp=time.time(), source_frame_count=len(frames),
+    )
+    return GeometricTiltResult(
+        row_shift=row_shift, reference_row=reference_row,
+        residual_slope_columns=residual_slope_columns, residual_slope_values=residual_slope_values,
+        record=record,
+    )
+
+
+def build_geometric_tilt_linear(
+    frames: list[FrameData],
+    gain_e_per_adu: float = PLACEHOLDER_GAIN_E_PER_ADU,
+    background_sigma: float = PLACEHOLDER_BACKGROUND_SIGMA,
+    fitter: PolynomialFitter | None = None,
+) -> GeometricTiltResult:
+
+    '''
+    Amendment to build_geometric_tilt() that replaces its per-row shared
+    curve (raw inverse-variance-weighted mean, gaps filled by
+    interpolation) with a single straight-line fit through that same
+    per-row mean. Trades the ability to represent the curve's documented
+    non-monotonic, jump-containing shape (see module docstring) for
+    immunity to shot-noise-driven row-to-row jitter -- an explicit bet
+    that, for the frames this is built from, a smooth linear model is
+    closer to the truth than the raw per-row curve. Everything upstream
+    of the shared-curve combination (line detection, per-row centroiding,
+    per-line anchoring at the reference row, inverse-variance weighting)
+    is identical to build_geometric_tilt() -- both call
+    _measure_line_displacements() for that shared stage.
+
+    The fit is weighted by each row's combined inverse-variance from that
+    per-line combination (a row built from more/brighter line coverage
+    pulls the line harder than one built from a single dim line) and uses
+    only rows at least one line actually covered -- deliberately
+    excluding the gap rows build_geometric_tilt() fills by interpolation,
+    so no already-interpolated value is fed back into this fit.
+
+    Parameters
+    ----------
+    frames, gain_e_per_adu, background_sigma
+        See build_geometric_tilt().
+    fitter
+        PolynomialFitter for both the shared row_shift line and each
+        line's residual slope. Defaults to TotalLeastSquaresFit.
+
+    Returns
+    -------
+    GeometricTiltResult
+        row_shift is exactly linear in row by construction, and re-
+        anchored so row_shift[reference_row] == 0 exactly (the fitted
+        line's own value there is only approximately zero -- every
+        line's displacement was already anchored relative to
+        reference_row upstream in _measure_line_displacements(), so the
+        fit is shifted by a constant to respect that same anchor rather
+        than let finite-sample noise offset it).
+
+    Raises
+    ------
+    ValueError, LineMatchingError
+        See build_geometric_tilt().
+    InsufficientDataError
+        If fewer than 3 rows have real line coverage -- a straight-line
+        fit needs at least degree + 2 points (see shared/fitting.py);
+        vanishingly unlikely once MIN_LINES_REQUIRED lines are detected,
+        since each contributes many rows, but a real path unlike
+        build_geometric_tilt()'s interpolation, which has no such floor.
+    '''
+
+    fitter = fitter if fitter is not None else TotalLeastSquaresFit()
+
+    (
+        line_columns, line_rows, line_displacement, line_sigma,
+        mean_displacement, weight_sum, reference_row, reference_exposure, reference_gain,
+    ) = _measure_line_displacements(frames, gain_e_per_adu, background_sigma)
+
+    n_rows = CANONICAL_SHAPE[SPATIAL_AXIS]
+    valid_rows = np.flatnonzero(~np.isnan(mean_displacement))
+
+    row_sigma = np.sqrt(1.0 / weight_sum[valid_rows])
+    sigma_rows = np.full(valid_rows.shape, PLACEHOLDER_ROW_SIGMA, dtype=np.float64)
+    fit = fitter.fit(
+        valid_rows.astype(np.float64), mean_displacement[valid_rows], sigma_rows, row_sigma, degree=1,
+    )
+    row_shift = np.polynomial.polynomial.polyval(np.arange(n_rows), fit.coefficients)
+    row_shift = row_shift - row_shift[reference_row]
+
+    residual_slope_columns, residual_slope_values = _fit_line_residuals(
+        line_columns, line_rows, line_displacement, line_sigma, row_shift, fitter,
+    )
 
     record = CalibrationRecord(
         exposure_us=reference_exposure, gain_db=reference_gain,
@@ -533,5 +688,6 @@ def load_geometric_tilt(path: str | Path) -> GeometricTiltResult:
 
 
 __all__ = [
-    "GeometricTiltResult", "build_geometric_tilt", "save_geometric_tilt", "load_geometric_tilt",
+    "GeometricTiltResult", "build_geometric_tilt", "build_geometric_tilt_linear",
+    "save_geometric_tilt", "load_geometric_tilt",
 ]
