@@ -31,12 +31,18 @@ docstring: results stay in pixel units whenever it's omitted, the
 convention every real caller in this codebase already follows, e.g.
 scripts/analyze_raw_shot.py/scripts/measure_spatial_dispersion.py).
 self._position_calibration/_convert_to_mm() only convert already-computed
-pixel-unit results to mm for display, the same duality live_view.py uses.
-zeta_combined specifically -- the one value with its own side-panel
-display -- goes through the analogous _zeta_to_mm() at that one display
-call site only; every internal consumer (_recompute_fit_and_residuals(),
+pixel-unit results to mm for display, the same duality live_view.py uses
+-- every plotted graph axis (main plot, residual plot) stays in mm this
+way, regardless of the paragraph below. Every *quoted* spatial-dispersion/
+coefficient value (never a graph axis) instead goes through the nm-based
+_convert_to_nm()/_zeta_to_nm() -- this codebase's convention for those
+numbers specifically (see formatting.coefficient_unit()'s docstring).
+zeta_combined -- the one value with its own side-panel display -- goes
+through _zeta_to_nm() at that one display call site only; every internal
+consumer that feeds the plotted curve (_recompute_fit_and_residuals(),
 which redraws the fit line/residuals against self._measurement_x0_px)
-keeps using the raw px/nm value returned by combine_shots().
+keeps using the raw px/nm value returned by combine_shots(), converted to
+mm (never nm) at plot time via _convert_to_mm().
 When no real wavelength calibration is loaded (self._wavelength_axis is
 None), _PixelColumnWavelengthAxis stands in for it so analyze_shot() still
 has something to fit against -- pixel column itself, mirroring this
@@ -132,7 +138,12 @@ from pipeline.preprocessing import (
 )
 
 from pipeline.gui.calibration_dialogs import show_camera_error_dialog
-from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
+from pipeline.gui.formatting import (
+    coefficient_unit,
+    format_value_with_uncertainty,
+    microns_to_mm,
+    microns_to_nm,
+)
 from pipeline.gui.live_view import (
     DEFAULT_DEGREE,
     DEGREE_CHOICES,
@@ -782,7 +793,7 @@ class ExtendedMeasurementScreen(QWidget):
 
         form.addRow("N Shots:", self._n_shots_label)
         form.addRow("Coefficients:", self._coefficients_label)
-        form.addRow("Spatial Dispersion (mm/nm):", self._spatial_dispersion_label)
+        form.addRow("Spatial Dispersion (nm/nm):", self._spatial_dispersion_label)
         form.addRow("Reduced Chi-Squared:", self._reduced_chi_squared_label)
         form.addRow("Evaluate At:", self._evaluated_at_spin)
         form.addRow("Evaluated At:", self._evaluated_at_label)
@@ -1123,8 +1134,8 @@ class ExtendedMeasurementScreen(QWidget):
         combined = self._compute_combined_result(degree)
 
         self._n_shots_label.setText(str(combined.n_shots))
-        zeta_mm, zeta_sigma_mm = self._zeta_to_mm(combined.zeta_combined, combined.sigma_zeta_combined)
-        self._spatial_dispersion_label.setText(format_value_with_uncertainty(zeta_mm, zeta_sigma_mm))
+        zeta_nm, zeta_sigma_nm = self._zeta_to_nm(combined.zeta_combined, combined.sigma_zeta_combined)
+        self._spatial_dispersion_label.setText(format_value_with_uncertainty(zeta_nm, zeta_sigma_nm))
         # combine_shots() doesn't expose reduced chi-squared as its own
         # field (see combination.py) -- but it's recoverable exactly from
         # the two sigmas it does return, since weighted_scatter/(n_shots-1)
@@ -1151,16 +1162,20 @@ class ExtendedMeasurementScreen(QWidget):
             self._recompute_combined_polynomial_fit_and_residuals(degree)
 
         # Same conversion regardless of coefficient order k: convert()
-        # is a pure linear px->mm scale (see _zeta_to_mm()'s docstring),
-        # so it's valid applied elementwise to c0 (mm) through
-        # c_degree (mm/nm^degree) alike -- only the px numerator's units
-        # change, never wavelength_nm, which convert() never touches.
-        coefficients_mm, coefficient_sigma_mm = self._convert_to_mm(
+        # is a pure linear px->physical scale (see _zeta_to_nm()'s
+        # docstring), so it's valid applied elementwise to c0 (nm)
+        # through c_degree (nm/nm^degree) alike -- only the px
+        # numerator's units change, never wavelength_nm, which convert()
+        # never touches. Quoted in nm (not mm, unlike the plotted curve
+        # below) -- this codebase's convention for spatial-dispersion/
+        # coefficient values specifically (see
+        # formatting.coefficient_unit()'s docstring).
+        coefficients_nm, coefficient_sigma_nm = self._convert_to_nm(
             self._measurement_coefficients_px, self._measurement_coefficient_sigma_px,
         )
         coeff_lines = [
-            f"c<sub>{k}</sub> = {format_value_with_uncertainty(float(c), float(sigma_c))}"
-            for k, (c, sigma_c) in enumerate(zip(coefficients_mm, coefficient_sigma_mm))
+            f"c<sub>{k}</sub> ({coefficient_unit(k)}) = {format_value_with_uncertainty(float(c), float(sigma_c))}"
+            for k, (c, sigma_c) in enumerate(zip(coefficients_nm, coefficient_sigma_nm))
         ]
         self._coefficients_label.setText("<br>".join(coeff_lines))
 
@@ -1319,23 +1334,42 @@ class ExtendedMeasurementScreen(QWidget):
         y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
         return microns_to_mm(y0), microns_to_mm(sigma_y0)
 
-    def _zeta_to_mm(self, zeta_value: float, zeta_sigma: float) -> tuple[float, float]:
+    def _convert_to_nm(
+        self, x0: np.ndarray, sigma_x0: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+
+        '''
+        position_calibration.convert() returns microns -- the nm-based
+        counterpart to self._convert_to_mm(), used for every *quoted*
+        spatial-dispersion/coefficient value (never a plotted graph axis,
+        which stays mm via self._convert_to_mm() -- see module
+        docstring). Identical to LiveViewWidget's helper of the same
+        name.
+        '''
+
+        y0, sigma_y0 = self._position_calibration.convert(x0, sigma_x0)
+        return microns_to_nm(y0), microns_to_nm(sigma_y0)
+
+    def _zeta_to_nm(self, zeta_value: float, zeta_sigma: float) -> tuple[float, float]:
 
         '''
         Converts a combined zeta (px/nm, combine_shots()'s native unit)
-        to physical units (mm/nm) via self._convert_to_mm() -- valid for
-        a slope, not just a position, because
-        ScaleFactorPositionCalibration.convert() is a pure linear scale
-        with no additive offset (see its own docstring). Display-only:
-        callers must keep using the raw px/nm zeta_combined for
-        _recompute_fit_and_residuals(), which needs it in
-        analyze_shot()'s native units to match self._measurement_x0_px.
-        Identical to LiveViewWidget's helper of the same name, minus the
-        None-sigma case (combine_shots() always returns a real sigma).
+        to physical units (nm/nm) via self._convert_to_nm() -- this
+        codebase's quoted-value convention for spatial dispersion (see
+        formatting.coefficient_unit()'s docstring), valid for a slope,
+        not just a position, because ScaleFactorPositionCalibration
+        .convert() is a pure linear scale with no additive offset (see
+        its own docstring). Display-only: callers must keep using the
+        raw px/nm zeta_combined for _recompute_fit_and_residuals(), which
+        needs it in analyze_shot()'s native units to match
+        self._measurement_x0_px, and the drawn curve itself stays in mm
+        via _convert_to_mm(), never nm. Identical to LiveViewWidget's
+        helper of the same name, minus the None-sigma case (combine_shots()
+        always returns a real sigma).
         '''
 
-        zeta_mm, sigma_mm = self._convert_to_mm(np.array([zeta_value]), np.array([zeta_sigma]))
-        return float(zeta_mm[0]), float(sigma_mm[0])
+        zeta_nm, sigma_nm = self._convert_to_nm(np.array([zeta_value]), np.array([zeta_sigma]))
+        return float(zeta_nm[0]), float(sigma_nm[0])
 
 
 # Functions

@@ -284,7 +284,7 @@ class TestSaveMeasurementRecord:
         # save_measurement_record() itself computes it -- see its
         # docstring), not an independently re-derived value.
         from pipeline.gui.extended_measurement import compute_combined_result_for_degree
-        from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
+        from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_nm
 
         bundle = build_realistic_calibration_bundle()
         shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
@@ -304,7 +304,7 @@ class TestSaveMeasurementRecord:
         roi_center_wavelength_nm = float(bundle.wavelength_axis.wavelength_nm(np.array([roi_center_column]))[0])
 
         combined_1 = compute_combined_result_for_degree(shot_results, 1, roi_center_wavelength_nm)
-        zeta_mm, zeta_sigma_mm = bundle.position_calibration.convert(
+        zeta_um, zeta_sigma_um = bundle.position_calibration.convert(
             np.array([combined_1.zeta_combined]), np.array([combined_1.sigma_zeta_combined]),
         )
         text = (record_dir / "combined_results.txt").read_text()
@@ -313,20 +313,23 @@ class TestSaveMeasurementRecord:
         # The exact formatted string is reproduced independently rather than
         # substring-matched against a hand-typed number, to actually
         # exercise format_value_with_uncertainty() the same way the saved
-        # file does.
+        # file does. Quoted in nm (this codebase's spatial-dispersion/
+        # coefficient convention -- see formatting.coefficient_unit()'s
+        # docstring), not mm -- the journal plot's own axes stay mm
+        # separately (see the plot-specific tests below).
         expected = format_value_with_uncertainty(
-            microns_to_mm(float(zeta_mm[0])), microns_to_mm(float(zeta_sigma_mm[0])),
+            microns_to_nm(float(zeta_um[0])), microns_to_nm(float(zeta_sigma_um[0])),
         )
-        assert f"spatial dispersion at ROI center (mm/nm) = {expected}" in text
+        assert f"spatial dispersion at ROI center (nm/nm) = {expected}" in text
         # c0/c1 are listed as combined polynomial coefficients too, distinct
         # from the "spatial dispersion" line above.
         assert "combined polynomial coefficients" in text
-        assert "c0 (mm) = " in text
-        assert "c1 (mm/nm) = " in text
+        assert "c0 (nm) = " in text
+        assert "c1 (nm/nm) = " in text
         # Degree 2/3 must list their own higher-order coefficients too --
         # this was the actual bug report (only c0/c1 were ever shown).
-        assert "c2 (mm/nm^2) = " in text
-        assert "c3 (mm/nm^3) = " in text
+        assert "c2 (nm/nm^2) = " in text
+        assert "c3 (nm/nm^3) = " in text
 
     def test_saved_stack_matches_the_stacked_image_passed_in(self, tmp_path):
         # stacked_image is now computed by the caller (a running mean

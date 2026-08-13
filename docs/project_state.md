@@ -322,20 +322,29 @@ uncertainty) converts to physical units only if supplied; until
 defaults to pixel units by design — `position_calibration` stays an
 opt-in parameter, not a new default, so every non-GUI caller
 (`scripts/`, `analysis/` tests) is unaffected. The GUI is the one caller
-that now opts in, but only for the "Spatial Dispersion" (ζ) display
-specifically, not the whole fit: `live_view.py`/`extended_measurement.py`
-each gained a `_zeta_to_mm()` helper that converts a fitted ζ (px/nm) to
-physical units (mm/nm) via the same `ScaleFactorPositionCalibration` the
-scatter/fit-curve y-values already went through — valid for a slope
-because `.convert()` is a pure linear scale with no additive offset, so
-scaling a derivative this way is exactly as correct as scaling a
-position. Everything ζ feeds into internally (`_recompute_fit_and_
-residuals()`'s redrawn fit line/residuals in `extended_measurement.py`,
-`combine_shots()`'s inputs) still uses the raw px/nm value — only the
-two on-screen labels (`live_view.py`'s side-panel field + rolling strip
-chart, `extended_measurement.py`'s combined-result field) show the
-converted one, each now suffixed "(mm/nm)" so the unit is explicit
-on-screen rather than implicit.
+that now opts in, both for the plotted graph axes (scatter/fit-curve/
+residual y-values, always mm — `_convert_to_mm()`) and for every
+*quoted* spatial-dispersion/coefficient value (never a graph axis — see
+`formatting.coefficient_unit()`'s docstring), which instead uses nm:
+`live_view.py`/`extended_measurement.py`/`measurement_record.py` each
+have a `_convert_to_nm()`/`_zeta_to_nm()` (or free-function equivalent)
+that converts a fitted ζ or polynomial coefficient (px/nm^k) to physical
+units (nm/nm^k) via the same `ScaleFactorPositionCalibration` the
+scatter/fit-curve y-values go through for mm — valid for a slope/
+coefficient because `.convert()` is a pure linear scale with no
+additive offset, so scaling a derivative this way is exactly as correct
+as scaling a position. Everything ζ feeds into internally
+(`_recompute_fit_and_residuals()`'s redrawn fit line/residuals in
+`extended_measurement.py`, `combine_shots()`'s inputs) still uses the
+raw px/nm value — only the on-screen labels/saved-record text (`live_
+view.py`'s side-panel field + rolling strip chart, `extended_
+measurement.py`'s combined-result field + Coefficients row,
+`measurement_record.py`'s `combined_results.txt` + the journal plot's ζ
+annotation text) show the converted nm-based one, each suffixed with its
+unit (`coefficient_unit()`: "nm", "nm/nm", "nm/nm^2", ...) so the unit is
+explicit rather than implicit. This nm-vs-mm split (quoted values in nm,
+graph axes in mm) was a deliberate later change, not the original design
+— see this doc's "GUI" section (§5) for when/why it was made.
 
 **Result object shapes**:
 - `CentroidResult` (per frame) — arrays over valid columns: `columns`,
@@ -1233,7 +1242,8 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   hoc addition — each shot's `coefficients[k]` is an independent estimate of the same physical quantity
   regardless of k) — used for degree 2/3 (degree 1 keeps its existing intercept+zeta_combined pair,
   unchanged, still GUI-matching). `combined_results.txt` now lists every combined coefficient (c0..c_degree,
-  with per-degree units, e.g. `mm/nm^2`) as its own section, separate from spatial dispersion — which is
+  with per-degree units, e.g. `nm/nm^2` — see the later nm-vs-mm note below for why nm, not mm) as its
+  own section, separate from spatial dispersion — which is
   now evaluated at the center of the realized spectral ROI (`(columns.min() + columns.max()) / 2`,
   converted via `axis_for_fit`) rather than the live GUI's "Evaluate At" spin box value, since that
   reference point is a live-only concept (a user-editable pixel column with a fixed default, unrelated to
@@ -1290,6 +1300,33 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   slope direction), with a white background patch as a second line of defense either way — a plain
   `ax.legend()` was tried first and rejected: a long label string anchored at a nominally-empty corner
   still stretches back across most of the axes width, unavoidably overlapping the diagonal.
+
+  **Quoted spatial-dispersion/coefficient values switched from mm to nm-based units; plotted graph axes
+  stayed mm.** Requested directly: ζ and every polynomial coefficient (c0..c_degree, wherever shown with
+  units) should read in nm-based units (c0 in nm, c1 in nm/nm, c2 in nm/nm², c3 in nm/nm³ — position
+  expressed in nm rather than mm), but every plotted graph's y-axis (main scatter/fit-curve, residual
+  panels, the journal plot's degree/residual subplots) should keep displaying mm, unchanged. This is a
+  *quoted-value* convention, not a *graph-axis* convention — the two were deliberately decoupled rather
+  than switching everything to nm, since a position axis reading in mm is still the more readable choice
+  for eyeballing a plot, while nm keeps ζ/coefficient numbers from reading as awkwardly small mm-scale
+  decimals. `formatting.py` gained `microns_to_nm()`/`nm_to_microns()` (mirroring the existing
+  `microns_to_mm()`/`mm_to_microns()`) and a shared `coefficient_unit(k)` (`"nm"`, `"nm/nm"`,
+  `"nm/nm^2"`, ...), used by all three of `live_view.py`/`extended_measurement.py`/
+  `measurement_record.py` so the unit convention can't drift between them. Each of the three gained a
+  `_convert_to_nm()`/`_zeta_to_nm()` (or, in `measurement_record.py`, the free-function equivalent)
+  alongside its existing mm-based counterpart — the mm helpers are untouched and still feed every
+  plotted graph exactly as before; the new nm helpers feed only labels/saved text/plot annotations. One
+  real behavior change beyond the unit swap: `live_view.py`'s "Coefficients:" row previously showed
+  `fit.coefficients` completely unconverted (raw px/nm^k, no unit label at all, for both the real-data
+  and construction-time-placeholder paths) — now converted to nm-based units with a per-coefficient unit
+  label, matching what `extended_measurement.py`/`measurement_record.py` already did (mm-labeled) before
+  this pass. The rolling strip chart (a live trend of ζ itself, not a raw detector position) also
+  switched to nm/nm, per explicit confirmation that a *derived spatial-dispersion* quantity's own trend
+  chart follows the quoted-value convention rather than the graph-axis one, even though it's a plotted
+  y-axis. `_zeta_to_mm()` was removed from both `live_view.py` and `extended_measurement.py` (renamed to
+  `_zeta_to_nm()`) once its only call sites moved to nm, rather than being kept around unused;
+  `measurement_record.py`'s local `_coefficient_unit()` was removed in favor of the shared
+  `formatting.coefficient_unit()`.
 
 **Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
 genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw

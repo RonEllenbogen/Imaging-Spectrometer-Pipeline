@@ -68,7 +68,7 @@ from pipeline.gui.live_view import (  # noqa: E402
     heatmap_x_extent,
     wavelength_axis_label,
 )
-from pipeline.gui.formatting import format_value_with_uncertainty  # noqa: E402
+from pipeline.gui.formatting import coefficient_unit, format_value_with_uncertainty, NM_PER_MICRON  # noqa: E402
 from pipeline.gui.roi_control import SpatialROIControl, SpectralROIControl  # noqa: E402
 
 # gui_fixture_helpers.py is a plain sibling module in this directory (no
@@ -396,33 +396,36 @@ class TestLiveViewWidgetSmoke:
 class TestZetaPhysicalUnits:
 
     '''
-    Regression coverage for _zeta_to_mm(): "Spatial Dispersion" must be
-    displayed in physical units (mm/nm, via self._position_calibration),
-    not analyze_shot()'s native px/nm -- see live_view.py's
-    _display_shot_result()/_update_fit_panel_from_result() docstrings.
+    Regression coverage for _zeta_to_nm(): "Spatial Dispersion" must be
+    displayed in physical units (nm/nm, via self._position_calibration --
+    this codebase's quoted-value convention, see
+    formatting.coefficient_unit()'s docstring), not analyze_shot()'s
+    native px/nm -- see live_view.py's _display_shot_result()/
+    _update_fit_panel_from_result() docstrings. Plotted graph axes (main
+    scatter/fit-curve/heatmap) stay mm, unaffected -- not covered here.
     '''
 
-    def _expected_mm(self, value_px, sigma_px=0.0):
+    def _expected_nm(self, value_px, sigma_px=0.0):
         value_um, sigma_um = ScaleFactorPositionCalibration().convert(
             np.array([value_px]), np.array([sigma_px])
         )
-        return float(value_um[0]) / MICRONS_PER_MM, float(sigma_um[0]) / MICRONS_PER_MM
+        return float(value_um[0]) * NM_PER_MICRON, float(sigma_um[0]) * NM_PER_MICRON
 
-    def test_zeta_to_mm_matches_position_calibration_scale(self, qtbot):
+    def test_zeta_to_nm_matches_position_calibration_scale(self, qtbot):
         widget = _make_live_view_widget(qtbot)
-        zeta_mm, sigma_mm = widget._zeta_to_mm(1.0, 0.1)
-        expected_zeta_mm, expected_sigma_mm = self._expected_mm(1.0, 0.1)
-        assert zeta_mm == pytest.approx(expected_zeta_mm)
-        assert sigma_mm == pytest.approx(expected_sigma_mm)
+        zeta_nm, sigma_nm = widget._zeta_to_nm(1.0, 0.1)
+        expected_zeta_nm, expected_sigma_nm = self._expected_nm(1.0, 0.1)
+        assert zeta_nm == pytest.approx(expected_zeta_nm)
+        assert sigma_nm == pytest.approx(expected_sigma_nm)
         # Sanity check this is a real conversion, not an accidental no-op --
-        # PIXEL_PITCH_UM * DEFAULT_SCALE_FACTOR / MICRONS_PER_MM is nowhere
+        # PIXEL_PITCH_UM * DEFAULT_SCALE_FACTOR * NM_PER_MICRON is nowhere
         # near 1.
-        assert zeta_mm != pytest.approx(1.0)
+        assert zeta_nm != pytest.approx(1.0)
 
-    def test_zeta_to_mm_preserves_none_sigma(self, qtbot):
+    def test_zeta_to_nm_preserves_none_sigma(self, qtbot):
         widget = _make_live_view_widget(qtbot)
-        _, sigma_mm = widget._zeta_to_mm(1.0, None)
-        assert sigma_mm is None
+        _, sigma_nm = widget._zeta_to_nm(1.0, None)
+        assert sigma_nm is None
 
     def test_update_fit_panel_from_result_displays_converted_zeta(self, qtbot):
         widget = _make_live_view_widget(qtbot)
@@ -439,19 +442,32 @@ class TestZetaPhysicalUnits:
 
         widget._update_fit_panel_from_result(fit, eval_x=750.0)
 
-        expected_zeta_mm, expected_sigma_mm = self._expected_mm(zeta_px, sigma_px)
+        expected_zeta_nm, expected_sigma_nm = self._expected_nm(zeta_px, sigma_px)
         assert widget._zeta_label.text() == format_value_with_uncertainty(
-            expected_zeta_mm, expected_sigma_mm
+            expected_zeta_nm, expected_sigma_nm
         )
 
-    def test_placeholder_zeta_is_already_in_mm(self, qtbot):
+        # Coefficients row: same nm-based conversion, applied elementwise
+        # to the whole (c0, c1) array, with a per-coefficient unit label.
+        expected_c0_nm, expected_c0_sigma_nm = self._expected_nm(500.0, 1.0)
+        coefficients_text = widget._coefficients_label.text()
+        assert (
+            f"c<sub>0</sub> ({coefficient_unit(0)}) = "
+            f"{format_value_with_uncertainty(expected_c0_nm, expected_c0_sigma_nm)}"
+        ) in coefficients_text
+        assert (
+            f"c<sub>1</sub> ({coefficient_unit(1)}) = "
+            f"{format_value_with_uncertainty(expected_zeta_nm, expected_sigma_nm)}"
+        ) in coefficients_text
+
+    def test_placeholder_zeta_is_already_in_nm(self, qtbot):
         widget = _make_live_view_widget(qtbot)
         # _build_placeholder_fits() hardcodes 1.6e-3 (px/nm) for degree 1
         # before conversion -- see live_view.py.
-        expected_zeta_mm, expected_sigma_mm = self._expected_mm(1.6e-3, 2.1e-5)
+        expected_zeta_nm, expected_sigma_nm = self._expected_nm(1.6e-3, 2.1e-5)
         placeholder = widget._placeholder_fits[1]
-        assert placeholder.zeta_value == pytest.approx(expected_zeta_mm)
-        assert placeholder.zeta_sigma == pytest.approx(expected_sigma_mm)
+        assert placeholder.zeta_value == pytest.approx(expected_zeta_nm)
+        assert placeholder.zeta_sigma == pytest.approx(expected_sigma_nm)
 
 
 class TestLiveViewWidgetRefinements:

@@ -14,6 +14,7 @@ from decimal import ROUND_HALF_UP, Decimal
 # Constants
 
 MICRONS_PER_MM = 1000.0
+NM_PER_MICRON = 1000.0
 
 # Classes
 
@@ -122,4 +123,57 @@ def mm_to_microns(value_mm: float) -> float:
     return value_mm * MICRONS_PER_MM
 
 
-__all__ = ["format_value_with_uncertainty", "MICRONS_PER_MM", "microns_to_mm", "mm_to_microns"]
+def microns_to_nm(value_um: float) -> float:
+
+    '''
+    Converts microns to nm -- this codebase's convention for *quoted*
+    spatial-dispersion/polynomial-coefficient values (spatial dispersion
+    and every coefficient c0..c_degree are reported in nm-based units,
+    e.g. c1 in nm/nm), kept deliberately separate from microns_to_mm()
+    (still used for every plotted graph's position axis, which stays in
+    mm regardless of this convention -- see gui/extended_measurement.py's
+    module docstring).
+    '''
+
+    return value_um * NM_PER_MICRON
+
+
+def nm_to_microns(value_nm: float) -> float:
+
+    '''Inverse of microns_to_nm().'''
+
+    return value_nm / NM_PER_MICRON
+
+
+def coefficient_unit(k: int) -> str:
+
+    '''
+    Unit label for polynomial coefficient c_k in x0 = c0 + c1*wavelength_nm
+    + c2*wavelength_nm**2 + ... , with position expressed in nm (this
+    codebase's quoted-value convention -- see microns_to_nm()): c0 is a
+    plain position (nm); c1 is a position-per-wavelength ratio (nm/nm,
+    reported with matching numerator/denominator units rather than
+    simplified to a dimensionless number, so the wavelength normalization
+    stays explicit); c2 and above follow the same pattern (nm/nm^k).
+    Shared by every gui/ screen and measurement_record.py that displays a
+    combined or per-shot polynomial fit, so the unit convention can't
+    drift between them.
+    '''
+
+    if k == 0:
+        return "nm"
+    if k == 1:
+        return "nm/nm"
+    return f"nm/nm^{k}"
+
+
+__all__ = [
+    "format_value_with_uncertainty",
+    "MICRONS_PER_MM",
+    "NM_PER_MICRON",
+    "microns_to_mm",
+    "mm_to_microns",
+    "microns_to_nm",
+    "nm_to_microns",
+    "coefficient_unit",
+]

@@ -58,7 +58,7 @@ from pipeline.gui.extended_measurement import (  # noqa: E402
     compute_combined_result_for_degree,
     compute_fit_line_and_residuals,
 )
-from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM  # noqa: E402
+from pipeline.gui.formatting import format_value_with_uncertainty, NM_PER_MICRON  # noqa: E402
 from pipeline.gui.live_view import DEFAULT_DEGREE, DEGREE_CHOICES  # noqa: E402
 
 from gui_fixture_helpers import (  # noqa: E402
@@ -573,19 +573,21 @@ class TestExtendedMeasurementRealMeasurement:
             assert combined.zeta_combined == pytest.approx(expected_zeta, rel=0.3)
 
             # The displayed "Spatial Dispersion" label must be zeta_combined
-            # converted to physical units (mm/nm) via the widget's own
-            # ScaleFactorPositionCalibration -- not the raw px/nm value
-            # _compute_combined_result() returns internally. Recomputes the
-            # expected conversion independently (PIXEL_PITCH_UM * scale_factor,
-            # microns -> mm) rather than calling widget._zeta_to_mm() itself,
-            # so this actually exercises the wiring rather than restating it.
-            expected_zeta_mm, expected_sigma_mm = ScaleFactorPositionCalibration().convert(
+            # converted to physical units (nm/nm -- this codebase's quoted-
+            # value convention, see formatting.coefficient_unit()'s
+            # docstring) via the widget's own ScaleFactorPositionCalibration
+            # -- not the raw px/nm value _compute_combined_result() returns
+            # internally. Recomputes the expected conversion independently
+            # (PIXEL_PITCH_UM * scale_factor, microns -> nm) rather than
+            # calling widget._zeta_to_nm() itself, so this actually
+            # exercises the wiring rather than restating it.
+            expected_zeta_um, expected_sigma_um = ScaleFactorPositionCalibration().convert(
                 np.array([combined.zeta_combined]), np.array([combined.sigma_zeta_combined])
             )
-            expected_zeta_mm = float(expected_zeta_mm[0]) / MICRONS_PER_MM
-            expected_sigma_mm = float(expected_sigma_mm[0]) / MICRONS_PER_MM
+            expected_zeta_nm = float(expected_zeta_um[0]) * NM_PER_MICRON
+            expected_sigma_nm = float(expected_sigma_um[0]) * NM_PER_MICRON
             assert widget._spatial_dispersion_label.text() == format_value_with_uncertainty(
-                expected_zeta_mm, expected_sigma_mm
+                expected_zeta_nm, expected_sigma_nm
             )
             # Sanity check this isn't just approving whatever the raw px/nm
             # text would already have been -- the conversion factor here
@@ -636,13 +638,15 @@ class TestExtendedMeasurementRealMeasurement:
             assert widget._measurement_intercept_px == pytest.approx(expected_intercept_px)
             assert widget._measurement_intercept_sigma_px == pytest.approx(expected_intercept_sigma_px)
 
-            expected_c0_mm, expected_c0_sigma_mm = ScaleFactorPositionCalibration().convert(
+            expected_c0_um, expected_c0_sigma_um = ScaleFactorPositionCalibration().convert(
                 np.array([expected_intercept_px]), np.array([expected_intercept_sigma_px])
             )
+            # nm, not mm -- this codebase's quoted coefficient convention
+            # (c0 is "nm", see formatting.coefficient_unit()'s docstring).
             expected_c0_text = format_value_with_uncertainty(
-                float(expected_c0_mm[0]) / MICRONS_PER_MM, float(expected_c0_sigma_mm[0]) / MICRONS_PER_MM
+                float(expected_c0_um[0]) * NM_PER_MICRON, float(expected_c0_sigma_um[0]) * NM_PER_MICRON
             )
-            assert f"c<sub>0</sub> = {expected_c0_text}" in text
+            assert f"c<sub>0</sub> (nm) = {expected_c0_text}" in text
         finally:
             stream.stop()
 

@@ -122,7 +122,12 @@ from .extended_measurement import (  # noqa: E402
     compute_combined_result_for_degree,
     compute_fit_line_and_residuals,
 )
-from .formatting import format_value_with_uncertainty, microns_to_mm  # noqa: E402
+from .formatting import (  # noqa: E402
+    coefficient_unit,
+    format_value_with_uncertainty,
+    microns_to_mm,
+    microns_to_nm,
+)
 from .live_view import DEGREE_CHOICES, DEGREE_LABELS  # noqa: E402
 
 # Constants
@@ -210,10 +215,25 @@ def _convert_to_mm(
 ) -> tuple[np.ndarray, np.ndarray]:
 
     '''Same conversion as ExtendedMeasurementScreen._convert_to_mm() -- position_calibration.convert()
-    returns microns, everything in this module displays/reports in mm.'''
+    returns microns, and every plotted graph in this module (scatter/fit-curve/residual axes) displays
+    in mm regardless of _convert_to_nm() below.'''
 
     value_um, sigma_um = position_calibration.convert(value_px, sigma_px)
     return microns_to_mm(value_um), microns_to_mm(sigma_um)
+
+
+def _convert_to_nm(
+    value_px: np.ndarray, sigma_px: np.ndarray, position_calibration: ScaleFactorPositionCalibration,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    '''Same conversion as ExtendedMeasurementScreen._convert_to_nm() -- position_calibration.convert()
+    returns microns, and every *quoted* spatial-dispersion/coefficient value in this module
+    (combined_results.txt, the journal plot's zeta annotation) reports in nm, this codebase's
+    quoted-value convention (see formatting.coefficient_unit()'s docstring) -- never a plotted graph
+    axis, which stays mm via _convert_to_mm() above.'''
+
+    value_um, sigma_um = position_calibration.convert(value_px, sigma_px)
+    return microns_to_nm(value_um), microns_to_nm(sigma_um)
 
 
 def _reduced_chi_squared(combined: CombinedSpatialDispersionResult) -> float:
@@ -358,16 +378,6 @@ def _write_manifest(
     path.write_text("\n".join(lines) + "\n")
 
 
-# Unit label for polynomial coefficient c_k in x0_px = c0 + c1*wavelength_nm +
-# c2*wavelength_nm**2 + ... -- position-like (mm) scaled by 1/nm**k.
-def _coefficient_unit(k: int) -> str:
-    if k == 0:
-        return "mm"
-    if k == 1:
-        return "mm/nm"
-    return f"mm/nm^{k}"
-
-
 def _write_combined_results(
     path: Path, per_degree: dict[int, _DegreeResult], roi_center_wavelength_nm: float,
     position_calibration: ScaleFactorPositionCalibration,
@@ -376,10 +386,14 @@ def _write_combined_results(
     lines = [f"spatial dispersion below is evaluated at the spectral ROI's center, {roi_center_wavelength_nm:.3f} nm", ""]
     for degree in DEGREE_CHOICES:
         result = per_degree[degree]
-        coefficients_mm, coefficient_sigma_mm = _convert_to_mm(
+        # Quoted in nm (this codebase's convention for spatial-dispersion/
+        # coefficient values -- see formatting.coefficient_unit()'s
+        # docstring), not mm -- the journal plot's own axes stay mm
+        # separately (see _plot_journal_figure()).
+        coefficients_nm, coefficient_sigma_nm = _convert_to_nm(
             result.coefficients_px, result.coefficient_sigma_px, position_calibration,
         )
-        zeta_mm, zeta_sigma_mm = _convert_to_mm(
+        zeta_nm, zeta_sigma_nm = _convert_to_nm(
             np.array([result.spatial_dispersion.zeta_combined]),
             np.array([result.spatial_dispersion.sigma_zeta_combined]),
             position_calibration,
@@ -388,15 +402,15 @@ def _write_combined_results(
         lines.append(f"degree {degree} ({DEGREE_LABELS[degree]}):")
         lines.append(f"  n_shots = {result.spatial_dispersion.n_shots}")
         lines.append("  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):")
-        for k, (c, sigma_c) in enumerate(zip(coefficients_mm, coefficient_sigma_mm)):
+        for k, (c, sigma_c) in enumerate(zip(coefficients_nm, coefficient_sigma_nm)):
             lines.append(
-                f"    c{k} ({_coefficient_unit(k)}) = {format_value_with_uncertainty(float(c), float(sigma_c))}"
+                f"    c{k} ({coefficient_unit(k)}) = {format_value_with_uncertainty(float(c), float(sigma_c))}"
             )
         # NOT the same as c1 above except at degree 1 -- see _DegreeResult's
         # own docstring for why these are reported as two distinct things.
         lines.append(
-            f"  spatial dispersion at ROI center (mm/nm) = "
-            f"{format_value_with_uncertainty(float(zeta_mm[0]), float(zeta_sigma_mm[0]))}"
+            f"  spatial dispersion at ROI center (nm/nm) = "
+            f"{format_value_with_uncertainty(float(zeta_nm[0]), float(zeta_sigma_nm[0]))}"
         )
         lines.append(
             f"  reduced chi-squared (of the spatial-dispersion combination across shots) = "
@@ -497,7 +511,11 @@ def _plot_journal_figure(
             )
 
             fit_y_mm, _ = _convert_to_mm(result.fit_y_px, np.zeros_like(result.fit_y_px), position_calibration)
-            zeta_mm, zeta_sigma_mm = _convert_to_mm(
+            # Quoted in nm for the annotation text below (this codebase's
+            # spatial-dispersion convention), even though the plotted
+            # curve/axis above (fit_y_mm) stays mm -- the sign check just
+            # below is unaffected by which physical unit zeta is in.
+            zeta_nm, zeta_sigma_nm = _convert_to_nm(
                 np.array([result.spatial_dispersion.zeta_combined]),
                 np.array([result.spatial_dispersion.sigma_zeta_combined]),
                 position_calibration,
@@ -531,10 +549,10 @@ def _plot_journal_figure(
             # all (they're in combined_results.txt/fits.npz) -- there
             # isn't room here for up to 4 coefficients per panel, and zeta
             # is the one number that's directly comparable across degrees.
-            annotation_in_upper_left = float(zeta_mm[0]) >= 0
+            annotation_in_upper_left = float(zeta_nm[0]) >= 0
             annotation_text = (
                 f"{DEGREE_LABELS[degree]}\n"
-                rf"$\zeta$ = {format_value_with_uncertainty(float(zeta_mm[0]), float(zeta_sigma_mm[0]))} mm/nm"
+                rf"$\zeta$ = {format_value_with_uncertainty(float(zeta_nm[0]), float(zeta_sigma_nm[0]))} nm/nm"
                 "\n"
                 rf"$\chi^2_\nu$ = {_reduced_chi_squared(result.spatial_dispersion):.3g}"
             )
