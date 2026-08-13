@@ -404,13 +404,17 @@ class ExtendedMeasurementScreen(QWidget):
         self._main_plot.showGrid(x=True, y=True, alpha=0.3)
         self._style_plot_axes(self._main_plot)
 
+        # Error bars before the scatter -- pyqtgraph paints items in add
+        # order, and the error bar's vertical line runs straight through
+        # each point's centre, so adding it before the scatter (rather
+        # than after) keeps it from painting over and hiding the point.
+        self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
+        self._main_plot.addItem(self._error_bars)
+
         self._scatter = pg.ScatterPlotItem(
             size=7, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 200)
         )
         self._main_plot.addItem(self._scatter)
-
-        self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
-        self._main_plot.addItem(self._error_bars)
 
         self._fit_curve = pg.PlotDataItem(
             pen=pg.mkPen(color=FIT_CURVE_COLOR, width=FIT_CURVE_WIDTH)
