@@ -3,7 +3,8 @@ Single public entry point for preprocessing. Enforces the correction
 order as a property of the code, not documentation the caller has to
 remember: frame validation -> saturation check -> baseline subtraction ->
 flat-field division -> bad-pixel masking -> optional geometric tilt
-correction -> signal-threshold masking -> optional ROI masking.
+correction -> signal-threshold masking -> optional manual spectral-ROI
+override -> optional spatial ROI masking.
 
 Building calibration artifacts (baseline, flat field, bad-pixel map,
 geometric tilt) is NOT this function's job -- that happens once,
@@ -25,7 +26,7 @@ from .processed_frame import ProcessedFrame
 from .validation import check_frame_sanity
 from .steps import (
     apply_roi, apply_baseline, apply_flat_field, apply_bad_pixel_map,
-    apply_geometric_tilt_correction, apply_signal_threshold,
+    apply_geometric_tilt_correction, apply_signal_threshold, apply_spectral_roi,
 )
 
 
@@ -68,6 +69,7 @@ def run_preprocessing(
     frame: FrameData,
     calibration: CalibrationSet,
     roi_bounds: tuple[int, int] | None = None,
+    column_bounds: tuple[int, int] | None = None,
 ) -> tuple[ProcessedFrame, SaturationCheckResult]:
 
     '''
@@ -89,6 +91,13 @@ def run_preprocessing(
         entirely. Still pending an empirical check (a real background
         frame's histogram) on whether it's needed for this setup at all
         -- kept optional rather than mandatory until that's resolved.
+    column_bounds
+        (column_min, column_max) to treat as the only valid spectral
+        columns, overriding apply_signal_threshold()'s automatic SNR gate
+        entirely within [column_min, column_max) -- see
+        steps/spectral_roi.py's apply_spectral_roi(). None (the default)
+        leaves the automatic SNR gate as the sole word on which columns
+        are valid, unchanged from before this parameter existed.
 
     Returns
     -------
@@ -120,6 +129,9 @@ def run_preprocessing(
     if calibration.geometric_tilt is not None:
         processed = apply_geometric_tilt_correction(processed, calibration.geometric_tilt)
     processed = apply_signal_threshold(processed, calibration.background_sigma)
+    if column_bounds is not None:
+        column_min, column_max = column_bounds
+        processed = apply_spectral_roi(processed, column_min, column_max)
     valid_columns = processed.valid_columns
 
     if roi_bounds is not None:

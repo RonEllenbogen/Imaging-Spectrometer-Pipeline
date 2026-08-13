@@ -34,6 +34,7 @@ from pipeline.preprocessing.validation import check_frame_sanity
 from pipeline.preprocessing.steps import (
     apply_roi, apply_baseline, apply_flat_field, MIN_FLAT_FIELD_VALUE,
     apply_bad_pixel_map, apply_geometric_tilt_correction, apply_signal_threshold,
+    apply_spectral_roi,
 )
 from pipeline.calibration.sensor import (
     build_baseline, build_flat_field, build_bad_pixel_map, CalibrationRecord,
@@ -407,6 +408,72 @@ class TestApplySignalThreshold:
 
 
 # ---------------------------------------------------------------------------
+# steps/spectral_roi.py
+# ---------------------------------------------------------------------------
+
+class TestApplySpectralRoi:
+
+    def test_columns_inside_window_are_valid_outside_are_not(self):
+        frame = _processed(np.full(CANONICAL_SHAPE, 7.0))
+
+        result = apply_spectral_roi(frame, column_min=500, column_max=700)
+
+        assert np.all(result.valid_columns[500:700])
+        assert not np.any(result.valid_columns[:500])
+        assert not np.any(result.valid_columns[700:])
+
+    def test_overrides_automatic_signal_threshold(self):
+        '''
+        A column that would fail the automatic SNR gate (all-zero) is
+        still forced valid if it falls inside the manual window -- this
+        is the "override", not "AND with", the automatic gate.
+        '''
+        image = np.zeros(CANONICAL_SHAPE)
+        image[:, 100] = 50.0   # column 100 alone would pass the SNR gate
+        frame = _processed(image)
+
+        thresholded = apply_signal_threshold(frame, background_sigma=1.0)
+        assert thresholded.valid_columns[100] == True    # noqa: E712
+        assert thresholded.valid_columns[200] == False   # noqa: E712
+
+        overridden = apply_spectral_roi(thresholded, column_min=150, column_max=250)
+        assert overridden.valid_columns[100] == False   # noqa: E712 -- outside the manual window now
+        assert overridden.valid_columns[200] == True    # noqa: E712 -- inside it despite zero signal
+
+    def test_does_not_modify_image(self):
+        image = np.full(CANONICAL_SHAPE, 7.0)
+        frame = _processed(image)
+
+        result = apply_spectral_roi(frame, column_min=100, column_max=200)
+
+        assert np.array_equal(result.image, image)
+
+    def test_valid_columns_shape_and_dtype(self):
+        frame = _processed(np.full(CANONICAL_SHAPE, 7.0))
+        result = apply_spectral_roi(frame, column_min=0, column_max=CANONICAL_SHAPE[1])
+
+        assert result.valid_columns.shape == (CANONICAL_SHAPE[1],)
+        assert result.valid_columns.dtype == bool
+
+    def test_metadata_preserved(self):
+        frame = _processed(np.full(CANONICAL_SHAPE, 1.0), frame_id=42, exposure_us=2500.0, gain_db=1.5)
+        result = apply_spectral_roi(frame, column_min=100, column_max=200)
+        assert result.frame_id == 42
+        assert result.exposure_us == 2500.0
+        assert result.gain_db == 1.5
+
+    @pytest.mark.parametrize("column_min,column_max", [
+        (700, 500),
+        (-1, 500),
+        (500, CANONICAL_SHAPE[1] + 1),
+    ])
+    def test_invalid_bounds_raise(self, column_min, column_max):
+        frame = _processed(np.full(CANONICAL_SHAPE, 1.0))
+        with pytest.raises(ValueError):
+            apply_spectral_roi(frame, column_min=column_min, column_max=column_max)
+
+
+# ---------------------------------------------------------------------------
 # preprocessing_pipeline.py -- end-to-end wiring
 # ---------------------------------------------------------------------------
 
@@ -529,3 +596,44 @@ class TestPreprocessingPipeline:
         processed, _ = run_preprocessing(frame, calibration, roi_bounds=None)
 
         assert np.all(processed.image == 50.0)
+
+    def test_column_bounds_overrides_valid_columns(self):
+        calibration = _make_clean_calibration_set(baseline_value=0.0)
+        frame = _frame(_uniform(50))
+
+        processed, _ = run_preprocessing(frame, calibration, column_bounds=(500, 700))
+
+        assert np.all(processed.valid_columns[500:700])
+        assert not np.any(processed.valid_columns[:500])
+        assert not np.any(processed.valid_columns[700:])
+
+    def test_column_bounds_skipped_when_none(self):
+        calibration = _make_clean_calibration_set(baseline_value=0.0)
+        frame = _frame(_uniform(50))
+
+        processed, _ = run_preprocessing(frame, calibration, column_bounds=None)
+
+        # Every column carries the same uniform signal, so the automatic
+        # SNR gate alone (unmodified by any manual override) should pass
+        # every column.
+        assert np.all(processed.valid_columns)
+
+    def test_column_bounds_and_roi_bounds_compose(self):
+        '''
+        column_bounds (spectral, valid_columns) and roi_bounds (spatial,
+        pixel-zeroing) act on independent axes and must both take effect
+        together -- neither should silently override the other.
+        '''
+        calibration = _make_clean_calibration_set(baseline_value=0.0)
+        frame = _frame(_uniform(50))
+
+        processed, _ = run_preprocessing(
+            frame, calibration, roi_bounds=(500, 700), column_bounds=(100, 300)
+        )
+
+        assert np.all(processed.image[:500, :] == 0.0)
+        assert np.all(processed.image[700:, :] == 0.0)
+        assert np.all(processed.image[500:700, :] == 50.0)
+        assert np.all(processed.valid_columns[100:300])
+        assert not np.any(processed.valid_columns[:100])
+        assert not np.any(processed.valid_columns[300:])
