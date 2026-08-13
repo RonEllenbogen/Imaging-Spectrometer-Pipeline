@@ -1070,6 +1070,23 @@ class ExtendedMeasurementScreen(QWidget):
             float(self._measurement_x_values.min()), float(self._measurement_x_values.max())
         )
 
+        # What's actually drawn: one point per spectral column (mean/std
+        # of x0 across whichever shots reported that column), not every
+        # raw (shot, column) point above -- see
+        # aggregate_centroids_by_column()'s own docstring for why. Cached
+        # here (degree-independent) rather than recomputed in
+        # _apply_roi_bounds(), which _on_roi_changed() calls on every ROI-
+        # slider tick.
+        display_columns, display_y_px, display_y_sigma_px = aggregate_centroids_by_column(columns, x0_px)
+        self._display_wavelength_nm = self._axis_for_fit.wavelength_nm(display_columns)
+        self._display_y_values_mm, self._display_y_sigma_mm = self._convert_to_mm(
+            display_y_px, display_y_sigma_px
+        )
+        self._display_x_sigma = (
+            self._wavelength_axis.sigma_wavelength_nm(display_columns)
+            if self._wavelength_axis is not None else None
+        )
+
     def _compute_combined_result(self, degree: int) -> CombinedSpatialDispersionResult:
 
         '''See compute_combined_result_for_degree() -- this just supplies self._shot_results
@@ -1199,6 +1216,24 @@ class ExtendedMeasurementScreen(QWidget):
         self._measurement_fit_x = fit_x
         self._measurement_fit_y_mm = fit_y_mm
         self._measurement_residuals_mm = residual_mm
+        self._cache_display_residuals(residual_px)
+
+    def _cache_display_residuals(self, residual_px: np.ndarray) -> None:
+
+        '''
+        Aggregates residual_px (raw, one entry per (shot, column) point)
+        down to one value per spectral column -- see
+        aggregate_centroids_by_column() -- and stores it as
+        self._display_residual_mm for _apply_roi_bounds() to draw. Shared
+        by both _recompute_fit_and_residuals() (degree 1) and
+        _recompute_combined_polynomial_fit_and_residuals() (degree > 1),
+        which differ only in how residual_px itself is computed.
+        '''
+
+        _, display_residual_px, _ = aggregate_centroids_by_column(self._measurement_columns, residual_px)
+        self._display_residual_mm, _ = self._convert_to_mm(
+            display_residual_px, np.zeros_like(display_residual_px)
+        )
 
     def _recompute_combined_polynomial_fit_and_residuals(self, degree: int) -> None:
 
@@ -1248,6 +1283,7 @@ class ExtendedMeasurementScreen(QWidget):
         self._measurement_fit_x = fit_x
         self._measurement_fit_y_mm = fit_y_mm
         self._measurement_residuals_mm = residual_mm
+        self._cache_display_residuals(residual_px)
 
     def _apply_roi_bounds(self, min_mm: float, max_mm: float) -> None:
 
@@ -1260,23 +1296,33 @@ class ExtendedMeasurementScreen(QWidget):
         just changes which of the already-computed points are shown and
         what range the plots are zoomed to. A no-op if no measurement has
         been run yet.
+
+        The scatter/error-bars/residuals draw from the *aggregated*
+        (self._display_*) arrays, not the raw self._measurement_* ones --
+        one point per spectral column rather than every (shot, column)
+        point -- since _on_roi_changed() calls this on every ROI-slider
+        tick; re-slicing and re-pushing the full raw arrays that often
+        would re-trigger the same overplotting/performance problem
+        aggregate_centroids_by_column() exists to avoid. The fit curve
+        itself is unaffected -- it was already only FIT_CURVE_N_POINTS
+        points, never one of the raw arrays.
         '''
 
         if self._shot_results is None:
             return
 
-        y_values = self._measurement_y_values_mm
-        y_sigma = self._measurement_y_sigma_mm
+        y_values = self._display_y_values_mm
+        y_sigma = self._display_y_sigma_mm
         keep = (y_values >= min_mm) & (y_values <= max_mm)
 
-        x_values = self._measurement_x_values
+        x_values = self._display_wavelength_nm
         self._scatter.setData(x=x_values[keep], y=y_values[keep])
         error_kwargs = dict(
             x=x_values[keep], y=y_values[keep], top=y_sigma[keep], bottom=y_sigma[keep]
         )
-        if self._measurement_x_sigma is not None:
-            error_kwargs["left"] = self._measurement_x_sigma[keep]
-            error_kwargs["right"] = self._measurement_x_sigma[keep]
+        if self._display_x_sigma is not None:
+            error_kwargs["left"] = self._display_x_sigma[keep]
+            error_kwargs["right"] = self._display_x_sigma[keep]
         self._error_bars.setData(**error_kwargs)
 
         fit_y_full = self._measurement_fit_y_mm
@@ -1286,7 +1332,7 @@ class ExtendedMeasurementScreen(QWidget):
         )
 
         self._residual_scatter.setData(
-            x=x_values[keep], y=self._measurement_residuals_mm[keep]
+            x=x_values[keep], y=self._display_residual_mm[keep]
         )
 
         self._main_plot.setRange(
@@ -1528,6 +1574,62 @@ def compute_fit_line_and_residuals(
     return intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px
 
 
+def aggregate_centroids_by_column(
+    columns: np.ndarray, values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    '''
+    Reduces one flattened (shot, column) array (values -- e.g. x0_px, or a
+    fit's residual_px) to one value per spectral column: the mean and
+    standard deviation across whichever shots reported that column.
+
+    Groups by column *value*, not position -- a run's shots do not all
+    report the same column set even at identical ROI/settings, since
+    preprocessing's per-shot SNR gate (preprocessing/steps/
+    signal_threshold.py) can drop different columns on different shots
+    depending on that shot's own noise realization. This does not assume
+    shots line up into a clean (n_shots, n_columns) grid.
+
+    Exists purely to bound what a plot has to draw: a real run's flattened
+    (shot, column) arrays reach into the hundreds of thousands of points
+    (200 shots x ~1000 columns is a real on-disk example) -- both
+    pyqtgraph and matplotlib render that as a solid overplotted mass, with
+    individual points and their error bars completely indistinguishable
+    from each other. Reducing to one point per column bounds what's drawn
+    to the column count (order 10^3, fixed by the ROI) regardless of
+    n_shots, while every fit/residual computation stays on the full raw
+    data, unaffected -- this is a display-time reduction, not a re-fit
+    (see module docstring for why refitting against averaged data is
+    deliberately never done).
+
+    Parameters
+    ----------
+    columns
+        Column index for every raw (shot, column) point, flattened across
+        shots -- repeats a column once per shot that reported it.
+    values
+        The per-point quantity to reduce (e.g. x0_px, or a fit's
+        residual_px), same length/order as columns.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        (unique_columns, mean_per_column, std_per_column), each length
+        len(unique(columns)), ascending column order. A column reported by
+        only one shot gets std_per_column == 0 -- an honest "no spread
+        measurable from a single sample", not a NaN from a would-be n-1
+        estimator.
+    '''
+
+    unique_columns, inverse, counts = np.unique(columns, return_inverse=True, return_counts=True)
+    mean_per_column = np.bincount(inverse, weights=values, minlength=unique_columns.size) / counts
+    sum_sq_deviation = np.bincount(
+        inverse, weights=(values - mean_per_column[inverse]) ** 2, minlength=unique_columns.size,
+    )
+    std_per_column = np.sqrt(sum_sq_deviation / counts)
+    return unique_columns, mean_per_column, std_per_column
+
+
 __all__ = [
     "ExtendedMeasurementScreen",
     "DEFAULT_N_SHOTS",
@@ -1536,4 +1638,5 @@ __all__ = [
     "compute_combined_result_for_degree",
     "compute_combined_polynomial_for_degree",
     "compute_fit_line_and_residuals",
+    "aggregate_centroids_by_column",
 ]

@@ -118,6 +118,7 @@ from pipeline.preprocessing import CalibrationSet, ProcessedFrame  # noqa: E402
 
 from .extended_measurement import (  # noqa: E402
     FIT_CURVE_N_POINTS,
+    aggregate_centroids_by_column,
     compute_combined_polynomial_for_degree,
     compute_combined_result_for_degree,
     compute_fit_line_and_residuals,
@@ -193,6 +194,14 @@ class _DegreeResult:
     different quantities and must not be conflated (an earlier version of
     this module's combined_results.txt labeled zeta_combined "c1" even at
     degree > 1, which was simply wrong).
+
+    residual_px is every raw (shot, column) point's residual -- what the
+    reduced chi-squared and every other statistic in combined_results.txt
+    is computed from. display_residual_px is the same residuals reduced
+    to one mean value per spectral column (see
+    aggregate_centroids_by_column()), purely for _plot_journal_figure()'s
+    residual panel -- plotting all ~10^5 raw residuals overplots into a
+    solid mass with no visible points (see that function's docstring).
     '''
 
     coefficients_px: np.ndarray
@@ -201,6 +210,7 @@ class _DegreeResult:
     fit_x: np.ndarray
     fit_y_px: np.ndarray
     residual_px: np.ndarray
+    display_residual_px: np.ndarray
 
 
 # Functions
@@ -432,19 +442,29 @@ def _plot_journal_figure(
     colorblind/grayscale-safe color+linestyle pairing per degree. Saved as
     both .png (quick view) and .pdf (vector, for actual publication use).
 
-    The scatter/error-bar/residual layers are rasterized in the PDF (via
-    set_rasterization_zorder(), matplotlib's documented technique for
+    wavelength_nm/y_values_mm/y_sigma_mm/x_sigma_nm and every
+    per_degree[degree].display_residual_px are already reduced to one
+    point per spectral column (aggregate_centroids_by_column(), called by
+    save_measurement_record() before this function is reached) -- not the
+    full raw (shot, column) data every statistic in combined_results.txt
+    is computed from. A real 200-shot measurement has on the order of
+    10^5 (shot, column) points per panel; plotting all of them individually
+    overplots into a solid mass with every point and error bar completely
+    indistinguishable from its neighbors (this function used to do exactly
+    that). Reducing to one point per column bounds what's drawn to the
+    column count (order 10^3, fixed by the ROI) regardless of shot count.
+
+    The scatter/error-bar/residual layers are still rasterized in the PDF
+    (via set_rasterization_zorder(), matplotlib's documented technique for
     mixed vector+raster figures -- everything below the given zorder
     rasterizes, everything at or above stays vector) while the fit lines,
-    axes, text, and legend stay vector. A real 200-shot measurement can
-    have on the order of 10^5 (shot, column) points per panel; left fully
-    vector, that many individually-drawn markers/error-bar segments made
-    PDF generation alone take minutes and produced an enormous file (also
-    the direct cause of a reported Adobe Acrobat crash opening it) --
-    rasterizing only the dense point cloud fixes both while keeping the
-    parts that actually benefit from vector quality (fit lines, text,
-    annotations) crisp. PNG output is already fully raster regardless, but
-    gets the same zorder split for consistency -- it costs nothing there.
+    axes, text, and legend stay vector -- cheap insurance against a large
+    point count even though, post-aggregation, generation time/file size
+    is no longer the concern it was when this plotted every raw point (an
+    earlier version's 10^5-point-per-panel PDFs took minutes to generate
+    and were the direct cause of a reported Adobe Acrobat crash opening
+    one). PNG output is already fully raster regardless, but gets the same
+    zorder split for consistency -- it costs nothing there.
     '''
 
     with plt.rc_context(JOURNAL_RC_PARAMS):
@@ -467,7 +487,8 @@ def _plot_journal_figure(
 
         residual_mm_by_degree = {
             degree: _convert_to_mm(
-                per_degree[degree].residual_px, np.zeros_like(per_degree[degree].residual_px),
+                per_degree[degree].display_residual_px,
+                np.zeros_like(per_degree[degree].display_residual_px),
                 position_calibration,
             )[0]
             for degree in DEGREE_CHOICES
@@ -486,11 +507,10 @@ def _plot_journal_figure(
         for ax, residual_ax, degree in zip(fit_axes, residual_axes, DEGREE_CHOICES):
             result = per_degree[degree]
 
-            # alpha kept modest even for the single-series scatter here --
-            # at real shot counts (10^4-10^5 points per panel) a fully
-            # opaque marker still overplots into a solid blob; a lighter
-            # fill keeps point density visible rather than just a filled
-            # band.
+            # alpha kept modest even at this (post-aggregation) point
+            # count -- adjacent columns' error bars still overlap along
+            # the fit curve, and a lighter fill keeps that overlap's
+            # density visible rather than a filled band.
             ax.errorbar(
                 wavelength_nm, y_values_mm, xerr=x_sigma_nm, yerr=y_sigma_mm,
                 fmt="o", color="black", markersize=3, elinewidth=0.6, capsize=0, alpha=0.5, zorder=1,
@@ -696,9 +716,11 @@ def save_measurement_record(
             fit_y_px = np.polynomial.polynomial.polyval(fit_x, coefficients_px)
             residual_px = x0_px - np.polynomial.polynomial.polyval(wavelength_nm, coefficients_px)
 
+        _, display_residual_px, _ = aggregate_centroids_by_column(columns, residual_px)
         per_degree[degree] = _DegreeResult(
             coefficients_px=coefficients_px, coefficient_sigma_px=coefficient_sigma_px,
             spatial_dispersion=spatial_dispersion, fit_x=fit_x, fit_y_px=fit_y_px, residual_px=residual_px,
+            display_residual_px=display_residual_px,
         )
 
     _write_combined_results(
@@ -716,11 +738,21 @@ def save_measurement_record(
         spectral_column_bounds, calibration_present,
     )
 
-    y_values_mm, y_sigma_mm = _convert_to_mm(x0_px, sigma_x0_px, position_calibration)
-    x_sigma_nm = wavelength_axis.sigma_wavelength_nm(columns) if wavelength_axis is not None else None
+    # _plot_journal_figure() draws one point per spectral column (mean/std
+    # of x0 across whichever shots reported that column), not every raw
+    # (shot, column) point above -- see aggregate_centroids_by_column()'s
+    # own docstring for why. Every statistic in combined_results.txt
+    # (already written above) still comes from the full raw x0_px/
+    # columns/wavelength_nm.
+    display_columns, display_x0_px, display_x0_sigma_px = aggregate_centroids_by_column(columns, x0_px)
+    display_wavelength_nm = axis_for_fit.wavelength_nm(display_columns)
+    display_y_mm, display_y_sigma_mm = _convert_to_mm(display_x0_px, display_x0_sigma_px, position_calibration)
+    display_x_sigma_nm = (
+        wavelength_axis.sigma_wavelength_nm(display_columns) if wavelength_axis is not None else None
+    )
     _plot_journal_figure(
-        record_dir / "plot", wavelength_nm, y_values_mm, y_sigma_mm, x_sigma_nm, per_degree,
-        position_calibration,
+        record_dir / "plot", display_wavelength_nm, display_y_mm, display_y_sigma_mm, display_x_sigma_nm,
+        per_degree, position_calibration,
     )
 
     return record_dir
