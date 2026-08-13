@@ -11,10 +11,13 @@ import pytest
 
 from pipeline.acquisition import (
     CameraStream,
-    DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
+    DEFAULT_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
     SyntheticBackend,
     FrameData,
+    CameraError,
+    CameraConnectionError,
     CameraTimeoutError,
+    CameraGrabError,
 )
 from pipeline.acquisition.backends import CameraBackend
 
@@ -28,7 +31,7 @@ STREAM_TIMEOUT_MS = 5000   # generous -- SyntheticBackend grabs are near-instant
 # --- forced-failure scenarios: short timeout, low threshold, so the
 # background thread dies quickly rather than the test waiting around ---
 FAST_FAIL_TIMEOUT_MS = 50
-FAST_FAIL_MAX_CONSECUTIVE_TIMEOUTS = 3
+FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS = 3
 
 # --- polling, since the background thread's state changes asynchronously ---
 POLL_INTERVAL_S = 0.01
@@ -128,7 +131,7 @@ class _GatedBackend:
         self._gate = threading.Event()
 
 
-def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_timeouts=None):
+def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_transient_errors=None):
 
     '''
     Constructs a CameraStream with this file's standard configuration,
@@ -140,7 +143,7 @@ def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_tim
         A CameraBackend to use; defaults to SyntheticBackend(seed=STREAM_SEED).
     timeout_ms
         Overrides STREAM_TIMEOUT_MS if provided.
-    max_consecutive_timeouts
+    max_consecutive_transient_errors
         Overrides CameraStream's own default if provided.
 
     Returns
@@ -149,10 +152,10 @@ def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_tim
     '''
 
     resolved_backend = backend if backend is not None else SyntheticBackend(seed=STREAM_SEED)
-    resolved_max_timeouts = (
-        max_consecutive_timeouts
-        if max_consecutive_timeouts is not None
-        else DEFAULT_MAX_CONSECUTIVE_TIMEOUTS
+    resolved_max_transient_errors = (
+        max_consecutive_transient_errors
+        if max_consecutive_transient_errors is not None
+        else DEFAULT_MAX_CONSECUTIVE_TRANSIENT_ERRORS
     )
 
     return CameraStream(
@@ -161,7 +164,7 @@ def _make_stream(backend=None, timeout_ms=STREAM_TIMEOUT_MS, max_consecutive_tim
         pixel_format=STREAM_PIXEL_FORMAT,
         timeout_ms=timeout_ms,
         backend=resolved_backend,
-        max_consecutive_timeouts=resolved_max_timeouts,
+        max_consecutive_transient_errors=resolved_max_transient_errors,
     )
 
 def _wait_for_frame(stream: CameraStream, timeout_s: float = POLL_TIMEOUT_S, interval_s: float = POLL_INTERVAL_S) -> FrameData:
@@ -324,8 +327,66 @@ class TestCameraStreamFps:
             stream.stop()
 
 
+class _ScriptedFailureBackend:
+
+    '''
+    Wraps a real CameraBackend, raising each exception in a scripted
+    sequence on successive grab_one() calls (one exception consumed per
+    call), then delegating to the wrapped backend once the script is
+    exhausted. Used to test that CameraStream._run() counts a *mix* of
+    CameraTimeoutError and CameraGrabError toward the same consecutive-
+    transient-error threshold -- SyntheticBackend's probability-based
+    timeout_probability/grab_error_probability can't deterministically
+    produce a specific mixed sequence.
+    '''
+
+    def __init__(self, wrapped: CameraBackend, scripted_errors: list[Exception]):
+        self._wrapped = wrapped
+        self._scripted_errors = list(scripted_errors)
+
+    def connect(self) -> None:
+        self._wrapped.connect()
+
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str):
+        return self._wrapped.configure(exposure_us, gain_db, pixel_format)
+
+    def grab_one(self, timeout_ms: int):
+        if self._scripted_errors:
+            raise self._scripted_errors.pop(0)
+        return self._wrapped.grab_one(timeout_ms)
+
+    def close(self) -> None:
+        self._wrapped.close()
+
+
+class _AlwaysFatalBackend:
+
+    '''
+    Wraps a real CameraBackend, raising a single fixed CameraError (not a
+    CameraTimeoutError/CameraGrabError) on every grab_one() call -- used to
+    confirm genuinely fatal errors still kill the stream on the very first
+    occurrence, with no tolerance/retry.
+    '''
+
+    def __init__(self, wrapped: CameraBackend, error: CameraError):
+        self._wrapped = wrapped
+        self._error = error
+
+    def connect(self) -> None:
+        self._wrapped.connect()
+
+    def configure(self, exposure_us: float, gain_db: float, pixel_format: str):
+        return self._wrapped.configure(exposure_us, gain_db, pixel_format)
+
+    def grab_one(self, timeout_ms: int):
+        raise self._error
+
+    def close(self) -> None:
+        self._wrapped.close()
+
+
 class TestCameraStreamErrorHandling:
-    """last_error, and the timeout-threshold/natural-death behavior it exists for."""
+    """last_error, and the transient-error-threshold/natural-death behavior it exists for."""
 
     def test_last_error_none_during_normal_operation(self):
         stream = _make_stream()
@@ -341,13 +402,75 @@ class TestCameraStreamErrorHandling:
         stream = _make_stream(
             backend=backend,
             timeout_ms=FAST_FAIL_TIMEOUT_MS,
-            max_consecutive_timeouts=FAST_FAIL_MAX_CONSECUTIVE_TIMEOUTS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
         )
         stream.start()
 
         thread_died = _wait_until(lambda: not stream.is_running)
         assert thread_died, "expected the background thread to terminate after repeated timeouts"
         assert isinstance(stream.last_error, CameraTimeoutError)
+
+    def test_last_error_set_after_exceeding_max_consecutive_grab_errors(self):
+        '''
+        CameraGrabError (e.g. a GigE buffer underrun) must be tolerated the
+        same way CameraTimeoutError already is, not treated as immediately
+        fatal -- this is the behavior the buffer-underrun bug report needs.
+        '''
+        backend = SyntheticBackend(seed=STREAM_SEED, grab_error_probability=1.0)
+        stream = _make_stream(
+            backend=backend,
+            timeout_ms=FAST_FAIL_TIMEOUT_MS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
+        )
+        stream.start()
+
+        thread_died = _wait_until(lambda: not stream.is_running)
+        assert thread_died, "expected the background thread to terminate after repeated grab errors"
+        assert isinstance(stream.last_error, CameraGrabError)
+
+    def test_mixed_timeouts_and_grab_errors_share_one_threshold(self):
+        '''
+        A CameraTimeoutError followed by CameraGrabErrors should count
+        toward the same consecutive-transient-error threshold rather than
+        each error type getting its own independent tolerance budget.
+        '''
+        scripted = [
+            CameraTimeoutError(FAST_FAIL_TIMEOUT_MS),
+            CameraGrabError("simulated incomplete grab"),
+            CameraGrabError("simulated incomplete grab"),
+        ]
+        assert len(scripted) == FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS
+        backend = _ScriptedFailureBackend(SyntheticBackend(seed=STREAM_SEED), scripted)
+        stream = _make_stream(
+            backend=backend,
+            timeout_ms=FAST_FAIL_TIMEOUT_MS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
+        )
+        stream.start()
+
+        thread_died = _wait_until(lambda: not stream.is_running)
+        assert thread_died, "expected the background thread to terminate once the mixed script is exhausted"
+        assert isinstance(stream.last_error, CameraGrabError)
+
+    def test_other_camera_errors_remain_immediately_fatal(self):
+        '''
+        A CameraError that isn't a CameraTimeoutError/CameraGrabError (e.g.
+        a connection genuinely dropping) must still kill the stream on the
+        first occurrence -- the new transient-error tolerance must not
+        blunt this.
+        '''
+        fatal_error = CameraConnectionError("device unplugged mid-stream")
+        backend = _AlwaysFatalBackend(SyntheticBackend(seed=STREAM_SEED), fatal_error)
+        stream = _make_stream(
+            backend=backend,
+            timeout_ms=FAST_FAIL_TIMEOUT_MS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
+        )
+        stream.start()
+
+        thread_died = _wait_until(lambda: not stream.is_running)
+        assert thread_died, "expected the background thread to terminate on the first fatal error"
+        assert stream.last_error is fatal_error
 
     def test_stop_after_natural_thread_death_still_closes_backend(self):
         '''
@@ -361,7 +484,7 @@ class TestCameraStreamErrorHandling:
         stream = _make_stream(
             backend=tracking_backend,
             timeout_ms=FAST_FAIL_TIMEOUT_MS,
-            max_consecutive_timeouts=FAST_FAIL_MAX_CONSECUTIVE_TIMEOUTS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
         )
         stream.start()
 
@@ -433,7 +556,7 @@ class TestCollectNFrames:
         stream = _make_stream(
             backend=backend,
             timeout_ms=FAST_FAIL_TIMEOUT_MS,
-            max_consecutive_timeouts=FAST_FAIL_MAX_CONSECUTIVE_TIMEOUTS,
+            max_consecutive_transient_errors=FAST_FAIL_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
         )
         stream.start()
         try:

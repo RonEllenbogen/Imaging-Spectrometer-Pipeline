@@ -1195,6 +1195,7 @@ class TestSpectralCalibrationDialogWiring:
         dialog.n_frames_spin.setValue(4)
 
         dialog.start_button.click()
+        qtbot.waitUntil(lambda: dialog._capture_worker is None, timeout=5000)
 
         assert dialog.result() == QDialog.DialogCode.Accepted
         assert len(calls) == 1
@@ -1237,6 +1238,7 @@ class TestSpectralCalibrationDialogWiring:
         dialog.gain_db_spin.setValue(5.0)
 
         dialog.start_button.click()
+        qtbot.waitUntil(lambda: dialog._capture_worker is None, timeout=5000)
 
         assert dialog.result() == QDialog.DialogCode.Accepted
         assert len(build_calls) == 1
@@ -1259,6 +1261,7 @@ class TestSpectralCalibrationDialogWiring:
         qtbot.addWidget(dialog)
 
         dialog.start_button.click()
+        qtbot.waitUntil(lambda: dialog._capture_worker is None, timeout=5000)
 
         assert dialog.result() != QDialog.DialogCode.Accepted
         assert len(camera_error_calls) == 1
@@ -1283,6 +1286,7 @@ class TestSpectralCalibrationDialogWiring:
         qtbot.addWidget(dialog)
 
         dialog.start_button.click()
+        qtbot.waitUntil(lambda: dialog._capture_worker is None, timeout=5000)
 
         assert dialog.result() != QDialog.DialogCode.Accepted
         assert len(calibration_error_calls) == 1

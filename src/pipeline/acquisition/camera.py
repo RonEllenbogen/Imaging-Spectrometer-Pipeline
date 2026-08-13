@@ -8,7 +8,7 @@ import time
 from collections import deque
 
 from .backends import CameraBackend, PylonBackend
-from .exceptions import CameraError, CameraConfigurationError, CameraTimeoutError
+from .exceptions import CameraError, CameraConfigurationError, CameraTimeoutError, CameraGrabError
 from .frame import FrameData
 
 # Constants
@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 # 30 frames is roughly a half-second window at the camera's target frame rate.
 FPS_WINDOW_SIZE = 30
 
-# How many consecutive grab_one() timeouts to tolerate before treating the
-# stream as genuinely broken rather than experiencing a transient hiccup.
-DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 5
+# How many consecutive transient grab failures -- CameraTimeoutError (no
+# frame arrived) or CameraGrabError (a frame arrived but was incomplete,
+# e.g. a GigE buffer underrun) -- to tolerate before treating the stream
+# as genuinely broken rather than experiencing a run of network hiccups.
+DEFAULT_MAX_CONSECUTIVE_TRANSIENT_ERRORS = 5
 
 # How long collect_n_frames() sleeps between polls of get_latest_frame().
 # Small relative to any realistic frame interval (this camera tops out
@@ -46,7 +48,7 @@ class CameraStream:
         timeout_ms: int,
         backend: CameraBackend | None = None,
         serial_number: str | None = None,
-        max_consecutive_timeouts: int = DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
+        max_consecutive_transient_errors: int = DEFAULT_MAX_CONSECUTIVE_TRANSIENT_ERRORS,
         auto_exposure: bool = False,
         auto_timeout_ms: int = 5000,
     ):
@@ -68,9 +70,13 @@ class CameraStream:
             None -- pass a SyntheticBackend here for testing.
         timeout_ms
             Timeout passed to backend.grab_one() on every grab attempt.
-        max_consecutive_timeouts
-            Number of consecutive CameraTimeoutErrors to tolerate before
-            _run() treats the stream as fatally broken and exits.
+        max_consecutive_transient_errors
+            Number of consecutive transient grab failures -- CameraTimeoutError
+            or CameraGrabError, in any mix -- to tolerate before _run() treats
+            the stream as fatally broken and exits. Any other CameraError
+            (e.g. CameraConnectionError) is still fatal immediately, since
+            those mean the device/settings are actually broken rather than a
+            single grab having failed.
         auto_exposure
             If True and backend is None (real PylonBackend construction),
             configure() runs a one-time ExposureAuto convergence instead of
@@ -87,7 +93,7 @@ class CameraStream:
         self.gain_db = gain_db
         self.pixel_format = pixel_format
         self.timeout_ms = timeout_ms
-        self.max_consecutive_timeouts = max_consecutive_timeouts
+        self.max_consecutive_transient_errors = max_consecutive_transient_errors
         self.serial_number = serial_number
 
         if backend is None:
@@ -364,28 +370,30 @@ class CameraStream:
         called directly -- only ever invoked by the threading.Thread
         created in start().
 
-        A CameraTimeoutError is treated as tolerable up to
-        max_consecutive_timeouts, then fatal. Any other CameraError is
-        fatal immediately. Any non-CameraError exception is a genuine bug,
-        not a camera problem -- it is deliberately NOT caught here, so it
-        surfaces as a full traceback rather than being silently absorbed
-        into last_error.
+        A CameraTimeoutError or CameraGrabError is treated as tolerable up
+        to max_consecutive_transient_errors (in any mix -- a timeout
+        followed by a grab error still counts as 2 consecutive), then
+        fatal. Any other CameraError (e.g. a connection dropped mid-stream)
+        is fatal immediately -- no retry. Any non-CameraError exception is
+        a genuine bug, not a camera problem -- it is deliberately NOT
+        caught here, so it surfaces as a full traceback rather than being
+        silently absorbed into last_error.
         '''
 
-        consecutive_timeouts = 0
+        consecutive_transient_errors = 0
 
         while not self._stop_event.is_set():
             try:
                 raw_frame = self._backend.grab_one(timeout_ms=self.timeout_ms)
-            except CameraTimeoutError as e:
-                consecutive_timeouts += 1
+            except (CameraTimeoutError, CameraGrabError) as e:
+                consecutive_transient_errors += 1
                 logger.warning(
-                    "grab_one() timed out (%d/%d consecutive)",
-                    consecutive_timeouts, self.max_consecutive_timeouts,
+                    "transient grab failure (%d/%d consecutive): %s",
+                    consecutive_transient_errors, self.max_consecutive_transient_errors, e,
                 )
-                if consecutive_timeouts >= self.max_consecutive_timeouts:
+                if consecutive_transient_errors >= self.max_consecutive_transient_errors:
                     self._last_error = e
-                    logger.error("exceeded max consecutive timeouts; stopping stream")
+                    logger.error("exceeded max consecutive transient errors; stopping stream")
                     return
                 continue
             except CameraError as e:
@@ -395,7 +403,7 @@ class CameraStream:
                 logger.error("fatal camera error, stopping stream: %s", e)
                 return
 
-            consecutive_timeouts = 0   # reset only after a successful grab
+            consecutive_transient_errors = 0   # reset only after a successful grab
 
             frame_data = FrameData(
                 image=raw_frame, timestamp=time.monotonic(), frame_id=self._frame_counter, exposure_us=self.exposure_us, gain_db=self.gain_db,

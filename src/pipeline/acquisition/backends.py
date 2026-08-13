@@ -7,7 +7,13 @@ import numpy as np
 from pypylon import pylon, genicam
 import time
 
-from .exceptions import CameraError, CameraConnectionError, CameraConfigurationError, CameraTimeoutError
+from .exceptions import (
+    CameraError,
+    CameraConnectionError,
+    CameraConfigurationError,
+    CameraTimeoutError,
+    CameraGrabError,
+)
 from .pixel_formats import PIXEL_FORMAT_INFO, max_value_for_pixel_format, dtype_for_pixel_format
 
 # Constants
@@ -308,9 +314,11 @@ class PylonBackend:
         ------
         CameraTimeoutError
             If no frame arrives within timeout_ms.
-        CameraError
+        CameraGrabError
             If the grab completes without timing out but still fails
-            (e.g. dropped packets, sensor fault).
+            (e.g. dropped packets/a GigE buffer underrun, sensor fault) --
+            see its own docstring for why this is a distinct, tolerated-in-
+            a-run subclass rather than a bare CameraError.
         RuntimeError
             If called before connect() and configure(), or after close().
         '''
@@ -329,7 +337,7 @@ class PylonBackend:
         if not grab_result.GrabSucceeded():
             error_description = grab_result.ErrorDescription
             grab_result.Release()
-            raise CameraError(f"grab failed: {error_description}")
+            raise CameraGrabError(f"grab failed: {error_description}")
 
         frame = grab_result.Array.copy()
         grab_result.Release()
@@ -374,6 +382,7 @@ class SyntheticBackend:
         peak_counts: float = 3000.0,
         noise_std: float = 5.0,
         timeout_probability: float = 0.0,
+        grab_error_probability: float = 0.0,
         seed: int | None = None,
         frame_interval_s: float = DEFAULT_SYNTHETIC_FRAME_INTERVAL_S,
     ): # Default parameters
@@ -384,6 +393,7 @@ class SyntheticBackend:
         self.peak_counts = peak_counts
         self.noise_std = noise_std
         self.timeout_probability = timeout_probability
+        self.grab_error_probability = grab_error_probability
         self.frame_interval_s = frame_interval_s
         self._rng = np.random.default_rng(seed)
 
@@ -446,6 +456,16 @@ class SyntheticBackend:
         -------
         frame.astype(self._dtype)
             The synthetic frame as a numpy array with the configured pixel format.
+
+        Raises
+        ------
+        CameraTimeoutError
+            With probability timeout_probability -- see __init__.
+        CameraGrabError
+            With probability grab_error_probability -- see __init__.
+            Simulates a completed-but-failed grab (e.g. a GigE buffer
+            underrun) for exercising CameraStream's transient-error
+            tolerance without real hardware.
         '''
 
         # Guard against being called before connect() and configure()
@@ -468,6 +488,11 @@ class SyntheticBackend:
         # Simulate a timeout with the specified probability
         if self._rng.random() < self.timeout_probability:
             raise CameraTimeoutError(timeout_ms)
+
+        # Simulate a completed-but-failed grab (e.g. a GigE buffer underrun)
+        # with the specified probability
+        if self._rng.random() < self.grab_error_probability:
+            raise CameraGrabError("simulated incomplete grab")
 
         # Build the synthetic frame
         rows, cols = self.shape

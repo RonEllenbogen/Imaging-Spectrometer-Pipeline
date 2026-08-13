@@ -25,8 +25,9 @@ top-level screen's page-navigation code.
 # Imports
 
 import time
+from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -799,6 +800,91 @@ class SpatialCalibrationDialog(QDialog):
         self.accept()
 
 
+class _SpectralCaptureWorker(QThread):
+
+    '''
+    Runs build_camera_stream() -> start() -> run_spectral_calibration() ->
+    stop() on a background Qt thread, mirroring exactly what
+    SpectralCalibrationDialog._on_start_clicked() used to run directly on
+    the GUI thread. That synchronous version froze the whole window for
+    the entire capture (tens of frames' worth of grabs, plus line-matching
+    and fitting) -- worse, a fatal camera error (e.g. a GigE buffer
+    underrun) partway through left the window looking hung until the error
+    dialog finally appeared. Running it here keeps Qt's event loop free to
+    paint/process input the whole time; results come back via the
+    succeeded/failed signals rather than a return value or raised
+    exception, since neither crosses a thread boundary safely.
+
+    failed carries the raised exception object itself (Signal(object), not
+    a message string) so the connected slot can reproduce the original
+    isinstance-based dispatch to show_camera_error_dialog() vs.
+    show_calibration_error_dialog().
+    '''
+
+    succeeded = Signal()
+    failed = Signal(object)
+
+    def __init__(
+        self,
+        gain_db: float,
+        exposure_us: float | None,
+        auto_exposure: bool,
+        n_frames: int,
+        sensor_calibration: CalibrationSet,
+        spectral_path: Path,
+        geometric_tilt_path: Path,
+        degree: int,
+        gain_e_per_adu: float,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._gain_db = gain_db
+        self._exposure_us = exposure_us
+        self._auto_exposure = auto_exposure
+        self._n_frames = n_frames
+        self._sensor_calibration = sensor_calibration
+        self._spectral_path = spectral_path
+        self._geometric_tilt_path = geometric_tilt_path
+        self._degree = degree
+        self._gain_e_per_adu = gain_e_per_adu
+
+    def run(self) -> None:
+
+        '''
+        QThread's entry point -- never called directly, only ever invoked
+        by start(). Every exception (CameraError, ValueError,
+        LineMatchingError, the calibration-specific error types) is caught
+        here and handed to `failed` rather than left to propagate, since an
+        exception raised on this thread would otherwise be silently lost
+        instead of reaching the GUI thread at all.
+        '''
+
+        try:
+            camera_stream = build_camera_stream(
+                self._gain_db,
+                exposure_us=self._exposure_us,
+                auto_exposure=self._auto_exposure,
+            )
+            camera_stream.start()
+            try:
+                run_spectral_calibration(
+                    camera_stream,
+                    self._n_frames,
+                    self._sensor_calibration,
+                    self._spectral_path,
+                    self._geometric_tilt_path,
+                    degree=self._degree,
+                    gain_e_per_adu=self._gain_e_per_adu,
+                )
+            finally:
+                if camera_stream.is_running:
+                    camera_stream.stop()
+        except Exception as error:
+            self.failed.emit(error)
+        else:
+            self.succeeded.emit()
+
+
 class SpectralCalibrationDialog(QDialog):
 
     '''
@@ -873,6 +959,7 @@ class SpectralCalibrationDialog(QDialog):
         self.capture_mode_radio.toggled.connect(self._on_mode_toggled)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        self.cancel_button = buttons.button(QDialogButtonBox.Cancel)
         self.start_button = QPushButton("Start Capture")
         self.start_button.setProperty("role", "primary")
         buttons.addButton(self.start_button, QDialogButtonBox.ActionRole)
@@ -885,6 +972,12 @@ class SpectralCalibrationDialog(QDialog):
 
         self.start_button.clicked.connect(self._on_start_clicked)
         self.save_button.clicked.connect(self._on_save_clicked)
+
+        # Set only while a _SpectralCaptureWorker is running (see
+        # _on_start_clicked()) -- kept alive via this reference and via Qt
+        # parent ownership (parent=self), so it isn't garbage-collected
+        # mid-capture.
+        self._capture_worker: _SpectralCaptureWorker | None = None
 
     def _build_capture_page(self) -> QWidget:
         page = QWidget()
@@ -1129,15 +1222,23 @@ class SpectralCalibrationDialog(QDialog):
         '''
         Capture-mode accept path: loads the already-built sensor
         CalibrationSet + real gain_e_per_adu (see
-        _load_sensor_calibration()), then builds a CameraStream and runs
-        run_spectral_calibration() against it -- mirrors
-        cli/calibration.py's _cmd_spectral_capture. Manual exposure (see
+        _load_sensor_calibration()), then hands a CameraStream build +
+        run_spectral_calibration() call off to a _SpectralCaptureWorker
+        (see its own docstring for why this runs on a background thread
+        rather than here directly) -- mirrors cli/calibration.py's
+        _cmd_spectral_capture. Manual exposure (see
         auto_exposure()/exposure_us() above) matters here specifically so
         the lamp frames' actual exposure_us can be made to match the
         loaded baseline's -- see class docstring. run_spectral_
         calibration() also builds and saves the geometric tilt
         calibration as a side effect (see its own docstring) -- not
         duplicated here.
+
+        The Cancel button is disabled for the capture's duration: closing
+        this dialog while _SpectralCaptureWorker still owns a running
+        CameraStream would leave that stream (and its background grab
+        thread) orphaned, and risks the worker's succeeded/failed signals
+        firing into a dialog that's already been destroyed.
         '''
 
         loaded = self._load_sensor_calibration()
@@ -1146,40 +1247,57 @@ class SpectralCalibrationDialog(QDialog):
         sensor_calibration, gain_e_per_adu = loaded
 
         self.start_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
         self.status_label.setText("Capturing...")
-        try:
-            camera_stream = build_camera_stream(
-                self.gain_db_spin.value(),
-                exposure_us=self.exposure_us(),
-                auto_exposure=self.auto_exposure(),
-            )
-            camera_stream.start()
-            try:
-                run_spectral_calibration(
-                    camera_stream,
-                    self.n_frames_spin.value(),
-                    sensor_calibration,
-                    DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME,
-                    DEFAULT_ARTIFACT_DIR / DEFAULT_GEOMETRIC_TILT_FILENAME,
-                    degree=self.capture_degree_selector.currentData(),
-                    gain_e_per_adu=gain_e_per_adu,
-                )
-            finally:
-                if camera_stream.is_running:
-                    camera_stream.stop()
-        except CameraError as error:
-            self.status_label.setText("Not started.")
-            self.start_button.setEnabled(True)
-            show_camera_error_dialog(self, str(error))
-            return
-        except (ValueError, LineMatchingError, *_CALIBRATION_ERROR_TYPES) as error:
-            self.status_label.setText("Not started.")
-            self.start_button.setEnabled(True)
-            show_calibration_error_dialog(self, "Spectral Calibration Failed", str(error))
-            return
 
+        self._capture_worker = _SpectralCaptureWorker(
+            self.gain_db_spin.value(),
+            self.exposure_us(),
+            self.auto_exposure(),
+            self.n_frames_spin.value(),
+            sensor_calibration,
+            DEFAULT_ARTIFACT_DIR / DEFAULT_SPECTRAL_FILENAME,
+            DEFAULT_ARTIFACT_DIR / DEFAULT_GEOMETRIC_TILT_FILENAME,
+            self.capture_degree_selector.currentData(),
+            gain_e_per_adu,
+            parent=self,
+        )
+        self._capture_worker.succeeded.connect(self._on_capture_succeeded)
+        self._capture_worker.failed.connect(self._on_capture_failed)
+        self._capture_worker.start()
+
+    def _on_capture_succeeded(self) -> None:
+
+        '''
+        _SpectralCaptureWorker.succeeded slot -- mirrors the tail of the
+        old synchronous _on_start_clicked()'s success path exactly.
+        '''
+
+        self._capture_worker = None
         self.status_label.setText("Spectral calibration complete.")
         self.accept()
+
+    def _on_capture_failed(self, error: Exception) -> None:
+
+        '''
+        _SpectralCaptureWorker.failed slot -- reproduces the isinstance
+        dispatch the old synchronous _on_start_clicked() did inline via
+        `except CameraError` / `except (ValueError, LineMatchingError,
+        *_CALIBRATION_ERROR_TYPES)`, since a background thread can't raise
+        into the GUI thread's except blocks directly.
+        '''
+
+        self._capture_worker = None
+        self.start_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self.status_label.setText("Not started.")
+
+        if isinstance(error, CameraError):
+            show_camera_error_dialog(self, str(error))
+        elif isinstance(error, (ValueError, LineMatchingError, *_CALIBRATION_ERROR_TYPES)):
+            show_calibration_error_dialog(self, "Spectral Calibration Failed", str(error))
+        else:
+            raise error
 
     def _on_save_clicked(self) -> None:
 
