@@ -870,7 +870,8 @@ class TestExtendedMeasurementSaveRecord:
             assert len(save_calls) == 1
             args, kwargs = save_calls[0]
             assert args[0] is widget._shot_results
-            assert args[1] is widget._processed_frames
+            assert args[1] is widget._measurement_stacked_image
+            assert args[2] is widget._measurement_representative_frames
             assert kwargs["artifact_dir"] == DEFAULT_ARTIFACT_DIR
             assert len(info_calls) == 1
             assert "/fake/record/dir" in info_calls[0][2]

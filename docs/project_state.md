@@ -1158,21 +1158,21 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   (non-live-updating) graph. Not needed for the live single-shot view, which redraws too fast for a
   residual panel to be readable.
 - **"Save Record" — a complete, git-committed snapshot of one Run Measurement result.** New
-  `gui/measurement_record.py`: `save_measurement_record()` writes every preprocessed frame's stack plus
-  first/middle/last individual shots (compressed `.npz` + quick-look `.png` — not every shot, given a
-  default run is 20 and up to 1000; a stack is cheap but isn't a quantity this codebase's analysis ever
-  actually computes, so the three individual frames are kept too, for real traceable per-shot data),
-  every shot's centroid data, every shot's fit at every degree (coefficients/sigma/covariance/reduced
-  chi-squared/residuals), the combined result at every degree (not just whichever is on screen), the
-  spatial+spectral ROI actually used, and the calibration artifacts in effect (copied byte-for-byte from
-  `DEFAULT_ARTIFACT_DIR`, not reconstructed from in-memory objects — simpler and exact regardless of
-  which fields a given in-memory object happens to retain) — to
+  `gui/measurement_record.py`: `save_measurement_record()` writes a stacked frame plus first/middle/last
+  individual shots (compressed `.npz` + quick-look `.png` — not every shot, given a default run is 20 and
+  up to 1000; a stack is cheap but isn't a quantity this codebase's analysis ever actually computes, so
+  the three individual frames are kept too, for real traceable per-shot data), every shot's centroid data,
+  every shot's fit at every degree (coefficients/sigma/covariance/reduced chi-squared/residuals), the
+  combined polynomial and spatial dispersion at every degree (not just whichever is on screen — see
+  below), the spatial+spectral ROI actually used, and the calibration artifacts in effect (copied
+  byte-for-byte from `DEFAULT_ARTIFACT_DIR`, not reconstructed from in-memory objects — simpler and exact
+  regardless of which fields a given in-memory object happens to retain) — to
   `data/measurements/extended_measurement_<timestamp>/`. Deliberately a separate, explicit button from
   "Run Measurement" (disabled until a measurement exists) — not every trial run should be permanently
   saved. Pure Python, no Qt import at all (`matplotlib`'s `Agg` backend only), directly unit-testable
   without a `QApplication`, matching `roi_control.py`/`formatting.py`'s existing separation of pure
   logic from Qt wiring. Imported *locally* inside `_on_save_record_clicked()`, not at module scope —
-  `measurement_record.py` itself imports two functions back from `extended_measurement.py` at its own
+  `measurement_record.py` itself imports functions back from `extended_measurement.py` at its own
   module scope (see below), so a module-scope import in the other direction would be circular; mirrors
   `calibration/spectral/workflow.py`'s existing local-import pattern for the identical reason.
 
@@ -1186,29 +1186,87 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   state inside `_set_measurement_data()`, at the same time as `shot_results` itself — "Save Record" reads
   only those captured values, never the live controls.
 
+  **A real reported multi-minute UI freeze, root-caused and fixed.** A 200-shot Run Measurement followed
+  by Save Record showed "Application Not Responding" for several minutes, and switching the degree
+  selector afterward froze too. Cause (confirmed by benchmarking against a real 200-shot synthetic run):
+  the first version of this feature stored every shot's full-resolution `ProcessedFrame` in
+  `self._processed_frames` for the widget's entire lifetime (so Save Record, run later, could pick from
+  them) — ~18MB/frame × 200 shots ≈ 3.6GB resident, with a further multi-GB spike averaging that list in
+  one call, and the memory pressure lingered into unrelated later actions like the degree-selector
+  freeze. Fixed by never retaining the full list at all: `_on_run_clicked()` now folds each frame into a
+  running sum (→ a mean at the end) and checks it against `_representative_shot_indices()` (a new free
+  function) as it's produced, keeping only a small constant number of full-resolution frames in memory
+  (`self._measurement_stacked_image`/`_measurement_representative_frames`) regardless of `n_shots`.
+  `measurement_record.py`'s `_save_frames()` takes this pre-reduced data directly rather than reducing a
+  frame list itself.
+
+  **A second, independent bottleneck in the plot itself, also fixed.** Even after the memory fix, saving
+  still took minutes: a real 200-shot measurement produces on the order of 10^5 (shot, column) points per
+  panel, and fully-vector scatter/error-bar rendering at that density made PDF generation alone slow
+  (matching a separately reported Adobe Acrobat crash opening the resulting file — a `.pdf` that came out
+  56.8MB for one measurement) and the file enormous. Fixed via `ax.set_rasterization_zorder()`
+  (matplotlib's documented technique for mixed vector+raster figures): the dense scatter/error-bar/
+  residual layers rasterize into a single embedded image while fit curves, axis text, and annotations
+  stay vector. Brought a real 200-shot record down from several minutes to ~30 seconds end-to-end and the
+  PDF from 56.8MB to under 1MB. The remaining ~30s is still synchronous on the Qt main thread (a
+  background-thread version was considered but not built, since this wasn't asked for and the
+  measured improvement — from unusable to a single noticeable pause — was judged sufficient for now).
+
   **Refactor to guarantee the saved numbers can never drift from the display**:
   `_compute_combined_result()`'s and `_recompute_fit_and_residuals()`'s core computations were pulled out
   into two module-level free functions in `extended_measurement.py`
   (`compute_combined_result_for_degree()`, `compute_fit_line_and_residuals()`), with the original bound
   methods becoming thin wrappers (behavior-preserving — full pre-existing test suite still passes
-  unmodified). `measurement_record.py` calls the *same* two functions once per degree, so every number in
-  a saved record is guaranteed identical to what the live GUI would show for that degree, not
-  independently re-derived logic that could silently drift from it.
+  unmodified). `measurement_record.py` calls the *same* two functions for degree 1, so that degree's
+  numbers are guaranteed identical to what the live GUI would show, not independently re-derived logic
+  that could silently drift from it.
+
+  **A real labeling bug, found from real use and fixed: spatial dispersion (ζ) is not the same thing as
+  the polynomial's c1 coefficient, except at degree 1.** ζ = dx0/dwavelength_nm is a *derivative*
+  evaluated at one reference point; at degree > 1 it depends on c2/c3 too, and only collapses to c1 when
+  the polynomial's derivative is constant everywhere (degree 1). An earlier version of
+  `combined_results.txt` labeled `combine_shots()`'s combined-zeta value "c1" at every degree, and never
+  reported c2/c3 at all — both wrong. Fixed: `_combine_polynomial_coefficients()` (new) combines *every*
+  coefficient across shots via the same inverse-variance `combine_shots()` weighting
+  `compute_combined_result_for_degree()` already used for zeta alone (a real generalization, not an ad
+  hoc addition — each shot's `coefficients[k]` is an independent estimate of the same physical quantity
+  regardless of k) — used for degree 2/3 (degree 1 keeps its existing intercept+zeta_combined pair,
+  unchanged, still GUI-matching). `combined_results.txt` now lists every combined coefficient (c0..c_degree,
+  with per-degree units, e.g. `mm/nm^2`) as its own section, separate from spatial dispersion — which is
+  now evaluated at the center of the realized spectral ROI (`(columns.min() + columns.max()) / 2`,
+  converted via `axis_for_fit`) rather than the live GUI's "Evaluate At" spin box value, since that
+  reference point is a live-only concept (a user-editable pixel column with a fixed default, unrelated to
+  any specific run's actual ROI) that doesn't carry over meaningfully to a saved record describing one
+  specific measurement. `save_measurement_record()` no longer takes an `evaluated_at_wavelength_nm`
+  parameter at all as a result.
+
+  **The plot's degree 2/3 curves were tangent lines, not real curves — also fixed, using the same
+  coefficient combination above.** The original version drew every degree's "fit curve" from a single
+  reference-point slope (`compute_fit_line_and_residuals()`), so quadratic/cubic panels always rendered
+  as straight lines — visually indistinguishable from degree 1, which is what prompted the bug report
+  ("I am not sure the curves of best fit have been drawn correctly"). Now degree 2/3 evaluate the real
+  combined polynomial (`np.polynomial.polynomial.polyval` against `_combine_polynomial_coefficients()`'s
+  output) across the fit range, and residuals are computed against that same curve — genuine curvature
+  shows up when the data actually has any (this synthetic-data test case doesn't, so its curves still
+  look straight, correctly, since the injected chirp really is linear there).
 
   **The saved plot** is deliberately not styled like anything else in this codebase — these may end up in
   reports/presentations, so it follows physics-journal convention instead of this app's own dark theme:
   serif font, Computer-Modern mathtext (no real LaTeX install required), no gridlines, ticks inward on all
   four spines, no per-axes titles (labels only), uncertainties shown as error bars, degrees distinguished
   by both color and linestyle (grayscale/colorblind-safe). Saved as both `.png` (quick view) and `.pdf`
-  (vector, for actual publication use). Three side-by-side subplots (one per degree — each showing the
-  same scatter against that degree's own combined-zeta line, since `combine_shots()` only ever combines a
-  single linear zeta even at degree > 1, so there is no other well-defined "combined quadratic/cubic
-  curve" to draw instead) plus one combined residual panel below (all three degrees overlaid). Each
-  subplot's ζ/χ²ᵥ annotation is placed in whichever top corner the fitted slope's sign leaves clear of the
-  data (a steep, full-range-spanning fit line means the *other* diagonal's two corners are never clear
-  regardless of slope direction), with a white background patch as a second line of defense either way —
-  a plain `ax.legend()` was tried first and rejected: a long label string anchored at a nominally-empty
-  corner still stretches back across most of the axes width, unavoidably overlapping the diagonal.
+  (vector, for actual publication use). Layout: three side-by-side fit subplots (one per degree — scatter
+  + that degree's own combined curve) each with its **own** residual panel directly underneath (not one
+  combined panel with all three degrees overlaid, which an earlier version drew — three near-identical
+  overlapping series in one panel are indistinguishable at any alpha when the underlying dispersion is
+  close to linear across degrees, which is common; reducing alpha further only ever thinned the visible
+  blend, it never separated it). All three residual panels share one y-axis range so residual *magnitude*
+  stays directly comparable across degrees despite being in separate panels now. Each fit subplot's ζ/χ²ᵥ
+  annotation is placed in whichever top corner the fitted dispersion's sign leaves clear of the data (a
+  steep, full-range-spanning curve means the *other* diagonal's two corners are never clear regardless of
+  slope direction), with a white background patch as a second line of defense either way — a plain
+  `ax.legend()` was tried first and rejected: a long label string anchored at a nominally-empty corner
+  still stretches back across most of the axes width, unavoidably overlapping the diagonal.
 
 **Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
 genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw
