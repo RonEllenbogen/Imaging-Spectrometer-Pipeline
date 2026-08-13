@@ -29,6 +29,21 @@ class CameraTimeoutError(CameraError):
         super().__init__(f"grab_one() timed out after {timeout_ms} ms")
         self.timeout_ms = timeout_ms
 
+class CameraGrabError(CameraError):
+
+    '''
+    Error raised when a grab_one() call completes without timing out but
+    still fails -- e.g. a GigE buffer underrun/incompletely-grabbed frame
+    from dropped packets, or another transport-level fault reported by the
+    backend. Deliberately its own subclass rather than a bare CameraError:
+    unlike CameraConnectionError/CameraConfigurationError (which mean the
+    device or its settings are actually broken), a single incomplete grab
+    is typically a transient network hiccup -- the same camera and stream
+    are still fine a frame later -- so CameraStream._run() tolerates a run
+    of these the same way it already tolerates CameraTimeoutError, instead
+    of killing the stream on the first occurrence.
+    '''
+
 class CameraConfigurationError(CameraError):
     
     '''

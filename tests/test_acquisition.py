@@ -9,7 +9,7 @@ import time
 
 from pipeline.acquisition import (
     SyntheticBackend, PylonBackend, FrameData, CameraStream,
-    CameraConfigurationError, CameraTimeoutError, CameraConnectionError,
+    CameraConfigurationError, CameraTimeoutError, CameraGrabError, CameraConnectionError,
     CANONICAL_SHAPE, CANONICAL_DTYPE,
 )
 from pipeline.utils.helpers import load_config
@@ -484,6 +484,27 @@ class TestSyntheticBackendOnly:
             b.grab_one(timeout_ms=TIMEOUT_TEST_TIMEOUT_MS)
 
         assert exc_info.value.timeout_ms == TIMEOUT_TEST_TIMEOUT_MS
+
+    def test_grab_error_probability_one_always_raises(self):
+
+        '''
+        Checks that grab_one() raises CameraGrabError -- simulating a
+        completed-but-failed grab, e.g. a GigE buffer underrun -- when
+        grab_error_probability is forced to 1.0. Mirrors
+        test_timeout_probability_one_always_raises() above for the other
+        transient-failure mode.
+        '''
+
+        b = SyntheticBackend(seed=TIMEOUT_TEST_SEED, grab_error_probability=1.0)
+        b.connect()
+        b.configure(
+            exposure_us=FIXTURE_EXPOSURE_US,
+            gain_db=FIXTURE_GAIN_DB,
+            pixel_format=FIXTURE_PIXEL_FORMAT,
+        )
+
+        with pytest.raises(CameraGrabError):
+            b.grab_one(timeout_ms=TIMEOUT_TEST_TIMEOUT_MS)
 
     @pytest.mark.parametrize(
         "pixel_format,expected_dtype,true_max",
