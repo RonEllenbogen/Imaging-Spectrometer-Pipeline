@@ -1,0 +1,28 @@
+spatial dispersion below is evaluated at the spectral ROI's center, 800.002 nm
+
+degree 1 (Linear (degree 1)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (mm) = 2.57201 ± 0.00007
+    c1 (mm/nm) = 0.001003 ± 0.000009
+  spatial dispersion at ROI center (mm/nm) = 0.001003 ± 0.000009
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 6.9
+
+degree 2 (Quadratic (degree 2)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (mm) = -31.54 ± 0.18
+    c1 (mm/nm) = 0.0864 ± 0.0005
+    c2 (mm/nm^2) = -0.0000534 ± 0.0000003
+  spatial dispersion at ROI center (mm/nm) = 0.000909 ± 0.000009
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 8.068
+
+degree 3 (Cubic (degree 3)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (mm) = -2881 ± 15
+    c1 (mm/nm) = 10.79 ± 0.06
+    c2 (mm/nm^2) = -0.01345 ± 0.00007
+    c3 (mm/nm^3) = 0.00000559 ± 0.00000003
+  spatial dispersion at ROI center (mm/nm) = -0.000430 ± 0.000014
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 8.636
