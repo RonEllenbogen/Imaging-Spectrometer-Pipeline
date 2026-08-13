@@ -1404,8 +1404,8 @@ class TestRunSpectralCalibration:
 
     def _stub_geometric_tilt(self) -> GeometricTiltResult:
         '''A minimal, valid GeometricTiltResult -- SyntheticBackend's smooth Gaussian
-        beam profile has no discrete lines for the real build_geometric_tilt() to find,
-        so wiring tests that aren't specifically about geometric tilt itself stub it
+        beam profile has no discrete lines for the real build_geometric_tilt_linear() to
+        find, so wiring tests that aren't specifically about geometric tilt itself stub it
         the same way match_lines() is already stubbed below.'''
         return GeometricTiltResult(
             row_shift=np.zeros(CANONICAL_SHAPE[0]), reference_row=CANONICAL_SHAPE[0] // 2,
@@ -1425,15 +1425,15 @@ class TestRunSpectralCalibration:
             lambda image: (pixel, wavelength_nm, sigma_pixel, sigma_wavelength_nm),
         )
         stub_tilt = self._stub_geometric_tilt()
-        build_geometric_tilt_calls = []
+        build_geometric_tilt_linear_calls = []
 
-        def _stub_build_geometric_tilt(frames, gain_e_per_adu=None, background_sigma=None):
-            build_geometric_tilt_calls.append((gain_e_per_adu, background_sigma))
+        def _stub_build_geometric_tilt_linear(frames, gain_e_per_adu=None, background_sigma=None):
+            build_geometric_tilt_linear_calls.append((gain_e_per_adu, background_sigma))
             return stub_tilt
 
         monkeypatch.setattr(
-            "pipeline.calibration.spectral.workflow.build_geometric_tilt",
-            _stub_build_geometric_tilt,
+            "pipeline.calibration.spectral.workflow.build_geometric_tilt_linear",
+            _stub_build_geometric_tilt_linear,
         )
 
         sensor_calibration = _sensor_calibration_set()
@@ -1453,11 +1453,11 @@ class TestRunSpectralCalibration:
             assert result.record.source_frame_count == 3
             # The real point of this test: real noise parameters -- not
             # geometric_tilt.py's own placeholders -- must reach
-            # build_geometric_tilt(), sourced from the caller-supplied
+            # build_geometric_tilt_linear(), sourced from the caller-supplied
             # gain_e_per_adu and from sensor_calibration.background_sigma
             # (always threaded through unconditionally, since it's a
             # required CalibrationSet field).
-            assert build_geometric_tilt_calls == [(2.5, sensor_calibration.background_sigma)]
+            assert build_geometric_tilt_linear_calls == [(2.5, sensor_calibration.background_sigma)]
 
             loaded = load_spectral_calibration(path)
             assert np.allclose(loaded.fit.coefficients, result.fit.coefficients)
@@ -1470,8 +1470,8 @@ class TestRunSpectralCalibration:
         # (stamped from the stream's fixed settings at grab time), so the
         # only way to exercise the drift check is to stub
         # collect_n_frames() itself with a batch containing a mismatch.
-        # The drift check runs before build_geometric_tilt(), so no need to
-        # stub that here.
+        # The drift check runs before build_geometric_tilt_linear(), so no
+        # need to stub that here.
         drifted_frames = [
             _frame(_uniform(10), frame_id=0, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
             _frame(_uniform(10), frame_id=1, exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB),
@@ -1491,7 +1491,7 @@ class TestRunSpectralCalibration:
 
     def test_propagates_line_matching_error_for_non_line_like_signal(self, tmp_path):
         # SyntheticBackend's frames are a smooth Gaussian beam profile, not
-        # discrete spectral lines -- build_geometric_tilt() (real, not
+        # discrete spectral lines -- build_geometric_tilt_linear() (real, not
         # stubbed here) correctly finds no usable lines in one and raises
         # LineMatchingError before match_lines() is ever reached, exercising
         # the real geometric-tilt line detection through the full workflow

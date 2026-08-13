@@ -32,7 +32,7 @@ below:
     test_propagates_line_matching_error_for_non_line_like_signal).
   - geometric_tilt is constructed directly as a trivial (all-zero shift)
     but fully valid GeometricTiltResult, for the same reason
-    build_geometric_tilt() can't run against SyntheticBackend data
+    build_geometric_tilt_linear() can't run against SyntheticBackend data
     either -- it also needs discrete line peaks.
 '''
 
@@ -148,7 +148,7 @@ def build_realistic_calibration_bundle() -> CalibrationBundle:
 
     # Trivial (all-zero shift) but fully valid GeometricTiltResult -- see
     # module docstring for why this is constructed directly rather than
-    # via build_geometric_tilt().
+    # via build_geometric_tilt_linear().
     n_rows = CANONICAL_SHAPE[0]
     geometric_tilt = GeometricTiltResult(
         row_shift=np.zeros(n_rows, dtype=np.float64),

@@ -1153,7 +1153,7 @@ class SpectralCalibrationDialog(QDialog):
         into run_spectral_calibration() directly -- it's what lets the
         geometric-tilt calibration built alongside spectral use real
         Thompson-Larson-Webb centroid weighting instead of
-        build_geometric_tilt()'s own placeholder (see that function's
+        build_geometric_tilt_linear()'s own placeholder (see that function's
         docstring). Returns None (having already shown an explanatory
         error dialog) if any of the four haven't been created yet, rather
         than letting the resulting FileNotFoundError propagate.
