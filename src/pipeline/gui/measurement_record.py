@@ -490,10 +490,21 @@ def _plot_journal_figure(
 
     with plt.rc_context(JOURNAL_RC_PARAMS):
         fig = plt.figure(figsize=(12, 9))
-        grid = fig.add_gridspec(2, 3, height_ratios=(2, 1), hspace=0.38, wspace=0.4)
-
-        fit_axes = [fig.add_subplot(grid[0, i]) for i in range(3)]
-        residual_axes = [fig.add_subplot(grid[1, i]) for i in range(3)]
+        # Nested gridspec, one per degree: an outer 1x3 row (normal
+        # spacing between the three degrees) each split into its own
+        # 2-row inner grid with hspace=0 (the fit panel and its own
+        # residual panel touch, sharing the x-axis below) -- a single
+        # flat hspace across the whole 2x3 grid can't express "these two
+        # touch, but these two don't" at the same time.
+        outer_grid = fig.add_gridspec(1, 3, wspace=0.4)
+        fit_axes = []
+        residual_axes = []
+        for i in range(3):
+            inner_grid = outer_grid[0, i].subgridspec(2, 1, height_ratios=(2, 1), hspace=0.0)
+            fit_ax = fig.add_subplot(inner_grid[0])
+            residual_ax = fig.add_subplot(inner_grid[1], sharex=fit_ax)
+            fit_axes.append(fit_ax)
+            residual_axes.append(residual_ax)
 
         residual_mm_by_degree = {
             degree: _convert_to_mm(
@@ -541,7 +552,10 @@ def _plot_journal_figure(
             # zorder, well above 2) stay vector.
             ax.set_rasterization_zorder(2)
 
-            ax.set_xlabel(r"$\lambda$ (nm)")
+            # No x-label/tick-labels here -- shares an x-axis with
+            # residual_ax directly below (touching, sharex=ax above), so
+            # the residual panel's own label/ticks below already cover it.
+            ax.tick_params(axis="x", labelbottom=False)
             ax.set_ylabel(r"$x_0$ (mm)")
 
             # A steep, full-range-spanning fit line/curve leaves no corner
