@@ -24,20 +24,53 @@ primary data (tied to a specific frame_id/ShotAnalysisResult) that reveal
 within-run drift by direct comparison. Both together cost only 4 files
 regardless of n_shots, so there's no reason to pick only one.
 
-Per-degree combined results/fit lines are computed via
-extended_measurement.py's compute_combined_result_for_degree()/
-compute_fit_line_and_residuals() -- the exact same functions
-ExtendedMeasurementScreen itself calls -- so every number in the saved
-record is guaranteed identical to what the live GUI would show for that
-degree, never independently re-derived logic that could drift from it.
-Imported lazily by extended_measurement.py (inside
+This function takes stacked_image/representative_frames already reduced
+(a running mean plus up to 3 selected frames -- see
+extended_measurement.py's _representative_shot_indices()), NOT a full
+list of every shot's ProcessedFrame, and does not (any longer) reduce a
+frame list itself. An earlier version took the full list and reduced it
+here; that meant ExtendedMeasurementScreen had to retain every shot's
+full-resolution image for the widget's entire lifetime just in case Save
+Record was later clicked -- ~3.6GB resident for a real 200-shot run, with
+a further multi-GB spike averaging that list in one call -- which caused
+real, reported multi-minute UI freezes (here, and very likely a second,
+unrelated-looking one switching the degree selector afterward too, from
+lingering memory/GC pressure rather than a bug in that code path).
+Reducing during acquisition instead, in extended_measurement.py, bounds
+memory at a small constant regardless of n_shots.
+
+Spatial dispersion (zeta = dx0/dwavelength_nm) at every degree is
+computed via extended_measurement.py's compute_combined_result_for_degree()
+-- the exact same function ExtendedMeasurementScreen itself calls -- so
+that number is guaranteed identical to what the live GUI would show for
+that degree (given the same reference wavelength), never independently
+re-derived logic that could drift from it. It is evaluated at the
+spectral ROI's center (see save_measurement_record()'s own docstring),
+not the GUI's live "Evaluate At" value.
+
+The polynomial *coefficients* reported alongside it are a different
+computation, deliberately: zeta is a single derivative at one reference
+point and only equals the polynomial's c1 coefficient when degree == 1
+(see _DegreeResult's docstring for why conflating the two, as an earlier
+version of this module did, is a real labeling bug, not just a cosmetic
+one). Degree 1's coefficients reuse compute_fit_line_and_residuals()
+(also imported from extended_measurement.py, unchanged, so its output
+still matches the GUI exactly). Degree 2/3 use this module's own
+_combine_polynomial_coefficients() instead -- combining every coefficient
+across shots the same inverse-variance way, giving a genuine combined
+quadratic/cubic curve for the plot to draw, rather than only ever a
+locally-linear tangent line at degree > 1 (which is what an earlier
+version of this module drew, and which is easy to mistake for a real bug
+since it makes every degree's panel look like a straight line).
+
+compute_combined_result_for_degree()/compute_fit_line_and_residuals() are
+imported lazily by extended_measurement.py (inside
 _on_save_record_clicked(), not at module scope) specifically so this
-module can import those two functions back from extended_measurement.py
-at its own module scope without a circular-import failure -- by the time
-"Save Record" is ever clicked, extended_measurement.py has already
-finished defining them (mirrors calibration/spectral/workflow.py's own
-"see module docstring's import note" local-import pattern for the same
-reason).
+module can import them back from extended_measurement.py at its own
+module scope without a circular-import failure -- by the time "Save
+Record" is ever clicked, extended_measurement.py has already finished
+defining them (mirrors calibration/spectral/workflow.py's own "see module
+docstring's import note" local-import pattern for the same reason).
 
 Calibration artifacts are copied byte-for-byte from artifact_dir (via
 shutil.copy2()) rather than reconstructed from the in-memory
@@ -63,7 +96,7 @@ matplotlib.use("Agg")  # noqa: E402 -- must precede pyplot import; see module do
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from pipeline.analysis import CombinedSpatialDispersionResult, ShotAnalysisResult  # noqa: E402
+from pipeline.analysis import CombinedSpatialDispersionResult, ShotAnalysisResult, combine_shots  # noqa: E402
 from pipeline.analysis.interfaces import WavelengthAxis  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.cli.calibration import (  # noqa: E402
@@ -139,13 +172,26 @@ CALIBRATION_ARTIFACT_FILENAMES = {
 @dataclass(frozen=True)
 class _DegreeResult:
 
-    '''One degree's combined result plus its drawn fit-line/residual arrays (pixel units) --
-    bundles compute_combined_result_for_degree()'s and compute_fit_line_and_residuals()'s
-    return values together so the rest of this module only has to pass one object around.'''
+    '''
+    One degree's combined polynomial coefficients, its separately-reported
+    spatial dispersion, and the drawn fit-curve/residual arrays (pixel
+    units) -- bundles everything the rest of this module needs into one
+    object per degree.
 
-    combined: CombinedSpatialDispersionResult
-    intercept_px: float
-    intercept_sigma_px: float
+    coefficients_px/coefficient_sigma_px are the full combined polynomial
+    (length degree + 1: c0..c_degree) -- NOT the same thing as
+    spatial_dispersion below. spatial_dispersion is dx0/dwavelength_nm,
+    the polynomial's *derivative* evaluated at one reference wavelength;
+    it only equals c1 when degree == 1 (where the polynomial's derivative
+    is a constant, c1, everywhere) -- at degree > 1 the two are genuinely
+    different quantities and must not be conflated (an earlier version of
+    this module's combined_results.txt labeled zeta_combined "c1" even at
+    degree > 1, which was simply wrong).
+    '''
+
+    coefficients_px: np.ndarray
+    coefficient_sigma_px: np.ndarray
+    spatial_dispersion: CombinedSpatialDispersionResult
     fit_x: np.ndarray
     fit_y_px: np.ndarray
     residual_px: np.ndarray
@@ -172,6 +218,53 @@ def _reduced_chi_squared(combined: CombinedSpatialDispersionResult) -> float:
     return (combined.sigma_external / combined.sigma_internal) ** 2
 
 
+def _combine_polynomial_coefficients(
+    shot_results: list[ShotAnalysisResult], degree: int,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    '''
+    Every coefficient of the degree-th polynomial fit (c0..c_degree),
+    combined across shots via the exact same inverse-variance
+    combine_shots() weighting extended_measurement.py's
+    compute_combined_result_for_degree() already uses to combine c1 alone
+    at degree > 1 -- a real, statistically well-founded generalization,
+    not an ad hoc addition: each shot's coefficients[k] is an independent
+    estimate of the exact same physical coefficient (every shot measures
+    the same underlying pixel -> wavelength dispersion relationship), so
+    nothing about inverse-variance weighting is specific to k == 1.
+    combine_shots() is called once per coefficient index, treating each
+    index independently -- this ignores the (real) covariance between a
+    single fit's own coefficients the same way this module's other
+    marginal-uncertainty reporting already does elsewhere in this
+    codebase (see calibration/spectral/calibrate.py's
+    WavelengthCalibrationResult.sigma_wavelength_nm() docstring for the
+    same documented approximation), not a new one introduced here.
+
+    Gives an actual combined polynomial for degree > 1 -- coefficients_px
+    fully define a real quadratic/cubic curve x0(wavelength_nm) -- instead
+    of only the single-reference-point tangent line
+    compute_fit_line_and_residuals() draws for degree == 1.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (coefficients, coefficient_sigma), each length degree + 1,
+        ascending order (c0, c1, ...), in pixel units (x0_px = c0 +
+        c1*wavelength_nm + c2*wavelength_nm**2 + ...).
+    '''
+
+    n_coefficients = degree + 1
+    coefficients = np.empty(n_coefficients, dtype=np.float64)
+    coefficient_sigma = np.empty(n_coefficients, dtype=np.float64)
+    for k in range(n_coefficients):
+        values = np.array([result.fits[degree].coefficients[k] for result in shot_results])
+        sigma_values = np.array([result.fits[degree].coefficient_sigma[k] for result in shot_results])
+        combined_k = combine_shots(values, sigma_values)
+        coefficients[k] = combined_k.zeta_combined
+        coefficient_sigma[k] = combined_k.sigma_zeta_combined
+    return coefficients, coefficient_sigma
+
+
 def _to_uint8(image: np.ndarray) -> np.ndarray:
 
     '''Percentile-stretches a float image to uint8 for a quick-look PNG -- display only, never the
@@ -195,38 +288,22 @@ def _save_frame(path_stem: Path, image: np.ndarray) -> None:
     iio.imwrite(path_stem.with_suffix(".png"), _to_uint8(image))
 
 
-def _select_representative_frames(
-    processed_frames: list[ProcessedFrame],
-) -> list[tuple[str, ProcessedFrame]]:
+def _save_frames(
+    record_dir: Path, stacked_image: np.ndarray, representative_frames: dict[str, ProcessedFrame],
+) -> None:
 
     '''
-    First, middle, and last frame by acquisition order -- see module
-    docstring for why these three (not every shot). Collapses to fewer
-    entries when there are fewer than 3 distinct indices (e.g. a 2-shot
-    run) rather than saving the same frame twice under different labels.
+    Saves the already-reduced frame data extended_measurement.py's
+    _on_run_clicked()/_representative_shot_indices() produced -- see
+    module docstring for why this function no longer reduces a full
+    per-shot frame list itself.
     '''
-
-    n = len(processed_frames)
-    candidates = [("first", 0), ("middle", n // 2), ("last", n - 1)]
-    seen_indices: set[int] = set()
-    selected = []
-    for label, index in candidates:
-        if index in seen_indices:
-            continue
-        seen_indices.add(index)
-        selected.append((label, processed_frames[index]))
-    return selected
-
-
-def _save_frames(record_dir: Path, processed_frames: list[ProcessedFrame]) -> None:
 
     frames_dir = record_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    stacked_image = np.mean([frame.image for frame in processed_frames], axis=0)
     _save_frame(frames_dir / "stacked", stacked_image)
-
-    for label, frame in _select_representative_frames(processed_frames):
+    for label, frame in representative_frames.items():
         _save_frame(frames_dir / f"shot_{label}_{frame.frame_id}", frame.image)
 
 
@@ -322,30 +399,50 @@ def _write_manifest(
     path.write_text("\n".join(lines) + "\n")
 
 
+# Unit label for polynomial coefficient c_k in x0_px = c0 + c1*wavelength_nm +
+# c2*wavelength_nm**2 + ... -- position-like (mm) scaled by 1/nm**k.
+def _coefficient_unit(k: int) -> str:
+    if k == 0:
+        return "mm"
+    if k == 1:
+        return "mm/nm"
+    return f"mm/nm^{k}"
+
+
 def _write_combined_results(
-    path: Path, per_degree: dict[int, _DegreeResult], position_calibration: ScaleFactorPositionCalibration,
+    path: Path, per_degree: dict[int, _DegreeResult], roi_center_wavelength_nm: float,
+    position_calibration: ScaleFactorPositionCalibration,
 ) -> None:
 
-    lines = []
+    lines = [f"spatial dispersion below is evaluated at the spectral ROI's center, {roi_center_wavelength_nm:.3f} nm", ""]
     for degree in DEGREE_CHOICES:
         result = per_degree[degree]
+        coefficients_mm, coefficient_sigma_mm = _convert_to_mm(
+            result.coefficients_px, result.coefficient_sigma_px, position_calibration,
+        )
         zeta_mm, zeta_sigma_mm = _convert_to_mm(
-            np.array([result.combined.zeta_combined]), np.array([result.combined.sigma_zeta_combined]),
+            np.array([result.spatial_dispersion.zeta_combined]),
+            np.array([result.spatial_dispersion.sigma_zeta_combined]),
             position_calibration,
         )
-        c0_mm, c0_sigma_mm = _convert_to_mm(
-            np.array([result.intercept_px]), np.array([result.intercept_sigma_px]), position_calibration,
-        )
+
         lines.append(f"degree {degree} ({DEGREE_LABELS[degree]}):")
-        lines.append(f"  n_shots = {result.combined.n_shots}")
+        lines.append(f"  n_shots = {result.spatial_dispersion.n_shots}")
+        lines.append("  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):")
+        for k, (c, sigma_c) in enumerate(zip(coefficients_mm, coefficient_sigma_mm)):
+            lines.append(
+                f"    c{k} ({_coefficient_unit(k)}) = {format_value_with_uncertainty(float(c), float(sigma_c))}"
+            )
+        # NOT the same as c1 above except at degree 1 -- see _DegreeResult's
+        # own docstring for why these are reported as two distinct things.
         lines.append(
-            f"  c0 (mm) = {format_value_with_uncertainty(float(c0_mm[0]), float(c0_sigma_mm[0]))}"
-        )
-        lines.append(
-            f"  c1 = spatial dispersion (mm/nm) = "
+            f"  spatial dispersion at ROI center (mm/nm) = "
             f"{format_value_with_uncertainty(float(zeta_mm[0]), float(zeta_sigma_mm[0]))}"
         )
-        lines.append(f"  reduced chi-squared = {_reduced_chi_squared(result.combined):.4g}")
+        lines.append(
+            f"  reduced chi-squared (of the spatial-dispersion combination across shots) = "
+            f"{_reduced_chi_squared(result.spatial_dispersion):.4g}"
+        )
         lines.append("")
 
     path.write_text("\n".join(lines))
@@ -363,55 +460,110 @@ def _plot_journal_figure(
 
     '''
     Top row: one subplot per degree (scatter + error bars + that degree's
-    combined-zeta fit line). Bottom row: one combined residual panel, all
-    three degrees overlaid. Journal styling per JOURNAL_RC_PARAMS -- no
-    titles (axis labels only), no gridlines, colorblind/grayscale-safe
-    color+linestyle pairing per degree. Saved as both .png (quick view)
-    and .pdf (vector, for actual publication use).
+    combined fit curve). Bottom row: that SAME degree's own residual panel,
+    directly underneath -- not one combined panel with all three degrees
+    overlaid (an earlier version of this function did that; three series
+    overlaid in one panel look like a single solid blob wherever the
+    degrees roughly agree, which is often, since transparency alone can't
+    separate near-identical overlapping distributions no matter how low
+    it's set). All three residual panels share one y-axis range, so
+    residual *magnitude* is still directly comparable by eye across
+    degrees despite being in separate panels. Journal styling per
+    JOURNAL_RC_PARAMS -- no titles (axis labels only), no gridlines,
+    colorblind/grayscale-safe color+linestyle pairing per degree. Saved as
+    both .png (quick view) and .pdf (vector, for actual publication use).
+
+    The scatter/error-bar/residual layers are rasterized in the PDF (via
+    set_rasterization_zorder(), matplotlib's documented technique for
+    mixed vector+raster figures -- everything below the given zorder
+    rasterizes, everything at or above stays vector) while the fit lines,
+    axes, text, and legend stay vector. A real 200-shot measurement can
+    have on the order of 10^5 (shot, column) points per panel; left fully
+    vector, that many individually-drawn markers/error-bar segments made
+    PDF generation alone take minutes and produced an enormous file (also
+    the direct cause of a reported Adobe Acrobat crash opening it) --
+    rasterizing only the dense point cloud fixes both while keeping the
+    parts that actually benefit from vector quality (fit lines, text,
+    annotations) crisp. PNG output is already fully raster regardless, but
+    gets the same zorder split for consistency -- it costs nothing there.
     '''
 
     with plt.rc_context(JOURNAL_RC_PARAMS):
-        fig = plt.figure(figsize=(12, 8))
-        grid = fig.add_gridspec(2, 3, height_ratios=(2, 1), hspace=0.32, wspace=0.38)
+        fig = plt.figure(figsize=(12, 9))
+        grid = fig.add_gridspec(2, 3, height_ratios=(2, 1), hspace=0.38, wspace=0.4)
 
         fit_axes = [fig.add_subplot(grid[0, i]) for i in range(3)]
-        residual_ax = fig.add_subplot(grid[1, :])
+        residual_axes = [fig.add_subplot(grid[1, i]) for i in range(3)]
 
-        for ax, degree in zip(fit_axes, DEGREE_CHOICES):
+        residual_mm_by_degree = {
+            degree: _convert_to_mm(
+                per_degree[degree].residual_px, np.zeros_like(per_degree[degree].residual_px),
+                position_calibration,
+            )[0]
+            for degree in DEGREE_CHOICES
+        }
+        # Shared y-range across all three residual panels (with a small
+        # margin) -- separate panels solve the overlap problem, but
+        # letting each auto-scale independently would defeat comparing
+        # residual *magnitude* across degrees at a glance, which is the
+        # main reason to look at all three together in the first place.
+        all_residuals_mm = np.concatenate(list(residual_mm_by_degree.values()))
+        residual_margin_mm = 0.05 * (all_residuals_mm.max() - all_residuals_mm.min())
+        residual_ylim = (
+            all_residuals_mm.min() - residual_margin_mm, all_residuals_mm.max() + residual_margin_mm,
+        )
+
+        for ax, residual_ax, degree in zip(fit_axes, residual_axes, DEGREE_CHOICES):
             result = per_degree[degree]
 
+            # alpha kept modest even for the single-series scatter here --
+            # at real shot counts (10^4-10^5 points per panel) a fully
+            # opaque marker still overplots into a solid blob; a lighter
+            # fill keeps point density visible rather than just a filled
+            # band.
             ax.errorbar(
                 wavelength_nm, y_values_mm, xerr=x_sigma_nm, yerr=y_sigma_mm,
-                fmt="o", color="black", markersize=3, elinewidth=0.6, capsize=0, alpha=0.6, zorder=2,
+                fmt="o", color="black", markersize=3, elinewidth=0.6, capsize=0, alpha=0.5, zorder=1,
             )
 
             fit_y_mm, _ = _convert_to_mm(result.fit_y_px, np.zeros_like(result.fit_y_px), position_calibration)
             zeta_mm, zeta_sigma_mm = _convert_to_mm(
-                np.array([result.combined.zeta_combined]), np.array([result.combined.sigma_zeta_combined]),
+                np.array([result.spatial_dispersion.zeta_combined]),
+                np.array([result.spatial_dispersion.sigma_zeta_combined]),
                 position_calibration,
             )
             ax.plot(
                 result.fit_x, fit_y_mm, color=DEGREE_PLOT_COLORS[degree],
                 linestyle=DEGREE_PLOT_LINESTYLES[degree], linewidth=1.5, zorder=3,
             )
+            # Rasterizes the errorbar layer (zorder=1) only -- the fit
+            # line (zorder=3) and the annotation/text below (default
+            # zorder, well above 2) stay vector.
+            ax.set_rasterization_zorder(2)
 
             ax.set_xlabel(r"$\lambda$ (nm)")
             ax.set_ylabel(r"$x_0$ (mm)")
 
-            # A steep, full-range-spanning fit line leaves no corner
+            # A steep, full-range-spanning fit line/curve leaves no corner
             # reliably clear of data on both sides -- only the two
-            # corners OFF the line's own diagonal are (e.g. top-left and
+            # corners OFF the curve's own diagonal are (e.g. top-left and
             # bottom-right for a positive slope). Picking the corner from
-            # the sign of the fitted slope, rather than a fixed one,
+            # the sign of the fitted dispersion, rather than a fixed one,
             # keeps the annotation readable regardless of which way this
             # instrument's actual dispersion happens to run. A white
             # background patch is a second line of defense either way.
+            # zeta (not literally c1 except at degree 1 -- see
+            # _DegreeResult's docstring) is reported separately from the
+            # coefficients, which aren't summarized on the plot itself at
+            # all (they're in combined_results.txt/fits.npz) -- there
+            # isn't room here for up to 4 coefficients per panel, and zeta
+            # is the one number that's directly comparable across degrees.
             annotation_in_upper_left = float(zeta_mm[0]) >= 0
             annotation_text = (
                 f"{DEGREE_LABELS[degree]}\n"
                 rf"$\zeta$ = {format_value_with_uncertainty(float(zeta_mm[0]), float(zeta_sigma_mm[0]))} mm/nm"
                 "\n"
-                rf"$\chi^2_\nu$ = {_reduced_chi_squared(result.combined):.3g}"
+                rf"$\chi^2_\nu$ = {_reduced_chi_squared(result.spatial_dispersion):.3g}"
             )
             ax.text(
                 0.04 if annotation_in_upper_left else 0.96, 0.96, annotation_text,
@@ -423,40 +575,39 @@ def _plot_journal_figure(
                 ),
             )
 
-        for degree in DEGREE_CHOICES:
-            result = per_degree[degree]
-            residual_mm, _ = _convert_to_mm(
-                result.residual_px, np.zeros_like(result.residual_px), position_calibration,
-            )
+            # A single series per panel now (no more overlap to fight),
+            # so a higher alpha than the old combined-panel version is
+            # both fine and preferable -- shows point density better.
             residual_ax.plot(
-                wavelength_nm, residual_mm, "o", color=DEGREE_PLOT_COLORS[degree], markersize=3, alpha=0.6,
-                label=DEGREE_LABELS[degree],
+                wavelength_nm, residual_mm_by_degree[degree], "o", color=DEGREE_PLOT_COLORS[degree],
+                markersize=2.5, alpha=0.4, zorder=1,
             )
-        residual_ax.axhline(0.0, color="black", linewidth=0.8)
-        residual_ax.set_xlabel(r"$\lambda$ (nm)")
-        residual_ax.set_ylabel(r"$x_0 - x_0^{\mathrm{fit}}$ (mm)")
-        # frameon=True overrides JOURNAL_RC_PARAMS's legend.frameon=False
-        # just for this legend -- residual scatter is noise-like rather
-        # than a full-range diagonal, so there's no single corner
-        # guaranteed clear of points the way there is for the fit
-        # subplots above; a background patch is the simpler fix here.
-        residual_ax.legend(
-            loc="upper right", ncol=3, frameon=True, framealpha=0.92, facecolor="white", edgecolor="none",
-        )
+            residual_ax.axhline(0.0, color="black", linewidth=0.8, zorder=2)
+            residual_ax.set_ylim(residual_ylim)
+            # Rasterizes the residual-scatter layer (zorder=1) only -- the
+            # zero line stays vector.
+            residual_ax.set_rasterization_zorder(1.5)
+            residual_ax.set_xlabel(r"$\lambda$ (nm)")
+            residual_ax.set_ylabel(r"$x_0 - x_0^{\mathrm{fit}}$ (mm)")
 
+        # dpi is passed explicitly to both -- for the PDF specifically,
+        # this controls the resolution of the rasterized layers above
+        # (matplotlib's savefig.dpi rcParam default otherwise applies,
+        # which isn't guaranteed to match); 300 keeps them sharp without
+        # the file size a much higher value would cost.
         fig.savefig(output_stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
-        fig.savefig(output_stem.with_suffix(".pdf"), bbox_inches="tight")
+        fig.savefig(output_stem.with_suffix(".pdf"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
 
 def save_measurement_record(
     shot_results: list[ShotAnalysisResult],
-    processed_frames: list[ProcessedFrame],
+    stacked_image: np.ndarray,
+    representative_frames: dict[str, ProcessedFrame],
     calibration_set: CalibrationSet,
     wavelength_axis: WavelengthAxis | None,
     position_calibration: ScaleFactorPositionCalibration,
     axis_for_fit: WavelengthAxis,
-    evaluated_at_wavelength_nm: float,
     roi_bounds_px: tuple[int, int],
     spectral_column_bounds: tuple[int, int] | None,
     exposure_us: float,
@@ -472,9 +623,15 @@ def save_measurement_record(
 
     Parameters
     ----------
-    shot_results, processed_frames
-        One "Run Measurement" result -- same order/length, straight from
-        ExtendedMeasurementScreen._shot_results/_processed_frames.
+    shot_results
+        One "Run Measurement" result, straight from
+        ExtendedMeasurementScreen._shot_results.
+    stacked_image, representative_frames
+        The already-reduced frame data for that same run, straight from
+        ExtendedMeasurementScreen._measurement_stacked_image/
+        _measurement_representative_frames -- a running mean and up to 3
+        selected shots, not a full per-shot frame list (see module
+        docstring for why this function takes them pre-reduced).
     calibration_set
         Only consulted for calibration_set.geometric_tilt's presence (via
         artifact_dir's file check below) -- the artifacts themselves are
@@ -492,12 +649,15 @@ def save_measurement_record(
         _PixelColumnWavelengthAxis fallback) -- used to recompute the
         flattened (shot, column) wavelength array
         compute_fit_line_and_residuals() needs, the same way
-        ExtendedMeasurementScreen._set_measurement_data() does.
-    evaluated_at_wavelength_nm
-        The reference wavelength combine_combined_result_for_degree()
-        evaluates each shot's degree > 1 zeta at before combining --
-        ExtendedMeasurementScreen._evaluated_at_wavelength_nm()'s current
-        value at save time.
+        ExtendedMeasurementScreen._set_measurement_data() does. Spatial
+        dispersion (see combined_results.txt/the plot) is evaluated at
+        the center of the realized spectral ROI -- (columns.min() +
+        columns.max()) / 2 converted via this axis -- NOT at
+        ExtendedMeasurementScreen's "Evaluate At" spin box value; that
+        reference point is a live-GUI-only concept (a user-editable
+        pixel column, defaulting to a fixed value unrelated to any given
+        run's actual ROI) that doesn't carry over meaningfully to a
+        saved record describing one specific measurement.
     roi_bounds_px, spectral_column_bounds
         The spatial/spectral ROI actually used to produce shot_results --
         must be values captured at "Run Measurement" time (see
@@ -525,7 +685,7 @@ def save_measurement_record(
     record_dir = output_dir / f"extended_measurement_{time.strftime('%Y%m%d_%H%M%S')}"
     record_dir.mkdir(parents=True, exist_ok=True)
 
-    _save_frames(record_dir, processed_frames)
+    _save_frames(record_dir, stacked_image, representative_frames)
     _save_centroids(record_dir / "centroids.npz", shot_results)
     _save_fits(record_dir / "fits.npz", shot_results)
 
@@ -535,18 +695,42 @@ def save_measurement_record(
     wavelength_nm = axis_for_fit.wavelength_nm(columns)
     x_range = (float(wavelength_nm.min()), float(wavelength_nm.max()))
 
+    roi_center_column = (float(columns.min()) + float(columns.max())) / 2.0
+    roi_center_wavelength_nm = float(axis_for_fit.wavelength_nm(np.array([roi_center_column]))[0])
+
     per_degree: dict[int, _DegreeResult] = {}
     for degree in DEGREE_CHOICES:
-        combined = compute_combined_result_for_degree(shot_results, degree, evaluated_at_wavelength_nm)
-        intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px = compute_fit_line_and_residuals(
-            x0_px, sigma_x0_px, wavelength_nm, combined.zeta_combined, x_range, FIT_CURVE_N_POINTS,
+        spatial_dispersion = compute_combined_result_for_degree(
+            shot_results, degree, roi_center_wavelength_nm,
         )
+        if degree == 1:
+            # Unchanged from before: the single global weighted-least-
+            # squares line, anchored by the already-combined slope --
+            # identical to what ExtendedMeasurementScreen itself draws
+            # for degree 1 (see compute_fit_line_and_residuals()).
+            intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px = compute_fit_line_and_residuals(
+                x0_px, sigma_x0_px, wavelength_nm, spatial_dispersion.zeta_combined, x_range, FIT_CURVE_N_POINTS,
+            )
+            coefficients_px = np.array([intercept_px, spatial_dispersion.zeta_combined])
+            coefficient_sigma_px = np.array([intercept_sigma_px, spatial_dispersion.sigma_zeta_combined])
+        else:
+            # A genuine combined polynomial (see
+            # _combine_polynomial_coefficients()'s own docstring) -- a
+            # real quadratic/cubic curve, not the single-reference-point
+            # tangent line degree 1 uses above.
+            coefficients_px, coefficient_sigma_px = _combine_polynomial_coefficients(shot_results, degree)
+            fit_x = np.linspace(x_range[0], x_range[1], FIT_CURVE_N_POINTS)
+            fit_y_px = np.polynomial.polynomial.polyval(fit_x, coefficients_px)
+            residual_px = x0_px - np.polynomial.polynomial.polyval(wavelength_nm, coefficients_px)
+
         per_degree[degree] = _DegreeResult(
-            combined=combined, intercept_px=intercept_px, intercept_sigma_px=intercept_sigma_px,
-            fit_x=fit_x, fit_y_px=fit_y_px, residual_px=residual_px,
+            coefficients_px=coefficients_px, coefficient_sigma_px=coefficient_sigma_px,
+            spatial_dispersion=spatial_dispersion, fit_x=fit_x, fit_y_px=fit_y_px, residual_px=residual_px,
         )
 
-    _write_combined_results(record_dir / "combined_results.txt", per_degree, position_calibration)
+    _write_combined_results(
+        record_dir / "combined_results.txt", per_degree, roi_center_wavelength_nm, position_calibration,
+    )
 
     calibration_present = _copy_calibration_artifacts(artifact_dir, record_dir / "calibrations")
 

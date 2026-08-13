@@ -1,8 +1,9 @@
 '''
 Test suite for measurement_record.py -- pure module tests, no Qt/
 QApplication involved at all (see that module's own docstring for why),
-against real shot_results/processed_frames acquired the same
-collect_n_frames() -> run_preprocessing() -> analyze_shot() way
+against real shot_results/stacked_image/representative_frames acquired
+the same collect_n_frames() -> run_preprocessing() -> analyze_shot() ->
+running-mean-plus-representative-frames way
 extended_measurement.py's _on_run_clicked() does, using
 build_realistic_calibration_bundle() (tests/gui_fixture_helpers.py) for
 the in-memory calibration state and a small set of freshly-saved
@@ -32,7 +33,7 @@ from pipeline.calibration.sensor import (
 from pipeline.calibration.shared import CalibrationRecord
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
 from pipeline.calibration.spectral import save_geometric_tilt, save_spectral_calibration
-from pipeline.gui.extended_measurement import DEGREE_CHOICES
+from pipeline.gui.extended_measurement import DEGREE_CHOICES, _representative_shot_indices
 from pipeline.gui.measurement_record import CALIBRATION_ARTIFACT_FILENAMES, save_measurement_record
 from pipeline.preprocessing import ProcessedFrame, run_preprocessing
 
@@ -51,14 +52,16 @@ N_SHOTS = 3
 
 def _acquire_real_measurement(
     bundle, n_shots: int = N_SHOTS, slope_px_per_col: float = 0.01,
-) -> tuple[list[ShotAnalysisResult], list[ProcessedFrame]]:
+) -> tuple[list[ShotAnalysisResult], np.ndarray, dict[str, ProcessedFrame]]:
 
     '''
-    Real acquire -> preprocess -> analyze loop, same shape as
-    ExtendedMeasurementScreen._on_run_clicked() -- deliberately not going
-    through that widget (this module has no Qt dependency to exercise).
-    A small injected chirp (slope_px_per_col) keeps every degree's fit
-    non-degenerate, same convention as
+    Real acquire -> preprocess -> analyze -> reduce loop, same shape as
+    ExtendedMeasurementScreen._on_run_clicked() (running sum + selected
+    representative frames, never a full per-shot frame list -- see that
+    method's docstring for why) -- deliberately not going through that
+    widget (this module has no Qt dependency to exercise). A small
+    injected chirp (slope_px_per_col) keeps every degree's fit non-
+    degenerate, same convention as
     tests/test_extended_measurement.py's _realistic_running_camera_stream().
     '''
 
@@ -74,17 +77,25 @@ def _acquire_real_measurement(
     finally:
         stream.stop()
 
+    representative_indices = _representative_shot_indices(len(frames))
+    representative_frames: dict[str, ProcessedFrame] = {}
+    frame_sum = None
+
     shot_results = []
-    processed_frames = []
-    for frame in frames:
+    for i, frame in enumerate(frames):
         processed, _saturation = run_preprocessing(frame, calibration_set)
         shot_results.append(
             analyze_shot(
                 processed, bundle.wavelength_axis, noise_model=bundle.noise_model, degrees=DEGREE_CHOICES,
             )
         )
-        processed_frames.append(processed)
-    return shot_results, processed_frames
+        frame_sum = processed.image if frame_sum is None else frame_sum + processed.image
+        for label, index in representative_indices.items():
+            if i == index:
+                representative_frames[label] = processed
+
+    stacked_image = frame_sum / len(frames)
+    return shot_results, stacked_image, representative_frames
 
 
 def _save_realistic_artifacts(bundle, artifact_dir) -> None:
@@ -129,14 +140,14 @@ class TestSaveMeasurementRecord:
 
     def test_creates_expected_directory_structure(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -169,14 +180,14 @@ class TestSaveMeasurementRecord:
 
     def test_absent_artifact_noted_in_manifest_not_copied(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -187,14 +198,14 @@ class TestSaveMeasurementRecord:
 
     def test_manifest_reports_captured_roi_not_a_different_value(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(100, 900), spectral_column_bounds=(300, 1000),
+            roi_bounds_px=(100, 900), spectral_column_bounds=(300, 1000),
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -205,14 +216,14 @@ class TestSaveMeasurementRecord:
 
     def test_spectral_roi_none_reports_automatic_in_manifest(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -222,14 +233,14 @@ class TestSaveMeasurementRecord:
 
     def test_centroids_round_trip(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -243,14 +254,14 @@ class TestSaveMeasurementRecord:
 
     def test_fits_round_trip(self, tmp_path):
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
@@ -269,72 +280,90 @@ class TestSaveMeasurementRecord:
         # (see extended_measurement.py) is that the saved record's numbers
         # can never drift from what the live GUI would show -- confirm the
         # saved combined_results.txt actually reflects that function's own
-        # output, not an independently re-derived value.
+        # output (evaluated at the spectral ROI's center, as
+        # save_measurement_record() itself computes it -- see its
+        # docstring), not an independently re-derived value.
         from pipeline.gui.extended_measurement import compute_combined_result_for_degree
+        from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
 
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
 
-        combined_1 = compute_combined_result_for_degree(shot_results, 1, 520.0)
-        zeta_mm, _ = bundle.position_calibration.convert(
+        columns = np.concatenate([result.centroids.columns for result in shot_results])
+        roi_center_column = (float(columns.min()) + float(columns.max())) / 2.0
+        roi_center_wavelength_nm = float(bundle.wavelength_axis.wavelength_nm(np.array([roi_center_column]))[0])
+
+        combined_1 = compute_combined_result_for_degree(shot_results, 1, roi_center_wavelength_nm)
+        zeta_mm, zeta_sigma_mm = bundle.position_calibration.convert(
             np.array([combined_1.zeta_combined]), np.array([combined_1.sigma_zeta_combined]),
         )
         text = (record_dir / "combined_results.txt").read_text()
+        assert f"{roi_center_wavelength_nm:.3f} nm" in text
         assert f"n_shots = {combined_1.n_shots}" in text
         # The exact formatted string is reproduced independently rather than
         # substring-matched against a hand-typed number, to actually
         # exercise format_value_with_uncertainty() the same way the saved
         # file does.
-        from pipeline.gui.formatting import format_value_with_uncertainty, microns_to_mm
-        zeta_sigma_um, _ = bundle.position_calibration.convert(
-            np.array([combined_1.sigma_zeta_combined]), np.array([0.0]),
-        )
         expected = format_value_with_uncertainty(
-            microns_to_mm(float(zeta_mm[0])), microns_to_mm(float(zeta_sigma_um[0])),
+            microns_to_mm(float(zeta_mm[0])), microns_to_mm(float(zeta_sigma_mm[0])),
         )
-        assert expected in text
+        assert f"spatial dispersion at ROI center (mm/nm) = {expected}" in text
+        # c0/c1 are listed as combined polynomial coefficients too, distinct
+        # from the "spatial dispersion" line above.
+        assert "combined polynomial coefficients" in text
+        assert "c0 (mm) = " in text
+        assert "c1 (mm/nm) = " in text
+        # Degree 2/3 must list their own higher-order coefficients too --
+        # this was the actual bug report (only c0/c1 were ever shown).
+        assert "c2 (mm/nm^2) = " in text
+        assert "c3 (mm/nm^3) = " in text
 
-    def test_stacked_frame_is_mean_of_processed_frames(self, tmp_path):
+    def test_saved_stack_matches_the_stacked_image_passed_in(self, tmp_path):
+        # stacked_image is now computed by the caller (a running mean
+        # during acquisition -- see _acquire_real_measurement()/
+        # ExtendedMeasurementScreen._on_run_clicked()), not reduced from a
+        # frame list inside save_measurement_record() itself -- this just
+        # confirms _save_frame() persists exactly what it was given.
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )
 
-        expected_stack = np.mean([frame.image for frame in processed_frames], axis=0)
         loaded_stack = np.load(record_dir / "frames" / "stacked.npz")["image"]
-        assert np.allclose(loaded_stack, expected_stack)
+        assert np.allclose(loaded_stack, stacked_image)
 
     def test_two_shots_collapses_duplicate_representative_frame(self, tmp_path):
-        # _select_representative_frames()'s dedup path: with only 2 shots,
-        # "last" collides with "middle" (index n-1 == n//2 at n=2) and
-        # should be dropped, not saved twice under two different labels.
+        # extended_measurement.py's _representative_shot_indices() dedup
+        # path: with only 2 shots, "last" collides with "middle" (index
+        # n-1 == n//2 at n=2) and should be dropped, not saved twice
+        # under two different labels.
         bundle = build_realistic_calibration_bundle()
-        shot_results, processed_frames = _acquire_real_measurement(bundle, n_shots=2)
+        shot_results, stacked_image, representative_frames = _acquire_real_measurement(bundle, n_shots=2)
         artifact_dir = tmp_path / "artifacts"
         _save_realistic_artifacts(bundle, artifact_dir)
 
         record_dir = save_measurement_record(
-            shot_results, processed_frames, bundle.calibration_set, bundle.wavelength_axis,
+            shot_results, stacked_image, representative_frames, bundle.calibration_set, bundle.wavelength_axis,
             bundle.position_calibration, axis_for_fit=bundle.wavelength_axis,
-            evaluated_at_wavelength_nm=520.0, roi_bounds_px=(0, 1200), spectral_column_bounds=None,
+            roi_bounds_px=(0, 1200), spectral_column_bounds=None,
             exposure_us=FIXTURE_EXPOSURE_US, gain_db=FIXTURE_GAIN_DB,
             artifact_dir=artifact_dir, output_dir=tmp_path / "measurements",
         )

@@ -301,11 +301,13 @@ class ExtendedMeasurementScreen(QWidget):
         # None until "Run Measurement" completes at least once -- every
         # display method below treats this as "nothing to show yet"
         # rather than fabricating placeholder numbers (see
-        # _refresh_measurement_display()). processed_frames/roi_bounds_px/
-        # column_bounds are set alongside shot_results by
-        # _set_measurement_data() -- see that method's docstring.
+        # _refresh_measurement_display()). stacked_image/
+        # representative_frames/roi_bounds_px/column_bounds are set
+        # alongside shot_results by _set_measurement_data() -- see that
+        # method's docstring.
         self._shot_results: list[ShotAnalysisResult] | None = None
-        self._processed_frames: list[ProcessedFrame] | None = None
+        self._measurement_stacked_image: np.ndarray | None = None
+        self._measurement_representative_frames: dict[str, ProcessedFrame] | None = None
         self._measurement_roi_bounds_px: tuple[int, int] | None = None
         self._measurement_column_bounds: tuple[int, int] | None = None
 
@@ -798,6 +800,24 @@ class ExtendedMeasurementScreen(QWidget):
         self._spectral_roi_control's current value takes effect -- there
         is no live re-render on a later edit.
 
+        Every preprocessed frame's image is folded into a running sum
+        (-> a mean at the end) and checked against
+        _representative_shot_indices() as it's produced, rather than
+        collected into a list and reduced afterward -- deliberately, so
+        this method never holds more than a small, constant number of
+        full-resolution frames in memory at once (the running sum plus up
+        to 3 representative frames), regardless of n_shots. n_shots is
+        capped at MAX_N_SHOTS (1000) and each frame is ~18MB float64 at
+        CANONICAL_SHAPE -- retaining all of them (an earlier version of
+        this method did, via a plain list, for "Save Record" to later
+        pick from) meant a 200-shot run alone held ~3.6GB resident for the
+        rest of the widget's life, with a further multi-GB spike from
+        averaging that list in one call -- the real cause of a reported
+        multi-minute UI freeze on Save Record, and very likely of a
+        second, unrelated-looking freeze switching the degree selector
+        afterward too (an otherwise-cheap Qt operation stalling under the
+        lingering memory/GC pressure, not a bug in that code path itself).
+
         Unlike LiveViewWidget's continuous polling loop -- where a single
         bad frame is just skipped and the next tick tries again --
         NoSignalError/SettingsMismatchError/InsufficientDataError from any
@@ -830,10 +850,12 @@ class ExtendedMeasurementScreen(QWidget):
 
         roi_bounds_px = self._roi_control.roi_bounds_px()
         column_bounds = self._spectral_roi_control.column_bounds()
+        representative_indices = _representative_shot_indices(len(frames))
 
         shot_results: list[ShotAnalysisResult] = []
-        processed_frames: list[ProcessedFrame] = []
-        for frame in frames:
+        representative_frames: dict[str, ProcessedFrame] = {}
+        frame_sum: np.ndarray | None = None
+        for i, frame in enumerate(frames):
             try:
                 processed, _saturation_result = run_preprocessing(
                     frame, self._calibration_set,
@@ -845,7 +867,6 @@ class ExtendedMeasurementScreen(QWidget):
                         degrees=DEGREE_CHOICES,
                     )
                 )
-                processed_frames.append(processed)
             except (NoSignalError, SettingsMismatchError, InsufficientDataError) as error:
                 QMessageBox.warning(
                     self,
@@ -855,7 +876,16 @@ class ExtendedMeasurementScreen(QWidget):
                 )
                 return
 
-        self._set_measurement_data(shot_results, processed_frames, roi_bounds_px, column_bounds)
+            frame_sum = processed.image if frame_sum is None else frame_sum + processed.image
+            for label, index in representative_indices.items():
+                if i == index:
+                    representative_frames[label] = processed
+
+        stacked_image = frame_sum / len(frames)
+
+        self._set_measurement_data(
+            shot_results, stacked_image, representative_frames, roi_bounds_px, column_bounds,
+        )
         self._refresh_measurement_display()
         self._save_record_button.setEnabled(True)
 
@@ -887,10 +917,11 @@ class ExtendedMeasurementScreen(QWidget):
 
         try:
             record_dir = save_measurement_record(
-                self._shot_results, self._processed_frames, self._calibration_set,
+                self._shot_results, self._measurement_stacked_image,
+                self._measurement_representative_frames, self._calibration_set,
                 self._wavelength_axis, self._position_calibration, self._axis_for_fit,
-                self._evaluated_at_wavelength_nm(), self._measurement_roi_bounds_px,
-                self._measurement_column_bounds, self._exposure_spin.value(), self._gain_spin.value(),
+                self._measurement_roi_bounds_px, self._measurement_column_bounds,
+                self._exposure_spin.value(), self._gain_spin.value(),
                 artifact_dir=DEFAULT_ARTIFACT_DIR,
             )
         except OSError as error:
@@ -957,36 +988,45 @@ class ExtendedMeasurementScreen(QWidget):
     def _set_measurement_data(
         self,
         shot_results: list[ShotAnalysisResult],
-        processed_frames: list[ProcessedFrame],
+        stacked_image: np.ndarray,
+        representative_frames: dict[str, ProcessedFrame],
         roi_bounds_px: tuple[int, int],
         column_bounds: tuple[int, int] | None,
     ) -> None:
 
         '''
-        Stashes one Run Measurement's per-shot analysis results, the raw
-        preprocessed frames each one came from, and the ROI values that
-        were actually used to produce them -- plus the degree-independent
-        flattened (shot, column) arrays derived from shot_results, every
-        raw centroid point across every shot concatenated, never averaged
-        per column (see module docstring for why). Degree-dependent
-        quantities (the combined zeta, fit-curve intercept, residuals) are
-        computed on demand by _refresh_measurement_display() instead of
-        cached here, so switching the degree selector or editing the
-        evaluate-at reference point always reflects the current selection.
+        Stashes one Run Measurement's per-shot analysis results, the
+        already-reduced frame data "Save Record" needs, and the ROI
+        values that were actually used to produce them -- plus the
+        degree-independent flattened (shot, column) arrays derived from
+        shot_results, every raw centroid point across every shot
+        concatenated, never averaged per column (see module docstring for
+        why). Degree-dependent quantities (the combined zeta, fit-curve
+        intercept, residuals) are computed on demand by
+        _refresh_measurement_display() instead of cached here, so
+        switching the degree selector or editing the evaluate-at reference
+        point always reflects the current selection.
 
-        processed_frames/roi_bounds_px/column_bounds exist purely so
-        "Save Record" (measurement_record.save_measurement_record()) can
-        later write an exact record of this specific run -- roi_bounds_px/
-        column_bounds are captured here rather than re-read from
-        self._roi_control/self._spectral_roi_control at save time
-        specifically because either control could be edited in the gap
-        between "Run Measurement" and a later "Save Record" click, which
-        would otherwise report the wrong ROI for this measurement (see
+        stacked_image/representative_frames/roi_bounds_px/column_bounds
+        exist purely so "Save Record"
+        (measurement_record.save_measurement_record()) can later write an
+        exact record of this specific run. stacked_image/
+        representative_frames are already-reduced by _on_run_clicked()
+        (a running mean plus up to 3 selected frames, computed as each
+        shot is processed) rather than a full list of every frame's
+        image -- see that method's docstring for why holding all of them
+        here would scale badly with n_shots. roi_bounds_px/column_bounds
+        are captured here rather than re-read from self._roi_control/
+        self._spectral_roi_control at save time specifically because
+        either control could be edited in the gap between "Run
+        Measurement" and a later "Save Record" click, which would
+        otherwise report the wrong ROI for this measurement (see
         _on_run_clicked()'s docstring).
         '''
 
         self._shot_results = shot_results
-        self._processed_frames = processed_frames
+        self._measurement_stacked_image = stacked_image
+        self._measurement_representative_frames = representative_frames
         self._measurement_roi_bounds_px = roi_bounds_px
         self._measurement_column_bounds = column_bounds
 
@@ -1217,6 +1257,30 @@ class ExtendedMeasurementScreen(QWidget):
 
 
 # Functions
+
+def _representative_shot_indices(n_shots: int) -> dict[str, int]:
+
+    '''
+    First, middle, and last shot index (by acquisition order) out of
+    n_shots -- the 3 individual frames "Save Record" keeps a full-
+    resolution copy of, per measurement_record.py's own module docstring
+    (real, traceable primary data; not every shot, which wouldn't scale
+    with n_shots). Deduplicated: at small n_shots (e.g. 2) two of the
+    three candidate indices can coincide, in which case only the distinct
+    ones are returned, keyed by whichever label reached that index first
+    -- one frame is never saved twice under two different labels.
+    '''
+
+    candidates = [("first", 0), ("middle", n_shots // 2), ("last", n_shots - 1)]
+    seen_indices: set[int] = set()
+    selected: dict[str, int] = {}
+    for label, index in candidates:
+        if index in seen_indices:
+            continue
+        seen_indices.add(index)
+        selected[label] = index
+    return selected
+
 
 def compute_combined_result_for_degree(
     shot_results: list[ShotAnalysisResult], degree: int, wavelength_ref_nm: float,
