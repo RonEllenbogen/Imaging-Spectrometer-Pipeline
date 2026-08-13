@@ -681,6 +681,22 @@ class ExtendedMeasurementScreen(QWidget):
         as combine_shots()'s own docstring: sigma_zeta_combined already
         reports whichever of the two is larger, which is the one number a
         user needs.
+
+        Coefficients (new): unlike LiveViewWidget's own "Coefficients:" row
+        (a single shot's full degree+1 fit.coefficients), this screen only
+        ever has two to show -- c0 (intercept) and c1 (zeta_combined) --
+        regardless of the selected degree. That's not a display
+        simplification; it's the actual math: combine_shots() only ever
+        combines a scalar slope (see module docstring and
+        DEGREE_GT_ONE_NOTE), never a joint multi-coefficient polynomial, so
+        there is no real c2/c3 etc. to show at degree > 1. c1 IS
+        zeta_combined -- the same number self._spatial_dispersion_label
+        already shows -- surfaced again here alongside c0 (the
+        weighted-least-squares intercept _recompute_fit_and_residuals()
+        computes for the drawn fit line) so the two coefficients that
+        together define that line are visible as a pair. Both are
+        recomputed by _refresh_measurement_display() on every degree
+        switch, same as spatial dispersion.
         '''
 
         group = QGroupBox("Combined Result")
@@ -692,6 +708,9 @@ class ExtendedMeasurementScreen(QWidget):
         label_font = load_bundled_font(10)
 
         self._n_shots_label = QLabel("--")
+        self._coefficients_label = QLabel("--")
+        self._coefficients_label.setTextFormat(Qt.RichText)
+        self._coefficients_label.setWordWrap(True)
         self._spatial_dispersion_label = QLabel("--")
         self._spatial_dispersion_label.setWordWrap(True)
         self._reduced_chi_squared_label = QLabel("--")
@@ -715,13 +734,14 @@ class ExtendedMeasurementScreen(QWidget):
         self._degree_note_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-style: italic;")
 
         for widget in (
-            self._n_shots_label, self._spatial_dispersion_label,
+            self._n_shots_label, self._coefficients_label, self._spatial_dispersion_label,
             self._reduced_chi_squared_label, self._evaluated_at_spin,
             self._evaluated_at_label, self._degree_note_label,
         ):
             widget.setFont(label_font)
 
         form.addRow("N Shots:", self._n_shots_label)
+        form.addRow("Coefficients:", self._coefficients_label)
         form.addRow("Spatial Dispersion (mm/nm):", self._spatial_dispersion_label)
         form.addRow("Reduced Chi-Squared:", self._reduced_chi_squared_label)
         form.addRow("Evaluate At:", self._evaluated_at_spin)
@@ -976,6 +996,7 @@ class ExtendedMeasurementScreen(QWidget):
 
         if self._shot_results is None:
             self._n_shots_label.setText("--")
+            self._coefficients_label.setText("--")
             self._spatial_dispersion_label.setText("--")
             self._reduced_chi_squared_label.setText("--")
             return
@@ -996,6 +1017,20 @@ class ExtendedMeasurementScreen(QWidget):
         self._reduced_chi_squared_label.setText(f"{reduced_chi_squared:.3f}")
 
         self._recompute_fit_and_residuals(combined.zeta_combined)
+
+        # c0 (intercept) is a position-like px quantity, same physical
+        # quantity as a scatter point's y0 -- _convert_to_mm() (not
+        # _zeta_to_mm(), which is for slopes) is the correct conversion,
+        # same as every scatter y-value on this plot.
+        c0_mm, c0_sigma_mm = self._convert_to_mm(
+            np.array([self._measurement_intercept_px]), np.array([self._measurement_intercept_sigma_px])
+        )
+        coeff_lines = [
+            f"c<sub>0</sub> = {format_value_with_uncertainty(float(c0_mm[0]), float(c0_sigma_mm[0]))}",
+            f"c<sub>1</sub> = {format_value_with_uncertainty(zeta_mm, zeta_sigma_mm)}",
+        ]
+        self._coefficients_label.setText("<br>".join(coeff_lines))
+
         self._apply_roi_bounds(*self._roi_control.roi_bounds_mm())
 
     def _recompute_fit_and_residuals(self, zeta_combined: float) -> None:
@@ -1008,14 +1043,32 @@ class ExtendedMeasurementScreen(QWidget):
         weighted-least-squares intercept -- the best-fit offset given that
         fixed, already-combined slope (see module docstring for why this
         is the only combination-consistent choice at any degree).
+
+        Also stashes that intercept (and its uncertainty) as
+        self._measurement_intercept_px/_intercept_sigma_px, for
+        _refresh_measurement_display()'s Coefficients row -- c0 in the
+        (c0, c1=zeta_combined) pair a straight line is defined by.
+        intercept_sigma_px is the standard weighted-mean standard error,
+        sqrt(1 / sum(weights)) -- conditional on zeta_combined as given
+        (fixed), not propagating zeta_combined's own uncertainty into it.
+        That mirrors the intercept's own two-stage derivation above (a
+        dependent second step after zeta_combined has already been
+        combined, not a joint two-parameter fit), so reporting its
+        uncertainty on that same conditional basis is consistent, not an
+        extra approximation layered on top.
         '''
 
         weights = 1.0 / self._measurement_sigma_x0_px ** 2
+        sum_weights = np.sum(weights)
         intercept_px = float(
             np.sum(
                 weights * (self._measurement_x0_px - zeta_combined * self._measurement_wavelength_nm)
-            ) / np.sum(weights)
+            ) / sum_weights
         )
+        intercept_sigma_px = float(np.sqrt(1.0 / sum_weights))
+
+        self._measurement_intercept_px = intercept_px
+        self._measurement_intercept_sigma_px = intercept_sigma_px
 
         fit_x = np.linspace(
             self._measurement_x_values.min(), self._measurement_x_values.max(), FIT_CURVE_N_POINTS

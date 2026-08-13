@@ -223,6 +223,7 @@ class TestExtendedMeasurementScreenSmoke:
         assert widget._spectral_roi_control is not None
         assert widget._degree_selector.count() == len(DEGREE_CHOICES)
         assert widget._n_shots_label.text() != ""
+        assert widget._coefficients_label.text() != ""
         assert widget._spatial_dispersion_label.text() != ""
         assert widget._reduced_chi_squared_label.text() != ""
         assert widget._back_button is not None
@@ -588,6 +589,83 @@ class TestExtendedMeasurementRealMeasurement:
             )
         finally:
             stream.stop()
+
+    def test_coefficients_label_reports_c0_and_c1(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream(slope_px_per_col=0.01, seed=11)
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+
+            widget._run_button.click()
+
+            text = widget._coefficients_label.text()
+            assert "c<sub>0</sub>" in text
+            assert "c<sub>1</sub>" in text
+
+            # c1 must be exactly the same number already shown as "Spatial
+            # Dispersion" -- they're the same combined zeta, just surfaced
+            # in two places (see _build_combined_result_group()'s docstring).
+            assert widget._spatial_dispersion_label.text() in text
+
+            # c0 (the intercept) is independently recomputable from the
+            # exact same weighted-mean formula _recompute_fit_and_residuals()
+            # uses -- this exercises the actual wiring rather than trusting
+            # whatever self._measurement_intercept_px already holds.
+            combined = widget._compute_combined_result(1)
+            weights = 1.0 / widget._measurement_sigma_x0_px ** 2
+            sum_weights = np.sum(weights)
+            expected_intercept_px = float(
+                np.sum(
+                    weights * (
+                        widget._measurement_x0_px
+                        - combined.zeta_combined * widget._measurement_wavelength_nm
+                    )
+                ) / sum_weights
+            )
+            expected_intercept_sigma_px = float(np.sqrt(1.0 / sum_weights))
+            assert widget._measurement_intercept_px == pytest.approx(expected_intercept_px)
+            assert widget._measurement_intercept_sigma_px == pytest.approx(expected_intercept_sigma_px)
+
+            expected_c0_mm, expected_c0_sigma_mm = ScaleFactorPositionCalibration().convert(
+                np.array([expected_intercept_px]), np.array([expected_intercept_sigma_px])
+            )
+            expected_c0_text = format_value_with_uncertainty(
+                float(expected_c0_mm[0]) / MICRONS_PER_MM, float(expected_c0_sigma_mm[0]) / MICRONS_PER_MM
+            )
+            assert f"c<sub>0</sub> = {expected_c0_text}" in text
+        finally:
+            stream.stop()
+
+    def test_coefficients_change_with_degree(self, qtbot, monkeypatch):
+        # The user-facing requirement: switching the fit degree must
+        # recompute the displayed coefficients, not just leave them stale
+        # from whichever degree was selected at "Run Measurement" time.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            degree_1_text = widget._coefficients_label.text()
+
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+            degree_2_text = widget._coefficients_label.text()
+
+            assert degree_2_text != "--"
+            assert degree_2_text != degree_1_text
+        finally:
+            stream.stop()
+
+    def test_coefficients_label_resets_when_no_measurement(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert widget._coefficients_label.text() == "--"
 
     def test_degree_switch_after_run_does_not_reacquire(self, qtbot, monkeypatch):
         monkeypatch.setattr(
