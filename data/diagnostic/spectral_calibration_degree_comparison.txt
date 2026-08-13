@@ -1,0 +1,19 @@
+9 matched lamp lines, shared across every degree below
+
+degree 1 (linear):
+  c0 = 742.038 +/- 0.166
+  c1 = 0.0566298 +/- 0.000109
+  reduced chi-squared = 0.08576
+
+degree 2 (quadratic):
+  c0 = 741.502 +/- 0.235
+  c1 = 0.0577431 +/- 0.000422
+  c2 = -4.73797e-07 +/- 1.76e-07
+  reduced chi-squared = 0.04513
+
+degree 3 (cubic):
+  c0 = 741.739 +/- 0.435
+  c1 = 0.0567523 +/- 0.00157
+  c2 = 5.75709e-07 +/- 1.62e-06
+  c3 = -3.21145e-10 +/- 4.93e-10
+  reduced chi-squared = 0.05
