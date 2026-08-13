@@ -135,7 +135,7 @@ from pipeline.gui.live_view import (
     gain_has_drifted,
     wavelength_axis_label,
 )
-from pipeline.gui.roi_control import SpatialROIControl
+from pipeline.gui.roi_control import SpatialROIControl, SpectralROIControl
 from pipeline.gui.theme import (
     COLOR_ACCENT as ACCENT_COLOR,
     COLOR_BACKGROUND as BACKGROUND_COLOR,
@@ -445,6 +445,7 @@ class ExtendedMeasurementScreen(QWidget):
 
         layout.addWidget(self._build_acquisition_settings_group())
         layout.addWidget(self._build_spatial_roi_group())
+        layout.addWidget(self._build_spectral_roi_group())
         layout.addWidget(self._build_degree_selector_group())
         layout.addWidget(self._build_combined_result_group())
         layout.addStretch(1)
@@ -514,6 +515,30 @@ class ExtendedMeasurementScreen(QWidget):
         )
         self._roi_control.roi_changed.connect(self._on_roi_changed)
         return self._roi_control
+
+    def _build_spectral_roi_group(self) -> QGroupBox:
+
+        '''
+        Unlike self._roi_control (spatial), this control's roi_changed is
+        NOT connected to any live re-render: a spectral-ROI change alters
+        which columns are even analyzed (valid_columns), so -- unlike the
+        spatial ROI, a pure post-hoc pixel-zeroing that never drops a
+        centroid point -- there is no way to retroactively apply a change
+        to an already-completed Run Measurement's self._shot_results
+        without either fabricating data for columns that were never
+        analyzed (widening) or misrepresenting how many columns actually
+        went into the combined result (narrowing). Its current
+        column_bounds() is instead read fresh in _on_run_clicked(), same
+        timing as self._roi_control.roi_bounds_px() -- "changing the ROI
+        control afterward" for this one specifically means "next Run
+        Measurement", not "immediately", and there is deliberately no
+        signal connection here to suggest otherwise.
+        '''
+
+        self._spectral_roi_control = SpectralROIControl(
+            CANONICAL_SHAPE[SPECTRAL_AXIS], self._wavelength_axis
+        )
+        return self._spectral_roi_control
 
     # -- acquisition settings drift detection ----------------------------
 
@@ -717,12 +742,16 @@ class ExtendedMeasurementScreen(QWidget):
         then redraws the combined-result panel and scatter/fit/residual
         overlay for the currently-selected degree.
 
-        n_shots is read from self._n_shots_spin. roi_bounds is read fresh
-        from self._roi_control for each frame (matching
-        LiveViewWidget-style per-call reads elsewhere in this screen),
-        even though it cannot actually change mid-acquisition -- this
-        call blocks the Qt event loop for its entire duration, so no user
-        interaction with the ROI control can happen until it returns.
+        n_shots is read from self._n_shots_spin. roi_bounds/column_bounds
+        are read fresh from self._roi_control/self._spectral_roi_control
+        for each frame (matching LiveViewWidget-style per-call reads
+        elsewhere in this screen), even though neither can actually change
+        mid-acquisition -- this call blocks the Qt event loop for its
+        entire duration, so no user interaction with either ROI control
+        can happen until it returns. See _build_spectral_roi_group()'s
+        docstring for why, unlike the spatial ROI, this is also the ONLY
+        point at which self._spectral_roi_control's current value takes
+        effect -- there is no live re-render on a later edit.
 
         Unlike LiveViewWidget's continuous polling loop -- where a single
         bad frame is just skipped and the next tick tries again --
@@ -758,7 +787,9 @@ class ExtendedMeasurementScreen(QWidget):
         for frame in frames:
             try:
                 processed, _saturation_result = run_preprocessing(
-                    frame, self._calibration_set, roi_bounds=self._roi_control.roi_bounds_px()
+                    frame, self._calibration_set,
+                    roi_bounds=self._roi_control.roi_bounds_px(),
+                    column_bounds=self._spectral_roi_control.column_bounds(),
                 )
                 shot_results.append(
                     analyze_shot(

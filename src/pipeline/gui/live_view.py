@@ -128,7 +128,7 @@ from pipeline.preprocessing import (
 )
 
 from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM, microns_to_mm
-from pipeline.gui.roi_control import SpatialROIControl
+from pipeline.gui.roi_control import SpatialROIControl, SpectralROIControl
 from pipeline.gui.theme import (
     COLOR_ACCENT as ACCENT_COLOR,
     COLOR_BACKGROUND as BACKGROUND_COLOR,
@@ -501,6 +501,7 @@ class LiveViewWidget(QWidget):
         # not a peer of them.
         layout.addWidget(self._build_acquisition_settings_group())
         layout.addWidget(self._build_spatial_roi_group())
+        layout.addWidget(self._build_spectral_roi_group())
         layout.addWidget(self._build_degree_selector_group())
         layout.addWidget(self._build_fit_diagnostics_group())
         layout.addStretch(1)
@@ -594,6 +595,14 @@ class LiveViewWidget(QWidget):
         )
         self._roi_control.roi_changed.connect(self._on_roi_changed)
         return self._roi_control
+
+    def _build_spectral_roi_group(self) -> QGroupBox:
+
+        self._spectral_roi_control = SpectralROIControl(
+            CANONICAL_SHAPE[SPECTRAL_AXIS], self._wavelength_axis
+        )
+        self._spectral_roi_control.roi_changed.connect(self._on_spectral_roi_changed)
+        return self._spectral_roi_control
 
     # -- acquisition settings drift detection ----------------------------
 
@@ -809,7 +818,7 @@ class LiveViewWidget(QWidget):
         self._update_strip_chart_placeholder(self._placeholder_rng)
         self._update_fit_panel(DEFAULT_DEGREE)
 
-        self._apply_roi_bounds(*self._roi_control.roi_bounds_mm())
+        self._apply_roi_bounds()
 
     def _generate_placeholder_data(self) -> None:
 
@@ -909,41 +918,64 @@ class LiveViewWidget(QWidget):
         # the strip chart's random values.
         self._placeholder_rng = rng
 
-    def _apply_roi_bounds(self, min_mm: float, max_mm: float) -> None:
+    def _current_x_extent(self) -> tuple[float, float]:
+
+        '''
+        The main plot's x-extent for the CURRENTLY selected spectral ROI
+        window (self._spectral_roi_control.column_window(), which is
+        always the full frame at the default), as opposed to
+        self._main_plot_x_extent, the fixed full-frame extent used only
+        for self._image_item.setRect() (the heatmap's data-space mapping,
+        which must stay full regardless of the viewport's current zoom --
+        see _generate_placeholder_data()). Every setRange() call in this
+        widget uses this method instead of the fixed extent, so narrowing
+        self._spectral_roi_control actually zooms the plot into the
+        selected window, mirroring self._roi_control's y-axis zoom.
+        '''
+
+        column_min, column_max = self._spectral_roi_control.column_window()
+        x0, x1 = self._heatmap_x_extent(first_column=column_min, last_column=column_max - 1)
+        return (min(x0, x1), max(x0, x1))
+
+    def _apply_roi_bounds(self) -> None:
 
         '''
         Crops the fake scatter/error-bars/fit-curve/heatmap to
-        [min_mm, max_mm] and renders them -- the real system's analogue of
+        self._roi_control's and self._spectral_roi_control's current
+        bounds and renders them -- the real system's analogue of
         preprocessing/steps/roi.py's apply_roi() zeroing rows outside the
-        spatial ROI (no valid centroid there), so out-of-window scatter/
-        fit points are dropped entirely rather than merely clipped from
-        view. Callable both at startup (_populate_placeholder_data()) and,
-        ONLY before the first real tick has landed, from
-        self._roi_control's roi_changed signal (_on_roi_changed()) -- see
-        that method's own docstring for why it must stop calling this once
+        spatial ROI, and preprocessing/steps/spectral_roi.py's
+        apply_spectral_roi() overriding which columns are valid, combined:
+        an out-of-window scatter/fit point on EITHER axis is dropped
+        entirely rather than merely clipped from view. Callable both at
+        startup (_populate_placeholder_data()) and, ONLY before the first
+        real tick has landed, from either ROI control's roi_changed signal
+        (_on_roi_changed()/_on_spectral_roi_changed()) -- see those
+        methods' own docstrings for why they must stop calling this once
         self._displayed_real_data is True (this always repaints from
         self._placeholder_*, which would overwrite real on-screen data
         with stale fake data on every ROI edit otherwise).
 
-        Sets BOTH axis ranges via one setRange() call, even though the ROI
-        only ever changes the y-range -- pinning x explicitly (rather than
-        leaving it on pyqtgraph's autorange) works around a real pyqtgraph
-        quirk: ScatterPlotItem's default pxMode markers size themselves in
-        screen pixels, and converting that to a data-space bounding rect
-        for autorange requires a pixel<->data transform that doesn't exist
-        yet before the widget's first paint. Fixing y alone left x on that
-        not-yet-valid autorange, which computed a wildly wrong x extent
-        (observed: roughly [-1.9e5, 3.8e6] instead of [0, 1919]) that
-        squeezed all the real scatter/fit-curve data into an invisible
-        sliver. x's own extent never depends on the ROI, so re-pinning it
-        to the same value every call is harmless.
+        The heatmap is masked by the spatial ROI only, not the spectral
+        one: apply_spectral_roi() never zeroes pixels (see its own
+        docstring -- it only overrides which columns count for analysis,
+        the same contract as the automatic SNR gate it replaces), so
+        neither does this placeholder counterpart, for consistency with
+        what the real per-tick heatmap will actually show once real data
+        arrives.
         '''
+
+        min_mm, max_mm = self._roi_control.roi_bounds_mm()
+        column_min, column_max = self._spectral_roi_control.column_window()
 
         y_values, y_sigma = self._convert_to_mm(
             self._placeholder_centroid_px,
             np.full_like(self._placeholder_centroid_px, 3.0),
         )
-        keep = (y_values >= min_mm) & (y_values <= max_mm)
+        keep = (
+            (y_values >= min_mm) & (y_values <= max_mm)
+            & (self._placeholder_columns >= column_min) & (self._placeholder_columns < column_max)
+        )
 
         x_values = self._placeholder_x_values_arr
         self._scatter.setData(x=x_values[keep], y=y_values[keep])
@@ -956,7 +988,10 @@ class LiveViewWidget(QWidget):
         self._error_bars.setData(**error_kwargs)
 
         fit_y_full = self._placeholder_fit_y_full
-        keep_fit = (fit_y_full >= min_mm) & (fit_y_full <= max_mm)
+        keep_fit = (
+            (fit_y_full >= min_mm) & (fit_y_full <= max_mm)
+            & (self._placeholder_fit_columns >= column_min) & (self._placeholder_fit_columns < column_max)
+        )
         self._fit_curve.setData(
             x=self._placeholder_fit_x[keep_fit], y=fit_y_full[keep_fit]
         )
@@ -968,7 +1003,7 @@ class LiveViewWidget(QWidget):
         self._image_item.setImage(masked_image)
 
         self._main_plot.setRange(
-            xRange=self._main_plot_x_extent, yRange=(min_mm, max_mm), padding=0
+            xRange=self._current_x_extent(), yRange=(min_mm, max_mm), padding=0
         )
 
     def _on_roi_changed(self, min_mm: float, max_mm: float) -> None:
@@ -977,7 +1012,7 @@ class LiveViewWidget(QWidget):
         Handler for self._roi_control.roi_changed. Before any real tick
         has ever landed (self._displayed_real_data still False -- e.g.
         the camera hasn't produced a frame yet), re-renders the
-        placeholder data cropped to the new bounds via
+        placeholder data cropped to the current bounds via
         _apply_roi_bounds(), exactly as before. Once real data has been
         displayed at least once, _apply_roi_bounds() must NOT be called
         here: it unconditionally repaints the scatter/error-bars/
@@ -993,10 +1028,28 @@ class LiveViewWidget(QWidget):
 
         if self._displayed_real_data:
             self._main_plot.setRange(
-                xRange=self._main_plot_x_extent, yRange=(min_mm, max_mm), padding=0
+                xRange=self._current_x_extent(), yRange=(min_mm, max_mm), padding=0
             )
         else:
-            self._apply_roi_bounds(min_mm, max_mm)
+            self._apply_roi_bounds()
+
+    def _on_spectral_roi_changed(self, column_min: int, column_max: int) -> None:
+
+        '''
+        Handler for self._spectral_roi_control.roi_changed -- the spectral
+        counterpart to _on_roi_changed() above, same before/after-real-data
+        split and same reasoning (see that method's docstring). The only
+        difference is which axis of the plot's view range reacts: here
+        it's x (via _current_x_extent(), which reads the just-changed
+        bounds), there it's y.
+        '''
+
+        if self._displayed_real_data:
+            self._main_plot.setRange(
+                xRange=self._current_x_extent(), yRange=self._roi_control.roi_bounds_mm(), padding=0
+            )
+        else:
+            self._apply_roi_bounds()
 
     def _update_strip_chart_placeholder(self, rng: np.random.Generator) -> None:
 
@@ -1090,7 +1143,9 @@ class LiveViewWidget(QWidget):
 
         try:
             processed, _saturation_result = run_preprocessing(
-                frame, self._calibration_set, roi_bounds=self._roi_control.roi_bounds_px()
+                frame, self._calibration_set,
+                roi_bounds=self._roi_control.roi_bounds_px(),
+                column_bounds=self._spectral_roi_control.column_bounds(),
             )
         except (NoSignalError, SettingsMismatchError):
             # A genuinely signal-free raw frame, or the frame's actual
@@ -1197,7 +1252,7 @@ class LiveViewWidget(QWidget):
 
         self._image_item.setImage(processed.image)
         self._main_plot.setRange(
-            xRange=self._main_plot_x_extent, yRange=self._roi_control.roi_bounds_mm(), padding=0
+            xRange=self._current_x_extent(), yRange=self._roi_control.roi_bounds_mm(), padding=0
         )
 
         # "Central wavelength of the currently-valid columns" -- see

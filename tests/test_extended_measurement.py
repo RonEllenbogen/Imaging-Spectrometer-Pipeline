@@ -201,6 +201,7 @@ class TestExtendedMeasurementScreenSmoke:
             "Run Configuration",
             "Acquisition Settings",
             "Spatial ROI",
+            "Spectral ROI",
             "Fit Degree",
             "Combined Result",
         } <= titles
@@ -219,6 +220,7 @@ class TestExtendedMeasurementScreenSmoke:
         assert isinstance(widget._exposure_spin, QDoubleSpinBox)
         assert isinstance(widget._gain_spin, QDoubleSpinBox)
         assert widget._roi_control is not None
+        assert widget._spectral_roi_control is not None
         assert widget._degree_selector.count() == len(DEGREE_CHOICES)
         assert widget._n_shots_label.text() != ""
         assert widget._spatial_dispersion_label.text() != ""
@@ -375,6 +377,34 @@ class TestExtendedMeasurementRealMeasurement:
             assert len(widget._residual_scatter.data) > 0
             # Acquisition Settings left untouched -> no camera reconfigure.
             assert stream.exposure_us == pytest.approx(REALISTIC_FIXTURE_EXPOSURE_US)
+        finally:
+            stream.stop()
+
+    def test_column_bounds_are_applied_to_real_measurement(self, qtbot, monkeypatch):
+        # Regression test for the "Run Measurement" wiring of
+        # column_bounds=self._spectral_roi_control.column_bounds(): narrow
+        # the spectral ROI before running, then confirm every shot's
+        # centroid columns actually fall inside the window -- i.e.
+        # apply_spectral_roi()'s valid_columns override reached
+        # extract_centroids(), not just the unmasked automatic SNR gate.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._spectral_roi_control._min_spin.setValue(300)
+            widget._spectral_roi_control._max_spin.setValue(1000)
+
+            widget._run_button.click()
+
+            assert widget._shot_results is not None
+            assert widget._measurement_columns.size > 0
+            assert np.all(
+                (widget._measurement_columns >= 300) & (widget._measurement_columns < 1000)
+            )
         finally:
             stream.stop()
 

@@ -1359,16 +1359,48 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   `apply_roi()`'s real zero-not-crop behavior for visual consistency. Now that
   `live_view.py`'s polling loop is real (see above), this control's bounds are
   genuinely fed into every tick's `run_preprocessing(roi_bounds=...)` call, not
-  just used for display cropping. Spectral-column signal-threshold range entry
-  (the other half of the original combined to-do item below) is still open.
-- **GUI live view: manual ROI entry -- spectral axis.** Add a field on the
-  live-view screen for the user to manually enter a min/max spectral-column
-  range, based on what they see in the live feed, overriding the automatic
-  per-column SNR gate currently in place (`preprocessing/steps/signal_threshold.py`).
-  Falls back to the automatic mechanism when left at its full-range default,
-  same UX pattern as the spatial control just built above (which this should
-  probably reuse the shape of, e.g. a sibling `SpectralROIControl` or a shared
-  base, rather than a from-scratch design).
+  just used for display cropping.
+- ~~**GUI live view: manual ROI entry -- spectral axis.**~~ **Done.** New
+  `preprocessing/steps/spectral_roi.py`: `apply_spectral_roi(frame, column_min,
+  column_max)`, shaped like `apply_signal_threshold()` rather than `apply_roi()`
+  -- it only ever *overrides* `ProcessedFrame.valid_columns` (every column in
+  `[column_min, column_max)` forced valid regardless of its actual SNR, every
+  column outside forced invalid regardless of signal strength), never zeroes
+  `frame.image`, matching the "overriding the automatic SNR gate" framing this
+  item was originally scoped around. `run_preprocessing()` gained an optional
+  `column_bounds` parameter, applied right after `apply_signal_threshold()`;
+  `None` (the default) leaves the automatic gate as the sole word on validity,
+  unchanged from before this parameter existed. `gui/roi_control.py` gained
+  `SpectralROIControl(QGroupBox)`, the sibling this item anticipated -- min/max
+  `QSpinBox` fields, but in raw **pixel-column** units rather than nm/mm:
+  unlike the spatial scale factor, `analysis.interfaces.WavelengthAxis` is a
+  general degree-N polynomial fit with no inverse method, and may not exist at
+  all yet, so pixel-column bounds are the only representation always
+  well-defined; a read-only wavelength hint is shown alongside when a
+  `WavelengthAxis` is loaded, computed via the one direction that's always
+  defined (`wavelength_nm()`). Distinguishes `column_window()` (always the
+  current bounds, for viewport zooming) from `column_bounds()` (`None` at the
+  full-range default) -- the full range must map to `None`, not the literal
+  `(0, n_columns)` tuple, since passing that through as an explicit override
+  would force every column valid and silently disable the SNR gate instead of
+  leaving it in place. Wired into both `live_view.py` and
+  `extended_measurement.py`'s side panels, alongside the existing
+  `SpatialROIControl`. In `live_view.py`, narrowing the window actually zooms
+  the plot's x-axis to match (`_current_x_extent()`, the spectral counterpart
+  to the spatial control's y-axis zoom) and drops out-of-window scatter/fit
+  points on every tick, both for the placeholder feed (before any real frame
+  has landed) and for real per-tick data (via `column_bounds=` on
+  `run_preprocessing()`), mirroring `SpatialROIControl`'s existing before/
+  after-real-data handling exactly. In `extended_measurement.py`, the current
+  value is read once per "Run Measurement" click (same timing as the spatial
+  control's `roi_bounds`) -- deliberately NOT wired to a live re-render like
+  the spatial control is: since a spectral-ROI change alters which columns are
+  even analyzed (`valid_columns`, gating `extract_centroids()` itself) rather
+  than just zeroing pixels post hoc, there is no way to retroactively apply a
+  change to an already-completed run's `shot_results` without either
+  fabricating data for columns never analyzed (widening) or misrepresenting
+  how many columns went into the combined result (narrowing) -- a change here
+  takes effect on the *next* Run Measurement, not immediately.
 - ~~**`analysis/`: proper internal uncertainty on ζ ("spatial dispersion" in the GUI) for
   degree > 1.**~~ **Done.** `SpatialDispersionFitResult` gained a `coefficient_covariance`
   field (the full (degree+1, degree+1) matrix, not just `coefficient_sigma`'s diagonal)

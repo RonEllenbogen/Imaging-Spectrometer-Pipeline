@@ -39,7 +39,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QGroupBox  # noqa: E402
 
 from pipeline.acquisition import (  # noqa: E402
-    CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
+    CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE, SPECTRAL_AXIS,
 )
 from pipeline.analysis import SensorNoiseModel, SpatialDispersionFitResult  # noqa: E402
 from pipeline.calibration.sensor import ConversionGainRecord  # noqa: E402
@@ -69,7 +69,7 @@ from pipeline.gui.live_view import (  # noqa: E402
     wavelength_axis_label,
 )
 from pipeline.gui.formatting import format_value_with_uncertainty  # noqa: E402
-from pipeline.gui.roi_control import SpatialROIControl  # noqa: E402
+from pipeline.gui.roi_control import SpatialROIControl, SpectralROIControl  # noqa: E402
 
 # gui_fixture_helpers.py is a plain sibling module in this directory (no
 # tests/__init__.py, so pytest's rootless import mode puts tests/ on
@@ -785,6 +785,89 @@ class TestSpatialROIControl:
         assert widget.roi_bounds_px() == (expected_min_px, expected_max_px)
 
 
+class TestSpectralROIControl:
+
+    def _make_widget(
+        self, qtbot, n_columns: int = 1920, wavelength_axis=None,
+    ) -> SpectralROIControl:
+        widget = SpectralROIControl(n_columns=n_columns, wavelength_axis=wavelength_axis)
+        qtbot.addWidget(widget)
+        widget.show()
+        qtbot.waitExposed(widget)
+        return widget
+
+    def test_default_construction_spans_full_range(self, qtbot):
+        widget = self._make_widget(qtbot, n_columns=1920)
+        assert widget.column_window() == (0, 1920)
+
+    def test_column_bounds_is_none_at_full_range_default(self, qtbot):
+        # The full-range default must NOT be passed through to
+        # run_preprocessing() as an explicit override -- see class
+        # docstring for why that would silently disable the automatic
+        # SNR gate rather than leaving it in place.
+        widget = self._make_widget(qtbot, n_columns=1920)
+        assert widget.column_bounds() is None
+
+    def test_column_bounds_matches_window_once_narrowed(self, qtbot):
+        widget = self._make_widget(qtbot, n_columns=1920)
+        widget._min_spin.setValue(100)
+        widget._max_spin.setValue(300)
+        assert widget.column_bounds() == (100, 300)
+        assert widget.column_window() == (100, 300)
+
+    def test_valid_change_updates_bounds_and_emits_signal(self, qtbot):
+        widget = self._make_widget(qtbot)
+        received = []
+        widget.roi_changed.connect(lambda cmin, cmax: received.append((cmin, cmax)))
+
+        widget._min_spin.setValue(50)
+
+        assert widget.column_window()[0] == 50
+        assert len(received) == 1
+        assert received[0] == (50, widget._max_spin.value())
+
+    def test_invalid_change_shows_error_and_reverts_without_emitting(self, qtbot):
+        widget = self._make_widget(qtbot)
+        last_valid = widget._last_valid_bounds
+        received = []
+        widget.roi_changed.connect(lambda cmin, cmax: received.append((cmin, cmax)))
+
+        current_max = widget._max_spin.value()
+        widget._min_spin.setValue(current_max)
+
+        assert widget._error_label.isVisible() is True
+        assert received == []
+        assert widget.column_window() == last_valid
+
+    def test_reset_button_restores_full_range_and_emits_signal(self, qtbot):
+        widget = self._make_widget(qtbot, n_columns=1920)
+        widget._min_spin.setValue(50)
+
+        received = []
+        widget.roi_changed.connect(lambda cmin, cmax: received.append((cmin, cmax)))
+        widget._reset_button.click()
+
+        assert widget.column_window() == (0, 1920)
+        assert received == [(0, 1920)]
+        assert widget._error_label.isVisible() is False
+
+    def test_no_wavelength_axis_hides_hint(self, qtbot):
+        widget = self._make_widget(qtbot, wavelength_axis=None)
+        assert widget._wavelength_hint_label.isVisible() is False
+
+    def test_wavelength_axis_shows_and_updates_hint(self, qtbot):
+        axis = _FakeWavelengthAxis()
+        widget = self._make_widget(qtbot, n_columns=1920, wavelength_axis=axis)
+        assert widget._wavelength_hint_label.isVisible() is True
+
+        widget._min_spin.setValue(100)
+        widget._max_spin.setValue(200)
+
+        # axis.wavelength_nm([100, 199]) == [501.0, 501.99]
+        assert "501.0" in widget._wavelength_hint_label.text()
+        assert "502.0" in widget._wavelength_hint_label.text()
+
+
 # ---------------------------------------------------------------------------
 # live_view.py -- LiveViewWidget wired to SpatialROIControl (pytest-qt, offscreen)
 # ---------------------------------------------------------------------------
@@ -818,6 +901,56 @@ class TestLiveViewSpatialROI:
 
         assert len(y_after) < count_before
         assert np.all((y_after >= min_mm) & (y_after <= max_mm))
+
+
+# ---------------------------------------------------------------------------
+# live_view.py -- LiveViewWidget wired to SpectralROIControl (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestLiveViewSpectralROI:
+
+    def test_roi_change_narrows_plot_x_range(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+
+        widget._spectral_roi_control._min_spin.setValue(300)
+        widget._spectral_roi_control._max_spin.setValue(1000)
+
+        expected_x_range = widget._current_x_extent()
+        x_range = widget._main_plot.viewRange()[0]
+        assert tuple(x_range) == pytest.approx(expected_x_range)
+
+    def test_roi_change_drops_out_of_window_scatter_points(self, qtbot):
+        widget = _make_live_view_widget(qtbot)
+
+        columns_before = widget._placeholder_columns
+        count_before = len(widget._scatter.getData()[0])
+
+        # Median of the full-range placeholder columns -- guaranteed to
+        # cut roughly half the points (those below it) while leaving the
+        # rest, mirroring TestLiveViewSpatialROI's own median trick.
+        column_min = int(np.median(columns_before))
+        widget._spectral_roi_control._min_spin.setValue(column_min)
+        column_max = widget._spectral_roi_control.column_window()[1]
+
+        x_after, _ = widget._scatter.getData()
+
+        assert len(x_after) < count_before
+        assert len(x_after) > 0
+
+    def test_narrowing_then_widening_back_to_full_range_restores_points(self, qtbot):
+        # Regression check for column_bounds() vs. column_window(): after
+        # a Reset, the control must be back at the true full-range default
+        # (column_bounds() is None again), not merely a wide-but-still-
+        # explicit override.
+        widget = _make_live_view_widget(qtbot)
+        count_before = len(widget._scatter.getData()[0])
+
+        widget._spectral_roi_control._min_spin.setValue(300)
+        assert len(widget._scatter.getData()[0]) < count_before
+
+        widget._spectral_roi_control._reset_button.click()
+        assert widget._spectral_roi_control.column_bounds() is None
+        assert len(widget._scatter.getData()[0]) == count_before
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +1047,29 @@ class TestLiveViewRealUpdateLoop:
             return image is not None and np.all(image[:row_min_px, :] == 0)
 
         qtbot.waitUntil(_top_rows_zeroed, timeout=3000)
+
+    def test_column_bounds_are_applied_to_real_preprocessing(self, qtbot, started_camera_stream):
+        # Regression test for the live-loop's column_bounds=self.
+        # _spectral_roi_control.column_bounds() wiring: narrow the spectral
+        # ROI, then confirm a real tick's scatter only contains points
+        # inside the resulting x-extent -- i.e. apply_spectral_roi()'s
+        # valid_columns override actually reached extract_centroids(), not
+        # just the unmasked automatic SNR gate.
+        widget = _make_real_live_view_widget(qtbot, started_camera_stream)
+        widget.show()
+        qtbot.waitExposed(widget)
+
+        qtbot.waitUntil(lambda: widget._consecutive_skips == 0 and widget._scatter.getData()[0].size > 0, timeout=3000)
+
+        widget._spectral_roi_control._min_spin.setValue(300)
+        widget._spectral_roi_control._max_spin.setValue(1000)
+        x_min, x_max = widget._current_x_extent()
+
+        def _scatter_within_window() -> bool:
+            x_values, _ = widget._scatter.getData()
+            return x_values.size > 0 and np.all((x_values >= x_min) & (x_values <= x_max))
+
+        qtbot.waitUntil(_scatter_within_window, timeout=3000)
 
     def test_insufficient_signal_state_after_consecutive_skips(self, qtbot, started_camera_stream):
         # An enormous background_sigma pushes every column's SNR below
