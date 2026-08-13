@@ -1157,6 +1157,58 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   standard fit-quality check, and a natural fit for extended measurement's already-static
   (non-live-updating) graph. Not needed for the live single-shot view, which redraws too fast for a
   residual panel to be readable.
+- **"Save Record" — a complete, git-committed snapshot of one Run Measurement result.** New
+  `gui/measurement_record.py`: `save_measurement_record()` writes every preprocessed frame's stack plus
+  first/middle/last individual shots (compressed `.npz` + quick-look `.png` — not every shot, given a
+  default run is 20 and up to 1000; a stack is cheap but isn't a quantity this codebase's analysis ever
+  actually computes, so the three individual frames are kept too, for real traceable per-shot data),
+  every shot's centroid data, every shot's fit at every degree (coefficients/sigma/covariance/reduced
+  chi-squared/residuals), the combined result at every degree (not just whichever is on screen), the
+  spatial+spectral ROI actually used, and the calibration artifacts in effect (copied byte-for-byte from
+  `DEFAULT_ARTIFACT_DIR`, not reconstructed from in-memory objects — simpler and exact regardless of
+  which fields a given in-memory object happens to retain) — to
+  `data/measurements/extended_measurement_<timestamp>/`. Deliberately a separate, explicit button from
+  "Run Measurement" (disabled until a measurement exists) — not every trial run should be permanently
+  saved. Pure Python, no Qt import at all (`matplotlib`'s `Agg` backend only), directly unit-testable
+  without a `QApplication`, matching `roi_control.py`/`formatting.py`'s existing separation of pure
+  logic from Qt wiring. Imported *locally* inside `_on_save_record_clicked()`, not at module scope —
+  `measurement_record.py` itself imports two functions back from `extended_measurement.py` at its own
+  module scope (see below), so a module-scope import in the other direction would be circular; mirrors
+  `calibration/spectral/workflow.py`'s existing local-import pattern for the identical reason.
+
+  **A correctness fix this surfaced**: neither ROI's value was previously stashed anywhere —
+  `_on_run_clicked()` read both controls fresh and used them immediately, with nothing remembering what
+  was actually used once the run finished. Since "Save Record" is a separate, later click, re-reading
+  the live controls at save time could report the *wrong* ROI for an already-completed measurement if
+  either control was edited in between (worse for the spectral one, which actually gates which columns
+  get analyzed — a changed value wouldn't even match the columns really present in `shot_results`).
+  Fixed by capturing both (`self._measurement_roi_bounds_px`/`_measurement_column_bounds`) into instance
+  state inside `_set_measurement_data()`, at the same time as `shot_results` itself — "Save Record" reads
+  only those captured values, never the live controls.
+
+  **Refactor to guarantee the saved numbers can never drift from the display**:
+  `_compute_combined_result()`'s and `_recompute_fit_and_residuals()`'s core computations were pulled out
+  into two module-level free functions in `extended_measurement.py`
+  (`compute_combined_result_for_degree()`, `compute_fit_line_and_residuals()`), with the original bound
+  methods becoming thin wrappers (behavior-preserving — full pre-existing test suite still passes
+  unmodified). `measurement_record.py` calls the *same* two functions once per degree, so every number in
+  a saved record is guaranteed identical to what the live GUI would show for that degree, not
+  independently re-derived logic that could silently drift from it.
+
+  **The saved plot** is deliberately not styled like anything else in this codebase — these may end up in
+  reports/presentations, so it follows physics-journal convention instead of this app's own dark theme:
+  serif font, Computer-Modern mathtext (no real LaTeX install required), no gridlines, ticks inward on all
+  four spines, no per-axes titles (labels only), uncertainties shown as error bars, degrees distinguished
+  by both color and linestyle (grayscale/colorblind-safe). Saved as both `.png` (quick view) and `.pdf`
+  (vector, for actual publication use). Three side-by-side subplots (one per degree — each showing the
+  same scatter against that degree's own combined-zeta line, since `combine_shots()` only ever combines a
+  single linear zeta even at degree > 1, so there is no other well-defined "combined quadratic/cubic
+  curve" to draw instead) plus one combined residual panel below (all three degrees overlaid). Each
+  subplot's ζ/χ²ᵥ annotation is placed in whichever top corner the fitted slope's sign leaves clear of the
+  data (a steep, full-range-spanning fit line means the *other* diagonal's two corners are never clear
+  regardless of slope direction), with a white background patch as a second line of defense either way —
+  a plain `ax.legend()` was tried first and rejected: a long label string anchored at a nominally-empty
+  corner still stretches back across most of the axes width, unavoidably overlapping the diagonal.
 
 **Framework: PyQt/PySide with `pyqtgraph`** specifically (not matplotlib, not Tkinter) — chosen for
 genuine high-frequency live-plotting performance at the target refresh rate, where matplotlib's redraw

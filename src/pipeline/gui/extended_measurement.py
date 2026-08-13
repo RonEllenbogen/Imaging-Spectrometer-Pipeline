@@ -115,8 +115,9 @@ from pipeline.analysis import (
 from pipeline.analysis.interfaces import WavelengthAxis
 from pipeline.calibration.sensor import ConversionGainRecord
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration
+from pipeline.cli.calibration import DEFAULT_ARTIFACT_DIR
 from pipeline.preprocessing import (
-    CalibrationSet, NoSignalError, SettingsMismatchError, run_preprocessing,
+    CalibrationSet, NoSignalError, ProcessedFrame, SettingsMismatchError, run_preprocessing,
 )
 
 from pipeline.gui.calibration_dialogs import show_camera_error_dialog
@@ -300,8 +301,13 @@ class ExtendedMeasurementScreen(QWidget):
         # None until "Run Measurement" completes at least once -- every
         # display method below treats this as "nothing to show yet"
         # rather than fabricating placeholder numbers (see
-        # _refresh_measurement_display()).
+        # _refresh_measurement_display()). processed_frames/roi_bounds_px/
+        # column_bounds are set alongside shot_results by
+        # _set_measurement_data() -- see that method's docstring.
         self._shot_results: list[ShotAnalysisResult] | None = None
+        self._processed_frames: list[ProcessedFrame] | None = None
+        self._measurement_roi_bounds_px: tuple[int, int] | None = None
+        self._measurement_column_bounds: tuple[int, int] | None = None
 
         self._apply_pyqtgraph_theme()
         self._build_ui()
@@ -370,6 +376,20 @@ class ExtendedMeasurementScreen(QWidget):
         )
         self._run_button.clicked.connect(self._on_run_clicked)
         layout.addWidget(self._run_button)
+
+        self._save_record_button = QPushButton("Save Record")
+        self._save_record_button.setFont(load_bundled_font(10, bold=True))
+        self._save_record_button.setToolTip(
+            "Writes a complete, self-contained record of the most recent Run Measurement "
+            "result (frames, centroids, fits at every degree, calibrations used, ROI, and "
+            "a journal-style plot) to data/measurements/ -- a deliberately separate, "
+            "explicit action from Run Measurement, so trial runs aren't all permanently saved."
+        )
+        # Disabled until a measurement has actually completed -- see
+        # _on_run_clicked()'s end and __init__'s self._shot_results=None.
+        self._save_record_button.setEnabled(False)
+        self._save_record_button.clicked.connect(self._on_save_record_clicked)
+        layout.addWidget(self._save_record_button)
 
         return group
 
@@ -763,15 +783,20 @@ class ExtendedMeasurementScreen(QWidget):
         overlay for the currently-selected degree.
 
         n_shots is read from self._n_shots_spin. roi_bounds/column_bounds
-        are read fresh from self._roi_control/self._spectral_roi_control
-        for each frame (matching LiveViewWidget-style per-call reads
-        elsewhere in this screen), even though neither can actually change
-        mid-acquisition -- this call blocks the Qt event loop for its
-        entire duration, so no user interaction with either ROI control
-        can happen until it returns. See _build_spectral_roi_group()'s
-        docstring for why, unlike the spatial ROI, this is also the ONLY
-        point at which self._spectral_roi_control's current value takes
-        effect -- there is no live re-render on a later edit.
+        are read once from self._roi_control/self._spectral_roi_control
+        before the acquisition loop and reused for every frame -- this
+        call blocks the Qt event loop for its entire duration, so no user
+        interaction with either ROI control can happen until it returns,
+        making a single read equivalent to LiveViewWidget-style per-call
+        reads elsewhere in this screen. Both are also stashed as
+        self._measurement_roi_bounds_px/_measurement_column_bounds (see
+        _set_measurement_data()) -- "Save Record" reads those captured
+        values, not the live controls, since it runs later as a separate
+        click and either control could have been edited in between. See
+        _build_spectral_roi_group()'s docstring for why, unlike the
+        spatial ROI, this is also the ONLY point at which
+        self._spectral_roi_control's current value takes effect -- there
+        is no live re-render on a later edit.
 
         Unlike LiveViewWidget's continuous polling loop -- where a single
         bad frame is just skipped and the next tick tries again --
@@ -803,13 +828,16 @@ class ExtendedMeasurementScreen(QWidget):
             show_camera_error_dialog(self, str(error))
             return
 
+        roi_bounds_px = self._roi_control.roi_bounds_px()
+        column_bounds = self._spectral_roi_control.column_bounds()
+
         shot_results: list[ShotAnalysisResult] = []
+        processed_frames: list[ProcessedFrame] = []
         for frame in frames:
             try:
                 processed, _saturation_result = run_preprocessing(
                     frame, self._calibration_set,
-                    roi_bounds=self._roi_control.roi_bounds_px(),
-                    column_bounds=self._spectral_roi_control.column_bounds(),
+                    roi_bounds=roi_bounds_px, column_bounds=column_bounds,
                 )
                 shot_results.append(
                     analyze_shot(
@@ -817,6 +845,7 @@ class ExtendedMeasurementScreen(QWidget):
                         degrees=DEGREE_CHOICES,
                     )
                 )
+                processed_frames.append(processed)
             except (NoSignalError, SettingsMismatchError, InsufficientDataError) as error:
                 QMessageBox.warning(
                     self,
@@ -826,8 +855,49 @@ class ExtendedMeasurementScreen(QWidget):
                 )
                 return
 
-        self._set_measurement_data(shot_results)
+        self._set_measurement_data(shot_results, processed_frames, roi_bounds_px, column_bounds)
         self._refresh_measurement_display()
+        self._save_record_button.setEnabled(True)
+
+    def _on_save_record_clicked(self) -> None:
+
+        '''
+        "Save Record" handler: writes a complete record of the most
+        recent Run Measurement result via
+        measurement_record.save_measurement_record() -- see that
+        module's docstring for exactly what gets saved. Only enabled
+        once self._shot_results exists (see _on_run_clicked()'s end), so
+        there is always a real measurement to save by the time this can
+        be clicked.
+
+        Imports measurement_record locally, not at module scope --
+        measurement_record.py imports compute_combined_result_for_degree()/
+        compute_fit_line_and_residuals()/FIT_CURVE_N_POINTS back from this
+        module, so importing it at module scope here would be a circular
+        import; see measurement_record.py's own module docstring for the
+        full reasoning. No CameraError/hardware failure mode exists here
+        (nothing about saving touches the camera), but any unexpected
+        exception (e.g. a disk-full/permissions error writing to
+        data/measurements/) still gets a QMessageBox.warning() rather than
+        propagating into the Qt event loop, matching this file's existing
+        defensive-catch style for every other button handler.
+        '''
+
+        from .measurement_record import save_measurement_record
+
+        try:
+            record_dir = save_measurement_record(
+                self._shot_results, self._processed_frames, self._calibration_set,
+                self._wavelength_axis, self._position_calibration, self._axis_for_fit,
+                self._evaluated_at_wavelength_nm(), self._measurement_roi_bounds_px,
+                self._measurement_column_bounds, self._exposure_spin.value(), self._gain_spin.value(),
+                artifact_dir=DEFAULT_ARTIFACT_DIR,
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "Save Record Failed", f"Could not save the record: {error}")
+            return
+
+        QMessageBox.information(self, "Record Saved", f"Saved measurement record to {record_dir}")
 
     def _maybe_reconfigure_camera_stream(self) -> None:
 
@@ -884,21 +954,41 @@ class ExtendedMeasurementScreen(QWidget):
 
     # -- measurement data + display ---------------------------------------
 
-    def _set_measurement_data(self, shot_results: list[ShotAnalysisResult]) -> None:
+    def _set_measurement_data(
+        self,
+        shot_results: list[ShotAnalysisResult],
+        processed_frames: list[ProcessedFrame],
+        roi_bounds_px: tuple[int, int],
+        column_bounds: tuple[int, int] | None,
+    ) -> None:
 
         '''
-        Stashes one Run Measurement's per-shot analysis results and the
-        degree-independent flattened (shot, column) arrays derived from
-        them -- every raw centroid point across every shot, concatenated,
-        never averaged per column (see module docstring for why). Degree-
-        dependent quantities (the combined zeta, fit-curve intercept,
-        residuals) are computed on demand by _refresh_measurement_display()
-        instead of cached here, so switching the degree selector or
-        editing the evaluate-at reference point always reflects the
-        current selection.
+        Stashes one Run Measurement's per-shot analysis results, the raw
+        preprocessed frames each one came from, and the ROI values that
+        were actually used to produce them -- plus the degree-independent
+        flattened (shot, column) arrays derived from shot_results, every
+        raw centroid point across every shot concatenated, never averaged
+        per column (see module docstring for why). Degree-dependent
+        quantities (the combined zeta, fit-curve intercept, residuals) are
+        computed on demand by _refresh_measurement_display() instead of
+        cached here, so switching the degree selector or editing the
+        evaluate-at reference point always reflects the current selection.
+
+        processed_frames/roi_bounds_px/column_bounds exist purely so
+        "Save Record" (measurement_record.save_measurement_record()) can
+        later write an exact record of this specific run -- roi_bounds_px/
+        column_bounds are captured here rather than re-read from
+        self._roi_control/self._spectral_roi_control at save time
+        specifically because either control could be edited in the gap
+        between "Run Measurement" and a later "Save Record" click, which
+        would otherwise report the wrong ROI for this measurement (see
+        _on_run_clicked()'s docstring).
         '''
 
         self._shot_results = shot_results
+        self._processed_frames = processed_frames
+        self._measurement_roi_bounds_px = roi_bounds_px
+        self._measurement_column_bounds = column_bounds
 
         columns = np.concatenate([result.centroids.columns for result in shot_results])
         x0_px = np.concatenate([result.centroids.x0 for result in shot_results])
@@ -923,42 +1013,12 @@ class ExtendedMeasurementScreen(QWidget):
 
     def _compute_combined_result(self, degree: int) -> CombinedSpatialDispersionResult:
 
-        '''
-        Degree 1: combine_shots() directly on each shot's fitted linear
-        zeta (coefficients[1]) and its uncertainty (coefficient_sigma[1])
-        -- exactly what combine_shots() was built for (see its own
-        docstring's parameter description).
+        '''See compute_combined_result_for_degree() -- this just supplies self._shot_results
+        and the currently-entered evaluate-at reference point.'''
 
-        Degree > 1: combine_shots() only combines the linear fit by design
-        (see module docstring) -- there is no per-shot "coefficients[1]"
-        that means the same thing at degree > 1. Instead, each shot's own
-        zeta(wavelength_ref)/sigma_zeta(wavelength_ref) (a well-defined
-        scalar at any degree, using that shot's full coefficient_
-        covariance) is evaluated at the reference point, and those
-        scalars are combined via the exact same combine_shots() call --
-        it is generic over any (value, sigma) pairs, not specific to raw
-        fit coefficients.
-        '''
-
-        if degree == 1:
-            zeta_values = np.array(
-                [result.fits[1].coefficients[1] for result in self._shot_results]
-            )
-            sigma_zeta_values = np.array(
-                [result.fits[1].coefficient_sigma[1] for result in self._shot_results]
-            )
-        else:
-            wavelength_ref_nm = np.array([self._evaluated_at_wavelength_nm()])
-            zeta_values = np.array([
-                float(result.fits[degree].zeta(wavelength_ref_nm)[0])
-                for result in self._shot_results
-            ])
-            sigma_zeta_values = np.array([
-                float(result.fits[degree].sigma_zeta(wavelength_ref_nm)[0])
-                for result in self._shot_results
-            ])
-
-        return combine_shots(zeta_values, sigma_zeta_values)
+        return compute_combined_result_for_degree(
+            self._shot_results, degree, self._evaluated_at_wavelength_nm(),
+        )
 
     def _evaluated_at_wavelength_nm(self) -> float:
 
@@ -1037,48 +1097,30 @@ class ExtendedMeasurementScreen(QWidget):
 
         '''
         Builds the drawn fit-curve/residual arrays for the currently-
-        combined zeta: a single straight line of slope zeta_combined (in
-        pixel/nm units, matching analyze_shot()'s pixel-unit convention),
-        anchored through the flattened (shot, column) data by a plain
-        weighted-least-squares intercept -- the best-fit offset given that
-        fixed, already-combined slope (see module docstring for why this
-        is the only combination-consistent choice at any degree).
+        combined zeta, via compute_fit_line_and_residuals() (pixel units;
+        see that function's docstring for the weighted-least-squares
+        intercept it's anchored by), then converts the curve/residuals to
+        mm for display -- the one step that function deliberately leaves
+        to its caller, since it has no reason to depend on
+        self._position_calibration.
 
-        Also stashes that intercept (and its uncertainty) as
+        Also stashes the fit's intercept (and its uncertainty) as
         self._measurement_intercept_px/_intercept_sigma_px, for
         _refresh_measurement_display()'s Coefficients row -- c0 in the
         (c0, c1=zeta_combined) pair a straight line is defined by.
-        intercept_sigma_px is the standard weighted-mean standard error,
-        sqrt(1 / sum(weights)) -- conditional on zeta_combined as given
-        (fixed), not propagating zeta_combined's own uncertainty into it.
-        That mirrors the intercept's own two-stage derivation above (a
-        dependent second step after zeta_combined has already been
-        combined, not a joint two-parameter fit), so reporting its
-        uncertainty on that same conditional basis is consistent, not an
-        extra approximation layered on top.
         '''
 
-        weights = 1.0 / self._measurement_sigma_x0_px ** 2
-        sum_weights = np.sum(weights)
-        intercept_px = float(
-            np.sum(
-                weights * (self._measurement_x0_px - zeta_combined * self._measurement_wavelength_nm)
-            ) / sum_weights
+        intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px = compute_fit_line_and_residuals(
+            self._measurement_x0_px, self._measurement_sigma_x0_px, self._measurement_wavelength_nm,
+            zeta_combined,
+            (float(self._measurement_x_values.min()), float(self._measurement_x_values.max())),
+            FIT_CURVE_N_POINTS,
         )
-        intercept_sigma_px = float(np.sqrt(1.0 / sum_weights))
 
         self._measurement_intercept_px = intercept_px
         self._measurement_intercept_sigma_px = intercept_sigma_px
 
-        fit_x = np.linspace(
-            self._measurement_x_values.min(), self._measurement_x_values.max(), FIT_CURVE_N_POINTS
-        )
-        fit_y_px = intercept_px + zeta_combined * fit_x
         fit_y_mm, _ = self._convert_to_mm(fit_y_px, np.zeros_like(fit_y_px))
-
-        residual_px = self._measurement_x0_px - (
-            intercept_px + zeta_combined * self._measurement_wavelength_nm
-        )
         residual_mm, _ = self._convert_to_mm(residual_px, np.zeros_like(residual_px))
 
         self._measurement_fit_x = fit_x
@@ -1176,10 +1218,123 @@ class ExtendedMeasurementScreen(QWidget):
 
 # Functions
 
+def compute_combined_result_for_degree(
+    shot_results: list[ShotAnalysisResult], degree: int, wavelength_ref_nm: float,
+) -> CombinedSpatialDispersionResult:
+
+    '''
+    Combines shot_results' per-shot spatial dispersion at degree, exactly
+    as ExtendedMeasurementScreen._compute_combined_result() does (that
+    method is now a thin wrapper over this) -- pulled out as a free
+    function so measurement_record.py's saved record can compute the same
+    combined result for every degree, not just whichever one is currently
+    selected on screen, using the exact same code path rather than
+    independently re-derived logic that could silently drift from it.
+
+    Degree 1: combine_shots() directly on each shot's fitted linear zeta
+    (coefficients[1]) and its uncertainty (coefficient_sigma[1]) --
+    exactly what combine_shots() was built for (see its own docstring's
+    parameter description).
+
+    Degree > 1: combine_shots() only combines the linear fit by design
+    (see module docstring) -- there is no per-shot "coefficients[1]" that
+    means the same thing at degree > 1. Instead, each shot's own
+    zeta(wavelength_ref_nm)/sigma_zeta(wavelength_ref_nm) (a well-defined
+    scalar at any degree, using that shot's full coefficient_covariance)
+    is evaluated at the reference point, and those scalars are combined
+    via the exact same combine_shots() call -- it is generic over any
+    (value, sigma) pairs, not specific to raw fit coefficients.
+    wavelength_ref_nm is ignored at degree 1 (accepted unconditionally
+    anyway, so callers don't need a degree-dependent call shape).
+    '''
+
+    if degree == 1:
+        zeta_values = np.array(
+            [result.fits[1].coefficients[1] for result in shot_results]
+        )
+        sigma_zeta_values = np.array(
+            [result.fits[1].coefficient_sigma[1] for result in shot_results]
+        )
+    else:
+        wavelength_ref = np.array([wavelength_ref_nm])
+        zeta_values = np.array([
+            float(result.fits[degree].zeta(wavelength_ref)[0])
+            for result in shot_results
+        ])
+        sigma_zeta_values = np.array([
+            float(result.fits[degree].sigma_zeta(wavelength_ref)[0])
+            for result in shot_results
+        ])
+
+    return combine_shots(zeta_values, sigma_zeta_values)
+
+
+def compute_fit_line_and_residuals(
+    x0_px: np.ndarray, sigma_x0_px: np.ndarray, wavelength_nm: np.ndarray, zeta_combined: float,
+    x_range: tuple[float, float], n_points: int,
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
+
+    '''
+    The drawn fit-curve/residual arrays for a given combined zeta, in
+    pixel units throughout: a single straight line of slope zeta_combined
+    (matching analyze_shot()'s pixel-unit convention), anchored through
+    the flattened (shot, column) data by a plain weighted-least-squares
+    intercept -- the best-fit offset given that fixed, already-combined
+    slope (see module docstring for why this is the only combination-
+    consistent choice at any degree). Pulled out as a free function for
+    the same reason as compute_combined_result_for_degree() above --
+    ExtendedMeasurementScreen._recompute_fit_and_residuals() is now a thin
+    wrapper over this plus its own mm-conversion (deliberately left to the
+    caller: this function has no reason to depend on a
+    ScaleFactorPositionCalibration).
+
+    Parameters
+    ----------
+    x0_px, sigma_x0_px, wavelength_nm
+        Every (shot, column) centroid's position/uncertainty (px) and
+        wavelength (nm), flattened across shots -- same arrays
+        ExtendedMeasurementScreen._set_measurement_data() builds.
+    zeta_combined
+        The already-combined slope (px/nm) this line is anchored at.
+    x_range
+        (min, max) wavelength/x-axis value the returned fit_x should span.
+    n_points
+        Number of points sampled along fit_x.
+
+    Returns
+    -------
+    tuple
+        (intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px).
+        intercept_sigma_px is the standard weighted-mean standard error,
+        sqrt(1 / sum(weights)) -- conditional on zeta_combined as given
+        (fixed), not propagating zeta_combined's own uncertainty into it.
+        That mirrors the intercept's own two-stage derivation (a dependent
+        second step after zeta_combined has already been combined, not a
+        joint two-parameter fit), so reporting its uncertainty on that
+        same conditional basis is consistent, not an extra approximation
+        layered on top.
+    '''
+
+    weights = 1.0 / sigma_x0_px ** 2
+    sum_weights = np.sum(weights)
+    intercept_px = float(
+        np.sum(weights * (x0_px - zeta_combined * wavelength_nm)) / sum_weights
+    )
+    intercept_sigma_px = float(np.sqrt(1.0 / sum_weights))
+
+    fit_x = np.linspace(x_range[0], x_range[1], n_points)
+    fit_y_px = intercept_px + zeta_combined * fit_x
+
+    residual_px = x0_px - (intercept_px + zeta_combined * wavelength_nm)
+
+    return intercept_px, intercept_sigma_px, fit_x, fit_y_px, residual_px
+
 
 __all__ = [
     "ExtendedMeasurementScreen",
     "DEFAULT_N_SHOTS",
     "MIN_N_SHOTS",
     "MAX_N_SHOTS",
+    "compute_combined_result_for_degree",
+    "compute_fit_line_and_residuals",
 ]

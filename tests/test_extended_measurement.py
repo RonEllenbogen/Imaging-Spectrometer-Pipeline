@@ -27,6 +27,7 @@ hardware-only tests.
 import dataclasses
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -47,10 +48,14 @@ from pipeline.acquisition import (  # noqa: E402
 from pipeline.analysis import InsufficientDataError, SensorNoiseModel  # noqa: E402
 from pipeline.calibration.shared import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
+from pipeline.cli.calibration import DEFAULT_ARTIFACT_DIR  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 from pipeline.gui.extended_measurement import (  # noqa: E402
     DEFAULT_N_SHOTS,
+    FIT_CURVE_N_POINTS,
     ExtendedMeasurementScreen,
+    compute_combined_result_for_degree,
+    compute_fit_line_and_residuals,
 )
 from pipeline.gui.formatting import format_value_with_uncertainty, MICRONS_PER_MM  # noqa: E402
 from pipeline.gui.live_view import DEFAULT_DEGREE, DEGREE_CHOICES  # noqa: E402
@@ -728,5 +733,181 @@ class TestExtendedMeasurementRealMeasurement:
             assert stream.exposure_us == pytest.approx(new_exposure_us)
             assert stream.is_running is True
             assert widget._shot_results is not None
+        finally:
+            stream.stop()
+
+
+# ---------------------------------------------------------------------------
+# extended_measurement.py -- "Save Record" (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestExtendedMeasurementSaveRecord:
+
+    def test_save_button_disabled_until_measurement_exists(self, qtbot):
+        widget = _make_extended_measurement_widget(qtbot)
+        assert widget._save_record_button.isEnabled() is False
+
+    def test_save_button_enabled_after_successful_run(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+
+            widget._run_button.click()
+
+            assert widget._save_record_button.isEnabled() is True
+        finally:
+            stream.stop()
+
+    def test_save_button_stays_enabled_after_a_later_failed_run(self, qtbot, monkeypatch):
+        # A failed re-run leaves shot_results (and therefore the ability
+        # to save the previous successful run) untouched -- see
+        # _on_run_clicked()'s own docstring ("display is left exactly as
+        # it was before this click").
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            assert widget._save_record_button.isEnabled() is True
+
+            def _raise(*a, **k):
+                raise InsufficientDataError(degree=3, n_points=4)
+
+            monkeypatch.setattr("pipeline.gui.extended_measurement.analyze_shot", _raise)
+            widget._run_button.click()
+
+            assert widget._save_record_button.isEnabled() is True
+        finally:
+            stream.stop()
+
+    def test_save_record_uses_roi_captured_at_run_time_not_live_controls(self, qtbot, monkeypatch):
+        # Regression test for the correctness fix documented in
+        # _set_measurement_data()/_on_run_clicked(): editing a ROI control
+        # after "Run Measurement" but before "Save Record" must not change
+        # what gets reported for that already-completed measurement.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.information", lambda *a, **k: None
+        )
+        save_calls = []
+
+        def _fake_save_measurement_record(*args, **kwargs):
+            save_calls.append((args, kwargs))
+            return Path("/fake/record/dir")
+
+        monkeypatch.setattr(
+            "pipeline.gui.measurement_record.save_measurement_record", _fake_save_measurement_record
+        )
+
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._spectral_roi_control._min_spin.setValue(300)
+            widget._spectral_roi_control._max_spin.setValue(1000)
+
+            widget._run_button.click()
+            run_time_roi_bounds_px = widget._measurement_roi_bounds_px
+            run_time_column_bounds = widget._measurement_column_bounds
+            assert run_time_column_bounds == (300, 1000)
+
+            # Edit the spectral ROI AFTER the run, before saving.
+            widget._spectral_roi_control._min_spin.setValue(50)
+            widget._spectral_roi_control._max_spin.setValue(1900)
+            assert widget._spectral_roi_control.column_bounds() != run_time_column_bounds
+
+            widget._save_record_button.click()
+
+            assert len(save_calls) == 1
+            args, _kwargs = save_calls[0]
+            # roi_bounds_px is save_measurement_record()'s 8th positional
+            # parameter, spectral_column_bounds its 9th.
+            assert args[7] == run_time_roi_bounds_px
+            assert args[8] == run_time_column_bounds
+        finally:
+            stream.stop()
+
+    def test_save_record_calls_through_with_current_measurement(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        info_calls = []
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.information",
+            lambda *a, **k: info_calls.append(a),
+        )
+        save_calls = []
+
+        def _fake_save_measurement_record(*args, **kwargs):
+            save_calls.append((args, kwargs))
+            return Path("/fake/record/dir")
+
+        monkeypatch.setattr(
+            "pipeline.gui.measurement_record.save_measurement_record", _fake_save_measurement_record
+        )
+
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+
+            widget._save_record_button.click()
+
+            assert len(save_calls) == 1
+            args, kwargs = save_calls[0]
+            assert args[0] is widget._shot_results
+            assert args[1] is widget._processed_frames
+            assert kwargs["artifact_dir"] == DEFAULT_ARTIFACT_DIR
+            assert len(info_calls) == 1
+            assert "/fake/record/dir" in info_calls[0][2]
+        finally:
+            stream.stop()
+
+    def test_extracted_helpers_match_widget_state(self, qtbot, monkeypatch):
+        # Confirms the free-function extraction refactor
+        # (compute_combined_result_for_degree()/compute_fit_line_and_residuals())
+        # produces exactly the same numbers the widget itself displays --
+        # calling the free functions directly and comparing against the
+        # widget's own cached state, rather than trusting that the earlier
+        # per-degree/per-coefficient tests above merely still pass.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream(slope_px_per_col=0.01, seed=11)
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+
+            combined = compute_combined_result_for_degree(
+                widget._shot_results, 1, widget._evaluated_at_wavelength_nm()
+            )
+            widget_combined = widget._compute_combined_result(1)
+            assert combined.zeta_combined == widget_combined.zeta_combined
+            assert combined.sigma_zeta_combined == widget_combined.sigma_zeta_combined
+
+            intercept_px, intercept_sigma_px, _fit_x, _fit_y_px, _residual_px = compute_fit_line_and_residuals(
+                widget._measurement_x0_px, widget._measurement_sigma_x0_px, widget._measurement_wavelength_nm,
+                combined.zeta_combined,
+                (float(widget._measurement_x_values.min()), float(widget._measurement_x_values.max())),
+                FIT_CURVE_N_POINTS,
+            )
+            assert intercept_px == pytest.approx(widget._measurement_intercept_px)
+            assert intercept_sigma_px == pytest.approx(widget._measurement_intercept_sigma_px)
         finally:
             stream.stop()
