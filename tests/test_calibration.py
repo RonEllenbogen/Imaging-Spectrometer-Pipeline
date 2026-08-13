@@ -53,7 +53,8 @@ from pipeline.calibration.spatial import (
 import pipeline.calibration.spectral.geometric_tilt as geometric_tilt_module
 from pipeline.calibration.spectral import (
     calibrate_spectral, build_manual_spectral_calibration, WavelengthCalibrationResult,
-    GeometricTiltResult, build_geometric_tilt, save_geometric_tilt, load_geometric_tilt,
+    GeometricTiltResult, build_geometric_tilt, build_geometric_tilt_linear,
+    save_geometric_tilt, load_geometric_tilt,
     save_spectral_calibration, load_spectral_calibration,
     match_lines, run_spectral_calibration,
     diffraction_angle_rad, predicted_pixel_separation,
@@ -1184,6 +1185,98 @@ class TestBuildGeometricTilt:
     def test_record_tags_settings_and_frame_count(self):
         frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._row_shift_fn, n_frames=3)
         result = build_geometric_tilt(frames)
+        assert result.record.exposure_us == FIXTURE_EXPOSURE_US
+        assert result.record.gain_db == FIXTURE_GAIN_DB
+        assert result.record.source_frame_count == 3
+
+
+class TestBuildGeometricTiltLinear:
+
+    _PIXEL_POSITIONS = TestBuildGeometricTilt._PIXEL_POSITIONS
+
+    @staticmethod
+    def _linear_row_shift_fn(rows):
+        # Same slope scale as TestBuildGeometricTilt's own fixture
+        # (max ~1.8px over the frame) -- deliberately not a large-
+        # amplitude shift: at the extreme rows a big enough shift walks
+        # a line's window (_find_window_bounds(), MAX_WINDOW_HALF_WIDTH)
+        # far enough from the column-summed spectrum's nominal peak
+        # location to truncate part of its intensity, biasing the raw
+        # per-row centroid itself before any fitting happens -- a real
+        # property of the shared centroiding stage, not something this
+        # class is testing.
+        reference_row = CANONICAL_SHAPE[0] // 2
+        return 0.003 * (rows - reference_row)
+
+    def test_row_shift_is_exactly_linear(self):
+        # Regardless of the true underlying shape (the non-monotonic,
+        # sinusoidal one build_geometric_tilt() is exercised against
+        # above), the amendment's output must be a straight line -- that
+        # is the entire point of fitting one. Constant second difference
+        # (up to floating-point noise) is the direct test of "is a line".
+        frames = _build_tilted_lamp_frames(
+            self._PIXEL_POSITIONS, TestBuildGeometricTilt._row_shift_fn,
+        )
+        result = build_geometric_tilt_linear(frames)
+        second_difference = np.diff(result.row_shift, n=2)
+        assert np.max(np.abs(second_difference)) < 1e-9
+
+    def test_recovers_known_linear_shift(self):
+        frames = _build_tilted_lamp_frames(self._PIXEL_POSITIONS, self._linear_row_shift_fn)
+        result = build_geometric_tilt_linear(frames)
+
+        rows = np.arange(CANONICAL_SHAPE[0])
+        true_shift = self._linear_row_shift_fn(rows)
+        true_shift -= true_shift[result.reference_row]
+
+        assert np.max(np.abs(result.row_shift - true_shift)) < 0.5
+
+    def test_less_row_to_row_jitter_than_pointwise_on_a_truly_linear_shift(self):
+        '''
+        The amendment's whole motivation: on a shift that really is
+        linear, a straight-line fit should average down per-row shot
+        noise that build_geometric_tilt()'s row-by-row combination
+        (interpolation across gaps, but no cross-row smoothing where
+        lines do have coverage) leaves in place.
+        '''
+        frames = _build_tilted_lamp_frames(
+            self._PIXEL_POSITIONS, self._linear_row_shift_fn, noise_std=6.0, seed=1,
+        )
+        pointwise_result = build_geometric_tilt(frames)
+        linear_result = build_geometric_tilt_linear(frames)
+
+        rows = np.arange(CANONICAL_SHAPE[0])
+        true_shift = self._linear_row_shift_fn(rows)
+        true_shift -= true_shift[pointwise_result.reference_row]
+
+        pointwise_rmse = np.sqrt(np.mean((pointwise_result.row_shift - true_shift) ** 2))
+        linear_rmse = np.sqrt(np.mean((linear_result.row_shift - true_shift) ** 2))
+        assert linear_rmse < pointwise_rmse
+
+    def test_too_few_lines_raises(self):
+        frames = _build_tilted_lamp_frames(
+            self._PIXEL_POSITIONS[:2], TestBuildGeometricTilt._row_shift_fn,
+        )
+        with pytest.raises(LineMatchingError):
+            build_geometric_tilt_linear(frames)
+
+    def test_empty_frames_raises(self):
+        with pytest.raises(ValueError):
+            build_geometric_tilt_linear([])
+
+    def test_mismatched_settings_raises(self):
+        frames = _build_tilted_lamp_frames(
+            self._PIXEL_POSITIONS, TestBuildGeometricTilt._row_shift_fn, n_frames=1,
+        )
+        frames.append(_frame(_uniform(10), exposure_us=FIXTURE_EXPOSURE_US + 500.0))
+        with pytest.raises(ValueError):
+            build_geometric_tilt_linear(frames)
+
+    def test_record_tags_settings_and_frame_count(self):
+        frames = _build_tilted_lamp_frames(
+            self._PIXEL_POSITIONS, TestBuildGeometricTilt._row_shift_fn, n_frames=3,
+        )
+        result = build_geometric_tilt_linear(frames)
         assert result.record.exposure_us == FIXTURE_EXPOSURE_US
         assert result.record.gain_db == FIXTURE_GAIN_DB
         assert result.record.source_frame_count == 3
