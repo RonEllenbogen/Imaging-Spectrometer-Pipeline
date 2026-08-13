@@ -107,10 +107,13 @@ from pipeline.gui.theme import (
 # Constants
 
 DEFAULT_N_FRAMES = 50
-# Deliberately its own constant rather than reusing live_view.DEFAULT_DEGREE
-# (1): a spectral calibration's pixel->wavelength_nm fit needs a higher
-# baseline degree than the live view's default spatial dispersion fit.
-DEFAULT_DEGREE = 3
+# Matches live_view.DEFAULT_DEGREE (1): scripts/compare_spectral_calibration_degrees.py
+# found the quadratic/cubic coefficients statistically indistinguishable from
+# zero against real lamp data, with no meaningful reduced-chi-squared
+# improvement over linear -- see docs/project_state.md, "Spectral calibration
+# degree comparison". Higher degrees remain selectable as a model-adequacy
+# diagnostic, just no longer the default.
+DEFAULT_DEGREE = 1
 
 # Exposure-mode choice strings, shared by BaselineDialog and FlatFieldDialog's
 # exposure_mode_combo below -- mirrors cli/calibration.py's mutually-exclusive

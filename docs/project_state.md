@@ -76,6 +76,29 @@ under the new default and fresh spatial-chirp measurements taken to see whether 
 (grating rotation + linear tilt correction) actually deliver a chirp-free (or accurately-measured-chirp)
 beam — not yet done as of this writing.
 
+**Spectral calibration degree comparison: linear, quadratic, and cubic pixel→wavelength_nm fits were
+compared against real lamp data, and linear adopted as the default everywhere it wasn't already.**
+`scripts/compare_spectral_calibration_degrees.py` (new) ran `calibrate_spectral()` at degree 1
+(linear), 2 (quadratic), and 3 (cubic) against the same 9 matched lamp lines (same stacked, geometric-
+tilt-corrected lamp image `plot_beam_spectrum.py` builds its own calibration from,
+`data/diagnostic/grating_rotation/l2.{1,2,3}.bmp`), so any difference between the three fits is purely
+the polynomial degree, not different input data. Reduced chi-squared was similar across all three
+(linear 0.086, quadratic 0.045, cubic 0.050) — no degree fits obviously better or worse than another.
+Decisively, though: the quadratic coefficient in the quadratic fit (`c2 = -4.74e-07 ± 1.76e-07`, ~2.7σ
+from zero) and *both* the quadratic and cubic coefficients in the cubic fit (`c2 = 5.76e-07 ± 1.62e-06`,
+`c3 = -3.21e-10 ± 4.93e-10`, both <1σ from zero) are statistically indistinguishable from zero — neither
+higher-order fit resolves real curvature in this dataset, only noise dressed up as one. A linear
+pixel→wavelength_nm model is therefore the right default, not just an arbitrary simpler choice.
+`calibration/spectral/calibrate.py`'s `calibrate_spectral()` already defaulted `degree` to 1 (§3), and so
+did `cli/calibration.py`'s `--degree` flag (`DEFAULT_SPECTRAL_DEGREE = 1`) — only
+`gui/calibration_dialogs.py`'s `SpectralCalibrationDialog` (both its "Capture from Lamp" and "Manual
+Entry" pages) was out of step, defaulting its degree selector to `DEFAULT_DEGREE = 3` on the theory that
+a spectral fit needed a higher baseline degree than `live_view.py`'s spatial-dispersion fit (already 1)
+— a theory this comparison does not support. `calibration_dialogs.py`'s `DEFAULT_DEGREE` is now `1`,
+matching every other default in the app. Higher degrees remain selectable in both dialogs
+(`DEGREE_CHOICES`/`DEGREE_LABELS`) and useful as a model-adequacy diagnostic — this finding says the
+*default* should be linear, not that the quadratic/cubic options should be removed.
+
 ---
 
 ## 1. Status by package
