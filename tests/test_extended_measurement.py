@@ -54,6 +54,7 @@ from pipeline.gui.extended_measurement import (  # noqa: E402
     DEFAULT_N_SHOTS,
     FIT_CURVE_N_POINTS,
     ExtendedMeasurementScreen,
+    compute_combined_polynomial_for_degree,
     compute_combined_result_for_degree,
     compute_fit_line_and_residuals,
 )
@@ -711,6 +712,76 @@ class TestExtendedMeasurementRealMeasurement:
             combined = widget._compute_combined_result(2)
             assert "nm" in widget._evaluated_at_label.text()
             assert combined.sigma_zeta_combined > 0
+        finally:
+            stream.stop()
+
+    def test_degree_gt_one_curve_unaffected_by_evaluated_at(self, qtbot, monkeypatch):
+        # The bug this screen used to have: at degree > 1, the drawn fit
+        # curve/residuals were a fresh tangent line through the reference
+        # point, so editing "Evaluate At" visibly moved the whole curve.
+        # Now the curve is a genuine combined polynomial
+        # (compute_combined_polynomial_for_degree()), which does not
+        # depend on the reference point at all -- only the separately
+        # reported spatial dispersion (a scalar evaluated there) should
+        # move.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            fit_x_before = widget._measurement_fit_x.copy()
+            fit_y_before = widget._measurement_fit_y_mm.copy()
+            residuals_before = widget._measurement_residuals_mm.copy()
+            coefficients_before = widget._measurement_coefficients_px.copy()
+            reference_wavelength_before = widget._evaluated_at_wavelength_nm()
+
+            widget._evaluated_at_spin.setValue(200.0)
+
+            # Sanity check the edit actually took effect on the reference
+            # point itself, so a no-op edit couldn't make this test pass
+            # vacuously.
+            assert widget._evaluated_at_wavelength_nm() != pytest.approx(reference_wavelength_before)
+
+            np.testing.assert_array_equal(widget._measurement_fit_x, fit_x_before)
+            np.testing.assert_array_equal(widget._measurement_fit_y_mm, fit_y_before)
+            np.testing.assert_array_equal(widget._measurement_residuals_mm, residuals_before)
+            np.testing.assert_array_equal(widget._measurement_coefficients_px, coefficients_before)
+        finally:
+            stream.stop()
+
+    def test_degree_gt_one_coefficients_match_shared_helper_directly(self, qtbot, monkeypatch):
+        # Confirms the live GUI's combined coefficients at degree > 1 are
+        # exactly compute_combined_polynomial_for_degree()'s own output --
+        # not independently re-derived logic that could drift from what
+        # measurement_record.py's saved record computes via the same
+        # shared function.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+
+            for degree in (2, 3):
+                widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(degree))
+
+                expected_coefficients, expected_coefficient_sigma = compute_combined_polynomial_for_degree(
+                    widget._shot_results, degree,
+                )
+                np.testing.assert_array_equal(widget._measurement_coefficients_px, expected_coefficients)
+                np.testing.assert_array_equal(
+                    widget._measurement_coefficient_sigma_px, expected_coefficient_sigma
+                )
+                assert len(expected_coefficients) == degree + 1
         finally:
             stream.stop()
 

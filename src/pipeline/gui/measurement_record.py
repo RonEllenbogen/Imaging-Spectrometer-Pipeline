@@ -55,22 +55,27 @@ point and only equals the polynomial's c1 coefficient when degree == 1
 version of this module did, is a real labeling bug, not just a cosmetic
 one). Degree 1's coefficients reuse compute_fit_line_and_residuals()
 (also imported from extended_measurement.py, unchanged, so its output
-still matches the GUI exactly). Degree 2/3 use this module's own
-_combine_polynomial_coefficients() instead -- combining every coefficient
-across shots the same inverse-variance way, giving a genuine combined
-quadratic/cubic curve for the plot to draw, rather than only ever a
-locally-linear tangent line at degree > 1 (which is what an earlier
-version of this module drew, and which is easy to mistake for a real bug
-since it makes every degree's panel look like a straight line).
+still matches the GUI exactly). Degree 2/3 use
+extended_measurement.py's compute_combined_polynomial_for_degree()
+instead -- combining every coefficient across shots the same
+inverse-variance way, giving a genuine combined quadratic/cubic curve for
+the plot to draw, rather than only ever a locally-linear tangent line at
+degree > 1 (which is what an earlier version of this module drew, and
+which is easy to mistake for a real bug since it makes every degree's
+panel look like a straight line). ExtendedMeasurementScreen's own live
+display now draws from the exact same function for degree > 1, so the
+saved record's curve and the live GUI's curve are guaranteed identical,
+not independently re-derived logic that could drift apart.
 
-compute_combined_result_for_degree()/compute_fit_line_and_residuals() are
-imported lazily by extended_measurement.py (inside
-_on_save_record_clicked(), not at module scope) specifically so this
-module can import them back from extended_measurement.py at its own
-module scope without a circular-import failure -- by the time "Save
-Record" is ever clicked, extended_measurement.py has already finished
-defining them (mirrors calibration/spectral/workflow.py's own "see module
-docstring's import note" local-import pattern for the same reason).
+compute_combined_result_for_degree()/compute_combined_polynomial_for_degree()/
+compute_fit_line_and_residuals() are imported lazily by
+extended_measurement.py (inside _on_save_record_clicked(), not at module
+scope) specifically so this module can import them back from
+extended_measurement.py at its own module scope without a
+circular-import failure -- by the time "Save Record" is ever clicked,
+extended_measurement.py has already finished defining them (mirrors
+calibration/spectral/workflow.py's own "see module docstring's import
+note" local-import pattern for the same reason).
 
 Calibration artifacts are copied byte-for-byte from artifact_dir (via
 shutil.copy2()) rather than reconstructed from the in-memory
@@ -96,7 +101,7 @@ matplotlib.use("Agg")  # noqa: E402 -- must precede pyplot import; see module do
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from pipeline.analysis import CombinedSpatialDispersionResult, ShotAnalysisResult, combine_shots  # noqa: E402
+from pipeline.analysis import CombinedSpatialDispersionResult, ShotAnalysisResult  # noqa: E402
 from pipeline.analysis.interfaces import WavelengthAxis  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.cli.calibration import (  # noqa: E402
@@ -113,6 +118,7 @@ from pipeline.preprocessing import CalibrationSet, ProcessedFrame  # noqa: E402
 
 from .extended_measurement import (  # noqa: E402
     FIT_CURVE_N_POINTS,
+    compute_combined_polynomial_for_degree,
     compute_combined_result_for_degree,
     compute_fit_line_and_residuals,
 )
@@ -216,53 +222,6 @@ def _reduced_chi_squared(combined: CombinedSpatialDispersionResult) -> float:
     ExtendedMeasurementScreen._refresh_measurement_display()'s identical comment for the derivation.'''
 
     return (combined.sigma_external / combined.sigma_internal) ** 2
-
-
-def _combine_polynomial_coefficients(
-    shot_results: list[ShotAnalysisResult], degree: int,
-) -> tuple[np.ndarray, np.ndarray]:
-
-    '''
-    Every coefficient of the degree-th polynomial fit (c0..c_degree),
-    combined across shots via the exact same inverse-variance
-    combine_shots() weighting extended_measurement.py's
-    compute_combined_result_for_degree() already uses to combine c1 alone
-    at degree > 1 -- a real, statistically well-founded generalization,
-    not an ad hoc addition: each shot's coefficients[k] is an independent
-    estimate of the exact same physical coefficient (every shot measures
-    the same underlying pixel -> wavelength dispersion relationship), so
-    nothing about inverse-variance weighting is specific to k == 1.
-    combine_shots() is called once per coefficient index, treating each
-    index independently -- this ignores the (real) covariance between a
-    single fit's own coefficients the same way this module's other
-    marginal-uncertainty reporting already does elsewhere in this
-    codebase (see calibration/spectral/calibrate.py's
-    WavelengthCalibrationResult.sigma_wavelength_nm() docstring for the
-    same documented approximation), not a new one introduced here.
-
-    Gives an actual combined polynomial for degree > 1 -- coefficients_px
-    fully define a real quadratic/cubic curve x0(wavelength_nm) -- instead
-    of only the single-reference-point tangent line
-    compute_fit_line_and_residuals() draws for degree == 1.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        (coefficients, coefficient_sigma), each length degree + 1,
-        ascending order (c0, c1, ...), in pixel units (x0_px = c0 +
-        c1*wavelength_nm + c2*wavelength_nm**2 + ...).
-    '''
-
-    n_coefficients = degree + 1
-    coefficients = np.empty(n_coefficients, dtype=np.float64)
-    coefficient_sigma = np.empty(n_coefficients, dtype=np.float64)
-    for k in range(n_coefficients):
-        values = np.array([result.fits[degree].coefficients[k] for result in shot_results])
-        sigma_values = np.array([result.fits[degree].coefficient_sigma[k] for result in shot_results])
-        combined_k = combine_shots(values, sigma_values)
-        coefficients[k] = combined_k.zeta_combined
-        coefficient_sigma[k] = combined_k.sigma_zeta_combined
-    return coefficients, coefficient_sigma
 
 
 def _to_uint8(image: np.ndarray) -> np.ndarray:
@@ -729,10 +688,10 @@ def save_measurement_record(
             coefficient_sigma_px = np.array([intercept_sigma_px, spatial_dispersion.sigma_zeta_combined])
         else:
             # A genuine combined polynomial (see
-            # _combine_polynomial_coefficients()'s own docstring) -- a
-            # real quadratic/cubic curve, not the single-reference-point
+            # compute_combined_polynomial_for_degree()'s own docstring) --
+            # a real quadratic/cubic curve, not the single-reference-point
             # tangent line degree 1 uses above.
-            coefficients_px, coefficient_sigma_px = _combine_polynomial_coefficients(shot_results, degree)
+            coefficients_px, coefficient_sigma_px = compute_combined_polynomial_for_degree(shot_results, degree)
             fit_x = np.linspace(x_range[0], x_range[1], FIT_CURVE_N_POINTS)
             fit_y_px = np.polynomial.polynomial.polyval(fit_x, coefficients_px)
             residual_px = x0_px - np.polynomial.polynomial.polyval(wavelength_nm, coefficients_px)

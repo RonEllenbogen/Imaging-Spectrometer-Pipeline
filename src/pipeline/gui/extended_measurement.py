@@ -57,17 +57,28 @@ exact same combine_shots() inverse-variance weighting, since that function
 is generic over any (value, sigma) pairs, not specific to the linear-fit
 coefficients it's usually called with.
 
-The main-plot fit curve/residual subplot are built from that same combined
-zeta -- never a refit of per-column-averaged centroid positions. This
-codebase already considered and rejected that combination methodology when
-analysis/combination.py was designed (see its module docstring): refitting
-column averages could visually disagree with the reported zeta_combined
-sitting right next to it. Instead, every raw (shot, column) centroid point
-is plotted/residualed against one straight line of slope zeta_combined,
-anchored through the data by a plain weighted-least-squares intercept (the
+The main-plot fit curve/residual subplot are never a refit of per-column-
+averaged centroid positions -- this codebase already considered and
+rejected that combination methodology when analysis/combination.py was
+designed (see its module docstring): refitting column averages could
+visually disagree with the reported combined result sitting right next to
+it. At degree 1, every raw (shot, column) centroid point is plotted/
+residualed against one straight line of slope zeta_combined, anchored
+through the data by a plain weighted-least-squares intercept (the
 best-fit offset given that fixed, already-combined slope) -- so the drawn
 line's slope and the reported number can never visually contradict each
-other, at any degree.
+other. At degree > 1, the curve is a genuine combined polynomial instead:
+compute_combined_polynomial_for_degree() combines every coefficient
+(c0..c_degree) independently across shots, the same inverse-variance
+weighting extended to every coefficient index rather than only the
+combined zeta -- so the drawn curve/residuals depend only on
+self._shot_results, not on self._evaluated_at_spin's current value (that
+reference point only ever changes self._spatial_dispersion_label, the
+scalar dz/dwavelength evaluated there -- an earlier version of this
+screen instead redrew a fresh local tangent line through that point at
+every degree, which visibly moved the whole curve on every reference-
+point edit even though nothing about the underlying combined fit had
+changed).
 
 The Acquisition Settings side-panel section (exposure_us/gain_db spin
 boxes, pre-filled from the loaded baseline's capture settings) feeds the
@@ -180,17 +191,21 @@ FIT_CURVE_N_POINTS = 200
 PIXEL_COLUMN_SIGMA = 1e-3
 
 # Static caveat shown next to the Combined Result panel for degree > 1:
-# explains the combination *methodology* (per-shot scalar evaluation, not
-# a joint polynomial fit) -- not an uncertainty caveat. The previous
-# "external uncertainty only" interim caveat (docs/project_state.md) no
-# longer applies now that sigma_zeta_combined is built from a real
-# sigma_zeta() call (the full covariance-propagated uncertainty, combined
-# internal/external the same way as degree 1), so there is nothing left
-# to disclaim about the number itself.
+# explains the *spatial dispersion* number's combination methodology
+# (per-shot scalar evaluation at the reference point, then combined) --
+# not an uncertainty caveat, and not a statement about the drawn curve
+# (which IS a genuine combined polynomial -- see
+# compute_combined_polynomial_for_degree()). The previous "external
+# uncertainty only" interim caveat (docs/project_state.md) no longer
+# applies now that sigma_zeta_combined is built from a real sigma_zeta()
+# call (the full covariance-propagated uncertainty, combined internal/
+# external the same way as degree 1), so there is nothing left to
+# disclaim about the number itself.
 DEGREE_GT_ONE_NOTE = (
-    "Degree > 1: each shot's spatial dispersion is evaluated at "
-    "the reference point above, then those values are combined "
-    "-- not a joint polynomial fit across shots."
+    "Degree > 1: spatial dispersion above is each shot's dz/dwavelength "
+    "evaluated at the reference point, then combined -- the plotted "
+    "curve is a separately combined polynomial, unaffected by the "
+    "reference point."
 )
 
 
@@ -704,21 +719,20 @@ class ExtendedMeasurementScreen(QWidget):
         reports whichever of the two is larger, which is the one number a
         user needs.
 
-        Coefficients (new): unlike LiveViewWidget's own "Coefficients:" row
-        (a single shot's full degree+1 fit.coefficients), this screen only
-        ever has two to show -- c0 (intercept) and c1 (zeta_combined) --
-        regardless of the selected degree. That's not a display
-        simplification; it's the actual math: combine_shots() only ever
-        combines a scalar slope (see module docstring and
-        DEGREE_GT_ONE_NOTE), never a joint multi-coefficient polynomial, so
-        there is no real c2/c3 etc. to show at degree > 1. c1 IS
-        zeta_combined -- the same number self._spatial_dispersion_label
-        already shows -- surfaced again here alongside c0 (the
-        weighted-least-squares intercept _recompute_fit_and_residuals()
-        computes for the drawn fit line) so the two coefficients that
-        together define that line are visible as a pair. Both are
-        recomputed by _refresh_measurement_display() on every degree
-        switch, same as spatial dispersion.
+        Coefficients: unlike LiveViewWidget's own "Coefficients:" row (a
+        single shot's full degree+1 fit.coefficients), this row shows the
+        *combined* polynomial -- degree + 1 coefficients, one per line.
+        At degree 1, c0/c1 are the weighted-least-squares intercept
+        _recompute_fit_and_residuals() computes plus zeta_combined itself
+        (the same number self._spatial_dispersion_label shows -- c1 IS
+        zeta_combined only at degree 1, see _DegreeResult's docstring in
+        measurement_record.py for why that stops being true above degree
+        1). At degree > 1, all degree + 1 coefficients come from
+        compute_combined_polynomial_for_degree() -- a genuine combined
+        quadratic/cubic, not the same quantity as
+        self._spatial_dispersion_label (see DEGREE_GT_ONE_NOTE). Both
+        paths are recomputed by _refresh_measurement_display() on every
+        degree switch, same as spatial dispersion.
         '''
 
         group = QGroupBox("Combined Result")
@@ -902,10 +916,11 @@ class ExtendedMeasurementScreen(QWidget):
 
         Imports measurement_record locally, not at module scope --
         measurement_record.py imports compute_combined_result_for_degree()/
-        compute_fit_line_and_residuals()/FIT_CURVE_N_POINTS back from this
-        module, so importing it at module scope here would be a circular
-        import; see measurement_record.py's own module docstring for the
-        full reasoning. No CameraError/hardware failure mode exists here
+        compute_combined_polynomial_for_degree()/compute_fit_line_and_residuals()/
+        FIT_CURVE_N_POINTS back from this module, so importing it at
+        module scope here would be a circular import; see
+        measurement_record.py's own module docstring for the full
+        reasoning. No CameraError/hardware failure mode exists here
         (nothing about saving touches the camera), but any unexpected
         exception (e.g. a disk-full/permissions error writing to
         data/measurements/) still gets a QMessageBox.warning() rather than
@@ -1116,18 +1131,32 @@ class ExtendedMeasurementScreen(QWidget):
         reduced_chi_squared = (combined.sigma_external / combined.sigma_internal) ** 2
         self._reduced_chi_squared_label.setText(f"{reduced_chi_squared:.3f}")
 
-        self._recompute_fit_and_residuals(combined.zeta_combined)
+        if degree == 1:
+            self._recompute_fit_and_residuals(combined.zeta_combined)
+            # c0/c1 as a pair, matching measurement_record.py's own
+            # degree-1 branch exactly (see compute_fit_line_and_residuals()'s
+            # docstring for why intercept+zeta_combined together define
+            # the drawn line).
+            self._measurement_coefficients_px = np.array(
+                [self._measurement_intercept_px, combined.zeta_combined]
+            )
+            self._measurement_coefficient_sigma_px = np.array(
+                [self._measurement_intercept_sigma_px, combined.sigma_zeta_combined]
+            )
+        else:
+            self._recompute_combined_polynomial_fit_and_residuals(degree)
 
-        # c0 (intercept) is a position-like px quantity, same physical
-        # quantity as a scatter point's y0 -- _convert_to_mm() (not
-        # _zeta_to_mm(), which is for slopes) is the correct conversion,
-        # same as every scatter y-value on this plot.
-        c0_mm, c0_sigma_mm = self._convert_to_mm(
-            np.array([self._measurement_intercept_px]), np.array([self._measurement_intercept_sigma_px])
+        # Same conversion regardless of coefficient order k: convert()
+        # is a pure linear px->mm scale (see _zeta_to_mm()'s docstring),
+        # so it's valid applied elementwise to c0 (mm) through
+        # c_degree (mm/nm^degree) alike -- only the px numerator's units
+        # change, never wavelength_nm, which convert() never touches.
+        coefficients_mm, coefficient_sigma_mm = self._convert_to_mm(
+            self._measurement_coefficients_px, self._measurement_coefficient_sigma_px,
         )
         coeff_lines = [
-            f"c<sub>0</sub> = {format_value_with_uncertainty(float(c0_mm[0]), float(c0_sigma_mm[0]))}",
-            f"c<sub>1</sub> = {format_value_with_uncertainty(zeta_mm, zeta_sigma_mm)}",
+            f"c<sub>{k}</sub> = {format_value_with_uncertainty(float(c), float(sigma_c))}"
+            for k, (c, sigma_c) in enumerate(zip(coefficients_mm, coefficient_sigma_mm))
         ]
         self._coefficients_label.setText("<br>".join(coeff_lines))
 
@@ -1159,6 +1188,55 @@ class ExtendedMeasurementScreen(QWidget):
 
         self._measurement_intercept_px = intercept_px
         self._measurement_intercept_sigma_px = intercept_sigma_px
+
+        fit_y_mm, _ = self._convert_to_mm(fit_y_px, np.zeros_like(fit_y_px))
+        residual_mm, _ = self._convert_to_mm(residual_px, np.zeros_like(residual_px))
+
+        self._measurement_fit_x = fit_x
+        self._measurement_fit_y_mm = fit_y_mm
+        self._measurement_residuals_mm = residual_mm
+
+    def _recompute_combined_polynomial_fit_and_residuals(self, degree: int) -> None:
+
+        '''
+        degree > 1's counterpart to _recompute_fit_and_residuals(): builds
+        the drawn fit-curve/residual arrays from a genuine combined
+        polynomial (compute_combined_polynomial_for_degree()) instead of a
+        single-reference-point tangent line -- every coefficient combined
+        independently across shots, exactly matching
+        save_measurement_record()'s own degree > 1 branch via the same
+        shared free function, so the live GUI and the saved record always
+        draw the identical curve for a given self._shot_results.
+
+        Deliberately takes no reference-point/zeta argument, unlike
+        _recompute_fit_and_residuals(): the combined polynomial doesn't
+        depend on self._evaluated_at_spin at all, so editing it changes
+        self._spatial_dispersion_label (computed separately, by
+        _compute_combined_result()) but never this curve -- fixing the
+        bug where an earlier version of this screen redrew a fresh local
+        tangent line through the reference point on every edit, visibly
+        moving the whole curve/residuals even though the underlying
+        combined fit had not changed.
+
+        Also stashes self._measurement_coefficients_px/
+        _coefficient_sigma_px, for _refresh_measurement_display()'s
+        Coefficients row.
+        '''
+
+        coefficients_px, coefficient_sigma_px = compute_combined_polynomial_for_degree(
+            self._shot_results, degree,
+        )
+        self._measurement_coefficients_px = coefficients_px
+        self._measurement_coefficient_sigma_px = coefficient_sigma_px
+
+        fit_x = np.linspace(
+            float(self._measurement_x_values.min()), float(self._measurement_x_values.max()),
+            FIT_CURVE_N_POINTS,
+        )
+        fit_y_px = np.polynomial.polynomial.polyval(fit_x, coefficients_px)
+        residual_px = self._measurement_x0_px - np.polynomial.polynomial.polyval(
+            self._measurement_wavelength_nm, coefficients_px,
+        )
 
         fit_y_mm, _ = self._convert_to_mm(fit_y_px, np.zeros_like(fit_y_px))
         residual_mm, _ = self._convert_to_mm(residual_px, np.zeros_like(residual_px))
@@ -1333,6 +1411,58 @@ def compute_combined_result_for_degree(
     return combine_shots(zeta_values, sigma_zeta_values)
 
 
+def compute_combined_polynomial_for_degree(
+    shot_results: list[ShotAnalysisResult], degree: int,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    '''
+    Every coefficient of the degree-th polynomial fit (c0..c_degree),
+    combined across shots via the exact same inverse-variance
+    combine_shots() weighting compute_combined_result_for_degree() already
+    uses to combine c1 alone at degree > 1 -- a real, statistically
+    well-founded generalization, not an ad hoc addition: each shot's
+    coefficients[k] is an independent estimate of the exact same physical
+    coefficient (every shot measures the same underlying pixel ->
+    wavelength dispersion relationship), so nothing about inverse-variance
+    weighting is specific to k == 1. combine_shots() is called once per
+    coefficient index, treating each index independently -- this ignores
+    the (real) covariance between a single fit's own coefficients the same
+    way this module's other marginal-uncertainty reporting already does
+    elsewhere in this codebase (see calibration/spectral/calibrate.py's
+    WavelengthCalibrationResult.sigma_wavelength_nm() docstring for the
+    same documented approximation), not a new one introduced here.
+
+    Gives an actual combined polynomial for degree > 1 -- the returned
+    coefficients fully define a real quadratic/cubic curve
+    x0(wavelength_nm) -- rather than only a single-reference-point tangent
+    line, which is what ExtendedMeasurementScreen previously drew at every
+    degree (moving visibly whenever the reference point changed, even
+    though the underlying combined fit had not). Shared between the live
+    GUI (ExtendedMeasurementScreen._refresh_measurement_display(), for
+    degree > 1) and the saved record (measurement_record.py) so both draw
+    the identical combined curve for a given set of shot_results, never
+    independently re-derived logic that could drift between the two.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (coefficients, coefficient_sigma), each length degree + 1,
+        ascending order (c0, c1, ...), in pixel units (x0_px = c0 +
+        c1*wavelength_nm + c2*wavelength_nm**2 + ...).
+    '''
+
+    n_coefficients = degree + 1
+    coefficients = np.empty(n_coefficients, dtype=np.float64)
+    coefficient_sigma = np.empty(n_coefficients, dtype=np.float64)
+    for k in range(n_coefficients):
+        values = np.array([result.fits[degree].coefficients[k] for result in shot_results])
+        sigma_values = np.array([result.fits[degree].coefficient_sigma[k] for result in shot_results])
+        combined_k = combine_shots(values, sigma_values)
+        coefficients[k] = combined_k.zeta_combined
+        coefficient_sigma[k] = combined_k.sigma_zeta_combined
+    return coefficients, coefficient_sigma
+
+
 def compute_fit_line_and_residuals(
     x0_px: np.ndarray, sigma_x0_px: np.ndarray, wavelength_nm: np.ndarray, zeta_combined: float,
     x_range: tuple[float, float], n_points: int,
@@ -1400,5 +1530,6 @@ __all__ = [
     "MIN_N_SHOTS",
     "MAX_N_SHOTS",
     "compute_combined_result_for_degree",
+    "compute_combined_polynomial_for_degree",
     "compute_fit_line_and_residuals",
 ]

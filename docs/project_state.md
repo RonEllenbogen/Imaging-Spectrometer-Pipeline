@@ -1226,7 +1226,8 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   evaluated at one reference point; at degree > 1 it depends on c2/c3 too, and only collapses to c1 when
   the polynomial's derivative is constant everywhere (degree 1). An earlier version of
   `combined_results.txt` labeled `combine_shots()`'s combined-zeta value "c1" at every degree, and never
-  reported c2/c3 at all — both wrong. Fixed: `_combine_polynomial_coefficients()` (new) combines *every*
+  reported c2/c3 at all — both wrong. Fixed: `compute_combined_polynomial_for_degree()` (new, in
+  `extended_measurement.py`) combines *every*
   coefficient across shots via the same inverse-variance `combine_shots()` weighting
   `compute_combined_result_for_degree()` already used for zeta alone (a real generalization, not an ad
   hoc addition — each shot's `coefficients[k]` is an independent estimate of the same physical quantity
@@ -1245,10 +1246,32 @@ gone; the caveat note is retired and both screens report a genuine internal unce
   reference-point slope (`compute_fit_line_and_residuals()`), so quadratic/cubic panels always rendered
   as straight lines — visually indistinguishable from degree 1, which is what prompted the bug report
   ("I am not sure the curves of best fit have been drawn correctly"). Now degree 2/3 evaluate the real
-  combined polynomial (`np.polynomial.polynomial.polyval` against `_combine_polynomial_coefficients()`'s
+  combined polynomial (`np.polynomial.polynomial.polyval` against `compute_combined_polynomial_for_degree()`'s
   output) across the fit range, and residuals are computed against that same curve — genuine curvature
   shows up when the data actually has any (this synthetic-data test case doesn't, so its curves still
   look straight, correctly, since the injected chirp really is linear there).
+
+  **The live GUI had the exact same tangent-line issue, fixed the same way.** Until this pass,
+  `ExtendedMeasurementScreen._refresh_measurement_display()` drew degree 2/3's main-plot curve/residuals
+  from `_recompute_fit_and_residuals()` at every degree — the same single-reference-point tangent line
+  degree 1 uses, recomputed (both slope *and* intercept) every time "Evaluate At" changed, so the whole
+  curve visibly moved on every edit even though nothing about the underlying combined fit had changed
+  (the bug report that prompted this: "when I switch to quadratic or cubic fits, if I change the pixel
+  at which the spatial dispersion is evaluated at, the curve of best fit on the plot seems to move, and
+  so do the residuals"). `_combine_polynomial_coefficients()` was moved out of `measurement_record.py`
+  and into `extended_measurement.py` as the shared `compute_combined_polynomial_for_degree()`, so the
+  live GUI and the saved record draw from the identical function — no independently re-derived logic to
+  drift apart. A new `_recompute_combined_polynomial_fit_and_residuals()` (degree 2/3's counterpart to
+  `_recompute_fit_and_residuals()`) builds the curve/residuals from that combined polynomial instead,
+  taking no reference-point argument at all, since the combined polynomial doesn't depend on it — only
+  `_spatial_dispersion_label` (a scalar evaluated *at* the reference point, via
+  `compute_combined_result_for_degree()`, unchanged) still moves when "Evaluate At" is edited. The
+  "Coefficients" row was also generalized from its previous hardcoded c0/c1-only display to list every
+  combined coefficient at any degree, fixing the same c1-labeled-as-spatial-dispersion issue in the live
+  GUI that `combined_results.txt` already had fixed for the saved record. Verified with a new regression
+  test asserting the drawn fit curve/residuals/coefficients are bit-identical before and after an
+  "Evaluate At" edit at degree 2/3, and a second test confirming the live GUI's coefficients match
+  `compute_combined_polynomial_for_degree()` called directly.
 
   **The saved plot** is deliberately not styled like anything else in this codebase — these may end up in
   reports/presentations, so it follows physics-journal convention instead of this app's own dark theme:
