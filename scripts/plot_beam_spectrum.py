@@ -44,9 +44,21 @@ exposure_us/gain_db are NOT the frames' real captured settings -- these
 configured exposure_time is used as a placeholder and gain_db defaults to
 0.0, same convention as every other grating_rotation/ script.
 
+The plot also overlays an independently-measured "true" reference
+spectrum (default: data/reference/beam_spectra/post_regen_1.txt, a raw
+export from a separate, standalone spectrometer -- not this imaging
+spectrometer -- covering the beam's full range post-regen). That file's
+intensity is in that instrument's own raw counts, on a completely
+different scale from this script's column-summed ADU (different
+instrument, different aperture/collection efficiency, not photometrically
+comparable), so both spectra are plotted peak-normalized (each divided by
+its own maximum) rather than in their native units -- this plot compares
+spectral *shape*, not absolute intensity.
+
 Usage:
     python scripts/plot_beam_spectrum.py
     python scripts/plot_beam_spectrum.py --degree 2 --output out.png
+    python scripts/plot_beam_spectrum.py --reference-spectrum data/reference/beam_spectra/oscillator_1.txt
 '''
 
 # Imports
@@ -76,9 +88,15 @@ DEFAULT_BEAM_SHOT_PATHS = tuple(
     Path("data/diagnostic/grating_rotation") / name
     for name in ("2.1.bmp", "2.2.bmp", "2.3.bmp")
 )
+DEFAULT_REFERENCE_SPECTRUM_PATH = Path("data/reference/beam_spectra/post_regen_1.txt")
 DEFAULT_OUTPUT_PATH = Path("data/diagnostic/grating_rotation_beam_spectrum.png")
 DEFAULT_GAIN_DB = 0.0
 DEFAULT_SPECTRAL_DEGREE = 3
+
+# Marks the end of the metadata header in the reference spectrometer's raw
+# export format (see load_reference_spectrum()) -- spectral data starts
+# on the line after this one.
+REFERENCE_SPECTRUM_DATA_MARKER = ">>>>>Begin Spectral Data<<<<<"
 
 # Classes
 
@@ -107,6 +125,30 @@ def stack_frames(frames: list[FrameData]) -> np.ndarray:
     return np.mean([f.image.astype(np.float64) for f in frames], axis=0)
 
 
+def load_reference_spectrum(path: Path) -> tuple[np.ndarray, np.ndarray]:
+
+    '''
+    Parses a raw spectrometer export: a metadata header terminated by
+    REFERENCE_SPECTRUM_DATA_MARKER, followed by tab-separated
+    (wavelength_nm, intensity) rows -- see module docstring for what
+    instrument/scale this intensity is in.
+
+    Raises
+    ------
+    ValueError
+        If path contains no REFERENCE_SPECTRUM_DATA_MARKER line.
+    '''
+
+    lines = path.read_text().splitlines()
+    try:
+        data_start = lines.index(REFERENCE_SPECTRUM_DATA_MARKER) + 1
+    except ValueError:
+        raise ValueError(f"{path} has no '{REFERENCE_SPECTRUM_DATA_MARKER}' marker")
+
+    data = np.array([line.split() for line in lines[data_start:] if line.strip()], dtype=np.float64)
+    return data[:, 0], data[:, 1]
+
+
 def print_tilt_report(tilt) -> None:
 
     '''Prints the fitted geometric tilt curve and residual terms, same format as
@@ -133,22 +175,41 @@ def print_spectral_report(spectral) -> None:
     print(f"  {fit.residuals.shape[0]} matched lines")
 
 
-def plot_beam_spectrum(wavelength_nm: np.ndarray, spectrum: np.ndarray, output_path: Path) -> None:
+def plot_beam_spectrum(
+    wavelength_nm: np.ndarray, spectrum: np.ndarray,
+    reference_wavelength_nm: np.ndarray, reference_spectrum: np.ndarray, reference_label: str,
+    output_path: Path,
+) -> None:
 
-    '''Plots the stacked, tilt- and spectrally-corrected beam spectrum against wavelength_nm.'''
+    '''
+    Plots the stacked, tilt- and spectrally-corrected beam spectrum against
+    wavelength_nm, overlaid with an independently-measured reference
+    spectrum. Both are peak-normalized before plotting -- see module
+    docstring for why they can't be compared in native units.
+    '''
 
     peak_nm = float(wavelength_nm[np.argmax(spectrum)])
+    normalized_spectrum = spectrum / spectrum.max()
+    normalized_reference = reference_spectrum / reference_spectrum.max()
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(wavelength_nm, spectrum, linewidth=1.5, color="steelblue")
-    ax.axvline(peak_nm, color="firebrick", linestyle="--", linewidth=1, label=f"peak: {peak_nm:.2f} nm")
+    ax.plot(wavelength_nm, normalized_spectrum, linewidth=1.5, color="steelblue", label="measured (this script)")
+    ax.plot(
+        reference_wavelength_nm, normalized_reference, linewidth=1.2, color="darkorange", alpha=0.8,
+        label=f"reference: {reference_label}",
+    )
+    ax.axvline(peak_nm, color="firebrick", linestyle="--", linewidth=1, label=f"measured peak: {peak_nm:.2f} nm")
+
+    # The reference instrument's wavelength range is much wider than the
+    # imaging spectrometer's -- zoom to where the measured spectrum
+    # actually has signal, rather than stretching the axis to fit the
+    # reference's mostly-flat noise floor either side of it.
+    margin_nm = 0.1 * (wavelength_nm.max() - wavelength_nm.min())
+    ax.set_xlim(wavelength_nm.min() - margin_nm, wavelength_nm.max() + margin_nm)
 
     ax.set_xlabel("Wavelength (nm)")
-    ax.set_ylabel("Column-integrated intensity (ADU)")
-    ax.set_title(
-        "Beam spectrum -- data/diagnostic/grating_rotation/2.{1,2,3}.bmp, "
-        "geometric-tilt- and spectrally-corrected"
-    )
+    ax.set_ylabel("Normalized intensity (peak = 1)")
+    ax.set_title("Beam spectrum vs. reference (geometric-tilt- and spectrally-corrected)")
     ax.legend(fontsize=9)
 
     plt.tight_layout()
@@ -172,6 +233,11 @@ def main() -> None:
     parser.add_argument(
         "--degree", type=int, default=DEFAULT_SPECTRAL_DEGREE,
         help=f"Polynomial degree for the pixel -> wavelength_nm fit (default: {DEFAULT_SPECTRAL_DEGREE})",
+    )
+    parser.add_argument(
+        "--reference-spectrum", type=Path, default=DEFAULT_REFERENCE_SPECTRUM_PATH,
+        help="Independently-measured 'true' spectrum to overlay, in the raw spectrometer-export "
+             f"format (default: {DEFAULT_REFERENCE_SPECTRUM_PATH})",
     )
     parser.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Where to save the beam spectrum plot",
@@ -231,7 +297,14 @@ def main() -> None:
     peak_nm = beam_wavelength_nm[np.argmax(beam_spectrum)]
     print(f"beam spectrum: peak at {peak_nm:.2f} nm, total intensity = {beam_spectrum.sum():.4g} ADU")
 
-    plot_beam_spectrum(beam_wavelength_nm, beam_spectrum, args.output)
+    reference_wavelength_nm, reference_spectrum = load_reference_spectrum(args.reference_spectrum)
+    reference_peak_nm = reference_wavelength_nm[np.argmax(reference_spectrum)]
+    print(f"reference spectrum ({args.reference_spectrum}): peak at {reference_peak_nm:.2f} nm")
+
+    plot_beam_spectrum(
+        beam_wavelength_nm, beam_spectrum, reference_wavelength_nm, reference_spectrum,
+        args.reference_spectrum.name, args.output,
+    )
 
 
 if __name__ == "__main__":
