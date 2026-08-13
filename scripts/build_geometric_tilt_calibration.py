@@ -7,10 +7,14 @@ which doesn't apply here since these frames were captured manually
 outside CameraStream (same situation scripts/analyze_raw_shot.py's
 module docstring describes).
 
-build_geometric_tilt() itself never touches disk (see its own module
-docstring: every build_*() in this codebase is pure, save_*()/load_*()
-are separate) -- this script is the one-off/session-level entry point
-that calls both, for reuse whenever the lamp is recaptured.
+build_geometric_tilt_linear() itself never touches disk (see its own
+module docstring: every build_*() in this codebase is pure, save_*()/
+load_*() are separate) -- this script is the one-off/session-level entry
+point that calls both, for reuse whenever the lamp is recaptured. Uses
+build_geometric_tilt_linear() (the weighted-straight-line-fit method), not
+build_geometric_tilt() (the pointwise method), matching the default
+run_spectral_calibration() now builds with -- see docs/project_state.md
+§0/§3 for why.
 
 exposure_us/gain_db are NOT the frames' real captured settings -- these
 .bmp files carry no acquisition metadata, so configs/default.yaml's
@@ -31,7 +35,7 @@ from pathlib import Path
 import imageio.v3 as iio
 
 from pipeline.acquisition import CANONICAL_DTYPE, CANONICAL_SHAPE, FrameData
-from pipeline.calibration.spectral import build_geometric_tilt, save_geometric_tilt
+from pipeline.calibration.spectral import build_geometric_tilt_linear, save_geometric_tilt
 from pipeline.utils.helpers import load_config
 
 # Constants
@@ -87,7 +91,7 @@ def main() -> None:
         for i, path in enumerate(args.shots)
     ]
 
-    result = build_geometric_tilt(frames)
+    result = build_geometric_tilt_linear(frames)
 
     print(f"reference_row: {result.reference_row}")
     print(f"row_shift range: [{result.row_shift.min():.3f}, {result.row_shift.max():.3f}] px")

@@ -437,7 +437,7 @@ class TestSpectralCapturePathResolution:
         assert recorded["degree"] == cli.DEFAULT_SPECTRAL_DEGREE
         assert recorded["sensor_calibration"].background_sigma == 1.0
         # The real point of this test: real conversion-gain -- not
-        # build_geometric_tilt()'s own placeholder -- must reach
+        # build_geometric_tilt_linear()'s own placeholder -- must reach
         # run_spectral_calibration().
         assert recorded["gain_e_per_adu"] == 2.5
 

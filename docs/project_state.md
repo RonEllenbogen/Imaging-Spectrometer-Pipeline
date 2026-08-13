@@ -9,7 +9,7 @@ deliberate cuts) — it is not maintained going forward. Consult it for that
 historical detail; consult this file for where things currently stand and
 what's next.
 
-## 0. Current focus (as of 2026-08-12)
+## 0. Current focus (as of 2026-08-13)
 
 **The first real calibration session against the actual instrument is done.** Baseline, flat-field,
 bad-pixel-map, conversion-gain, and spectral-capture (which also built and saved geometric tilt, from
@@ -49,6 +49,32 @@ range, for anything not yet pushed).
 `pyproject.toml` now declares real dependencies (previously empty — see §4/CLAUDE.md) so `pip install -e
 .` works on a fresh checkout; verify this still holds before telling anyone to rely on it, since it was
 only tested via a throwaway venv, not a real second machine, until this lab session confirms it for real.
+
+**Geometric tilt: a linear-fit amendment was built, compared against the original method, and adopted as
+the default — driven by a real physical diagnosis, not the software comparison alone.**
+`build_geometric_tilt_linear()` (new, alongside the pre-existing `build_geometric_tilt()` — full design
+and comparison findings in §3) replaces the per-row inverse-variance-weighted shared curve with a single
+weighted straight-line fit through the same per-row data, trading the ability to represent genuine
+non-monotonic structure for immunity to row-to-row shot noise. Three new diagnostic scripts
+(`compare_geometric_tilt_methods.py`, `plot_geometric_tilt_correction_images.py`,
+`plot_geometric_tilt_correction_beam_image.py`) compared both methods against real lamp frames
+(`data/diagnostic/grating_rotation/l2.{1,2,3}.bmp`) and real beam frames
+(`data/diagnostic/grating_rotation/2.{1,2,3}.bmp`) — see §3 for what they found. Separately, and more
+decisively: a physical diagnosis (credited to Simon) identified the actual cause of the row-dependent
+tilt — dust on the slit (visible as dark streaks that should be horizontal, since a dust speck's height
+doesn't depend on wavelength) revealed the grating was misaligned relative to the camera, and the lamp
+lines' own tilt (each line is an image of the slit at one wavelength) revealed the slit itself is tilted
+relative to the camera, with no physical adjustment available for that second one — see §3 for the full
+reasoning and the physical fix performed (grating rotated, post-grating mirror re-adjusted). Both `l2.*`
+and `2.*` datasets used in this session's comparisons were captured **after** that physical fix, and
+geometric tilt correction (calibrated on the lamp frames, applied to the beam frames) is the intended fix
+for the slit-tilt part the physical adjustment can't reach. Given the physical fix plus this session's
+method-comparison findings, **the default geometric tilt method used throughout the app
+(`run_spectral_calibration()`, and therefore every GUI/CLI caller of it) has been switched from
+`build_geometric_tilt()` to `build_geometric_tilt_linear()`.** Spectral calibration needs to be redone
+under the new default and fresh spatial-chirp measurements taken to see whether the two fixes together
+(grating rotation + linear tilt correction) actually deliver a chirp-free (or accurately-measured-chirp)
+beam — not yet done as of this writing.
 
 ---
 
@@ -565,29 +591,106 @@ derivations (θ_m(800nm)≈−12.8°, full 1920-column sensor spans ~108nm).
   doesn't test whether the correction *runs* (already confirmed by `run_preprocessing()`'s own code path)
   — it's for inspecting whether the measured `row_shift` curve is accurate enough to actually straighten a
   real beam feature. First real output is saved to `data/diagnostic/geometric_tilt_correction/` (§0);
-  findings not yet folded back into this section.
+  those specific findings were never folded back into this section, but the general question they were
+  asking (is the correction actually straightening a real beam feature?) is now answered by the newer
+  work below, against a different real dataset.
+- **Physical root cause identified (credited to Simon) and a physical fix applied, ahead of/alongside the
+  software work below.** The lamp/beam images captured for geometric-tilt work show dark streaks and
+  bright lines; both are diagnostic of the spectrometer's physical alignment. Dark streaks are dust specks
+  on the slit — physically fixed features of the slit itself, so their image should sit at the same row
+  regardless of wavelength (i.e. perfectly horizontal); a streak that ISN'T horizontal means the grating
+  is misaligned relative to the camera. Separately, each bright lamp line is an image of the slit itself
+  at one wavelength (an Argon emission line illuminates the whole slit, imaged through the spectrometer at
+  that line's dispersed position) — a tilted lamp line means the slit is physically tilted relative to the
+  camera, not a grating problem. The grating angle can be adjusted; the slit's own tilt relative to the
+  camera cannot. Fix applied: the grating was rotated and the post-grating mirror re-adjusted at the same
+  time, iterating until the dark (dust) streaks were as close to horizontal as achievable. Effect
+  confirmed visually: the beam image's bright vertical lines, previously tilted with a slight *positive*
+  gradient, are now tilted with a slight *negative* gradient — matching the slight negative gradient still
+  present in the lamp images (the slit-tilt component the grating rotation can't reach). `data/diagnostic/
+  grating_rotation/l2.{1,2,3}.bmp` (lamp) and `2.{1,2,3}.bmp` (beam) are both captured **after** this
+  physical fix — every geometric-tilt comparison in this section and the one below uses this
+  already-grating-rotated data, not the original mis-aligned setup.
+- **`spectral/geometric_tilt.py`'s `build_geometric_tilt_linear()`** (new) — an alternative to
+  `build_geometric_tilt()` for the one remaining distortion the grating rotation above can't fix (the
+  slit's own tilt relative to the camera): instead of `build_geometric_tilt()`'s per-row inverse-
+  variance-weighted shared curve (interpolated across any row no line covers), this fits one straight line
+  through the same per-row combined data — weighted by each row's combined inverse-variance, using only
+  rows with real line coverage (deliberately excluding `build_geometric_tilt()`'s own interpolated-fill
+  rows, so no already-interpolated value feeds back into the fit), then re-anchored so `row_shift[reference_row]
+  == 0` exactly (the raw fitted line only satisfies that approximately; every line's displacement was
+  already anchored to `reference_row` upstream, so the fit is shifted by a constant to respect the same
+  anchor rather than let finite-sample noise offset it). Shares all line-detection/per-row-centroiding/
+  per-line-anchoring logic with `build_geometric_tilt()` via a new private `_measure_line_displacements()`
+  helper both call, rather than duplicating it. Trades the ability to represent genuine non-monotonic
+  structure (this module's own docstring documents the tilt curve as non-monotonic and jump-containing,
+  reproducible across shots) for immunity to row-to-row shot noise — an explicit bet, not a strict
+  improvement, on whether a given dataset's row_shift curve is closer to "real structure" or "noise" at
+  any given row.
+
+  **Compared against real data via three new scripts** (`scripts/compare_geometric_tilt_methods.py`,
+  `scripts/plot_geometric_tilt_correction_images.py`, `scripts/plot_geometric_tilt_correction_beam_image.py`),
+  against the lamp frames `data/diagnostic/grating_rotation/l2.{1,2,3}.bmp` (calibration source for both
+  methods throughout) and the beam frames `data/diagnostic/grating_rotation/2.{1,2,3}.bmp` (correction
+  target, using the lamp-built calibration — not self-calibrated). Findings:
+  - The measured `row_shift` curve (7 lines detected, columns 180-1773) spans roughly -34 to +41px. In the
+    frame's core (rows ~150-1100) the two methods agree closely, except for two sharp, narrow features
+    around row ~480 and row ~700-750 (~5px deviation each) that only `build_geometric_tilt()` can
+    represent — a straight line can't reproduce a discontinuity by construction.
+  - At the frame's edges (rows 0-150, 1100-1200), `build_geometric_tilt()`'s curve is genuinely noisy
+    (std ≈4.4-4.7px, excursions up to ±15-20px) while `build_geometric_tilt_linear()` stays smooth there
+    by construction. Applying both corrections to each of the 3 individual lamp shots (not just their
+    stack) confirmed this isn't a stacking artifact: `build_geometric_tilt()`'s correction is visibly
+    ragged/broken in the top ~150 rows of every one of the 3 shots individually, while
+    `build_geometric_tilt_linear()` stays clean through the same rows in all 3.
+  - Applying both corrections to the real beam image (rather than the lamp image the calibration was
+    built from) confirmed the same picture at the pixel level: a difference image between each correction
+    and the uncorrected beam shows the expected dipole pattern (sign-flipping at `reference_row`) with
+    magnitude up to ~20 intensity units; the *difference between the two methods'* corrections is smaller
+    (~1/4 that magnitude) and concentrated almost entirely in narrow row bands matching the same two
+    row_shift discrepancy locations above — confirming the two views (row_shift curve, pixel-level
+    correction) are self-consistent, though this is expected math, not independent new evidence that the
+    jumps are physically real.
+  - Two open questions, still unresolved by either method: (1) the lamp image's brightest line (~col 1241)
+    splits into two closely-spaced tracks once straightened, identically across all 3 individual shots —
+    most likely two closely-spaced Argon lines that the peak-detection step (`find_peaks` on the
+    column-summed spectrum) merges into one peak because the pre-correction tilt smears them together
+    across the full row range; neither correction method resolves this, since it's upstream of where they
+    diverge. (2) whether the edge-row noise above is genuine shot noise (which `build_geometric_tilt_linear()`
+    correctly averages down) or a `MAX_WINDOW_HALF_WIDTH` (40px) window-clipping bias (given the ~75px
+    total measured shift is uncomfortably close to that limit) — if the latter, "smoother at the edges"
+    isn't the same as "more accurate there" for either method. Neither has been investigated further yet.
+
+  **Given the above, plus the physical fix documented above it, the default geometric tilt method used
+  throughout the app has been switched from `build_geometric_tilt()` to `build_geometric_tilt_linear()`**
+  — `run_spectral_calibration()` (below) now builds the tilt calibration via the linear method, so every
+  real caller (`SpectralCalibrationDialog`'s "Capture from Lamp" mode, the `spectral-capture` CLI
+  subcommand) picks it up automatically. `build_geometric_tilt()` (pointwise) remains available and fully
+  tested, just no longer the default any production code path calls.
 - `spectral/workflow.py`'s `run_spectral_calibration()` — fully wired: acquires `n_frames` lamp frames,
   builds a `GeometricTiltResult` from those same raw frames (before any other preprocessing --
-  `build_geometric_tilt()` does its own per-line background handling) and saves it to a caller-supplied
-  `geometric_tilt_path`, then preprocesses each frame individually via a caller-supplied `CalibrationSet`
-  (dark/baseline subtraction, flat-field division, bad-pixel masking, and now the tilt correction just
-  built -- the full existing preprocessing pipeline, needed because a lamp frame is preprocessed the
-  same as any other science frame), averages the N preprocessed images for better line-detection SNR,
-  then calls `match_lines()` → `calibrate_spectral()` → save. Geometric tilt is built here rather than
-  requiring a separate caller-driven capture, since (unlike baseline/flat-field/bad-pixel-map) it needs
-  nothing but a lamp exposure -- no reason to make the caller run a second physical setup for it; tilt-
-  correcting the averaged image before `match_lines()` also matters for line-detection quality, since an
-  un-corrected image's lines are row-tilt-smeared (broadened, less resolved) when collapsed to a 1D
-  spectrum. Frames are preprocessed individually and averaged afterward, NOT averaged as raw frames first
-  the way `build_baseline()` averages background frames -- averaging raw lamp frames before dark/flat-
-  field correction would reintroduce the DSNU-contamination problem `build_flat_field()` avoids by
-  dark-subtracting before normalizing. Mirrors `calibration/sensor/workflow.py`'s pattern of the caller
-  supplying already-built pieces rather than this module loading anything from a hardcoded path. Now
-  returns `tuple[WavelengthCalibrationResult, GeometricTiltResult]` (was just the former). Now runs
-  end-to-end against a real lamp frame; `tests/test_calibration.py` covers both the full wiring
-  (monkeypatched `match_lines()` and `build_geometric_tilt()`) and a real-detection case (a
-  `SyntheticBackend` frame's smooth Gaussian beam profile correctly has no usable lines for either
-  `build_geometric_tilt()` or `match_lines()`, raising `LineMatchingError`).
+  `build_geometric_tilt_linear()` does its own per-line background handling, inherited from the shared
+  `_measure_line_displacements()` helper it and `build_geometric_tilt()` both call) and saves it to a
+  caller-supplied `geometric_tilt_path`, then preprocesses each frame individually via a caller-supplied
+  `CalibrationSet` (dark/baseline subtraction, flat-field division, bad-pixel masking, and now the tilt
+  correction just built -- the full existing preprocessing pipeline, needed because a lamp frame is
+  preprocessed the same as any other science frame), averages the N preprocessed images for better
+  line-detection SNR, then calls `match_lines()` → `calibrate_spectral()` → save. Geometric tilt is built
+  here rather than requiring a separate caller-driven capture, since (unlike baseline/flat-field/bad-
+  pixel-map) it needs nothing but a lamp exposure -- no reason to make the caller run a second physical
+  setup for it; tilt-correcting the averaged image before `match_lines()` also matters for line-detection
+  quality, since an un-corrected image's lines are row-tilt-smeared (broadened, less resolved) when
+  collapsed to a 1D spectrum. Frames are preprocessed individually and averaged afterward, NOT averaged as
+  raw frames first the way `build_baseline()` averages background frames -- averaging raw lamp frames
+  before dark/flat-field correction would reintroduce the DSNU-contamination problem `build_flat_field()`
+  avoids by dark-subtracting before normalizing. Mirrors `calibration/sensor/workflow.py`'s pattern of the
+  caller supplying already-built pieces rather than this module loading anything from a hardcoded path.
+  Returns `tuple[WavelengthCalibrationResult, GeometricTiltResult]`. Runs end-to-end against a real lamp
+  frame; `tests/test_calibration.py` covers both the full wiring (monkeypatched `match_lines()` and
+  `build_geometric_tilt_linear()`) and a real-detection case (a `SyntheticBackend` frame's smooth Gaussian
+  beam profile correctly has no usable lines for either `build_geometric_tilt_linear()` or `match_lines()`,
+  raising `LineMatchingError`). This function called `build_geometric_tilt()` (the pointwise method) until
+  the default-method switch documented above it.
 
 ---
 
@@ -1272,3 +1375,17 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   clearer "calibration complete" indication (e.g. holding the dialog open on an explicit
   success state with its own "Close" button, or a brief confirmation message) so the user
   knows it's safe to close the dialog and move on.
+- **Redo spectral calibration under the new geometric-tilt default, then take real spatial-chirp
+  measurements.** Now that `run_spectral_calibration()` builds its geometric-tilt calibration via
+  `build_geometric_tilt_linear()` (§3), the spectral calibration on disk needs to be re-captured so its
+  geometric-tilt artifact reflects the new default rather than the old pointwise one it was built with.
+  Once redone, take real spatial-chirp measurements (live view and/or extended measurement) to see whether
+  the grating-rotation physical fix and the linear tilt correction together (§0/§3) produce a genuinely
+  chirp-free beam, or a real, accurately-measured nonzero chirp. Needs the real camera connected — not
+  something to run unattended.
+- **Investigate the two open geometric-tilt questions flagged in §3**: whether the lamp image's brightest
+  line is really two unresolved close Argon lines (would need either less total tilt per exposure, or a
+  wavelength-informed match against the known line list to split them), and whether the edge-row row_shift
+  noise is genuine shot noise or a `MAX_WINDOW_HALF_WIDTH` window-clipping artifact (test by widening it
+  and re-running the comparison). Neither blocks the default-method switch above, but both affect how much
+  to trust either method's row_shift curve at its extremes.

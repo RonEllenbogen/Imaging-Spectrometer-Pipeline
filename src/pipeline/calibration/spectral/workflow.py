@@ -18,7 +18,7 @@ rather than requiring the caller to supply it -- unlike baseline/flat-
 field/bad-pixel-map, it needs nothing but a lamp exposure to build (no
 separate physical setup), so there's no reason to make the caller run a
 second capture session for it. It's built from the raw frames (before
-run_preprocessing() -- build_geometric_tilt() does its own per-line
+run_preprocessing() -- build_geometric_tilt_linear() does its own per-line
 background handling and doesn't need baseline/flat-field applied first),
 then folded into sensor_calibration for every run_preprocessing() call
 below, so the averaged image line_matching.py's match_lines() sees is
@@ -66,7 +66,7 @@ from pipeline.acquisition import CameraStream
 from ..shared.metadata import CalibrationRecord
 from .calibrate import calibrate_spectral, WavelengthCalibrationResult
 from .geometric_tilt import (
-    build_geometric_tilt,
+    build_geometric_tilt_linear,
     save_geometric_tilt,
     GeometricTiltResult,
     PLACEHOLDER_GAIN_E_PER_ADU,
@@ -127,12 +127,12 @@ def run_spectral_calibration(
         calibrate.calibrate_spectral().
     gain_e_per_adu
         Real measured conversion gain (calibration/sensor/conversion_
-        gain.py), passed through to build_geometric_tilt() alongside
+        gain.py), passed through to build_geometric_tilt_linear() alongside
         sensor_calibration.background_sigma (always threaded through
         unconditionally -- it's a required CalibrationSet field, so
         there's no reason not to) for the Thompson-Larson-Webb centroid
         uncertainty its shared row_shift curve is now weighted by (see
-        build_geometric_tilt()'s own docstring). Defaults to
+        build_geometric_tilt_linear()'s own docstring). Defaults to
         PLACEHOLDER_GAIN_E_PER_ADU for a caller with no real conversion-
         gain calibration to pass -- real callers (cli/calibration.py's
         spectral-capture, gui/calibration_dialogs.py's
@@ -155,8 +155,8 @@ def run_spectral_calibration(
         one session, so any drift between frames indicates a setup
         problem, not something to average over.
     LineMatchingError
-        Propagated from build_geometric_tilt() (too few usable lines to
-        build the tilt calibration) or match_lines() (too few peaks
+        Propagated from build_geometric_tilt_linear() (too few usable lines
+        to build the tilt calibration) or match_lines() (too few peaks
         matched against the reference wavelength list).
     '''
 
@@ -174,7 +174,7 @@ def run_spectral_calibration(
                 f"all lamp frames in one batch must share identical settings"
             )
 
-    tilt_result = build_geometric_tilt(
+    tilt_result = build_geometric_tilt_linear(
         frames, gain_e_per_adu=gain_e_per_adu, background_sigma=sensor_calibration.background_sigma,
     )
     save_geometric_tilt(geometric_tilt_path, tilt_result)
