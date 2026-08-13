@@ -425,21 +425,25 @@ class LiveViewWidget(QWidget):
         self._style_plot_axes(self._main_plot)
 
         # Heatmap first (so everything else renders on top of it), then
-        # scatter/error bars, then the fit curve LAST -- it traces nearly
-        # the same path as the scatter points, so drawing it underneath
-        # them (the original order) left it almost entirely hidden behind
-        # the denser, larger scatter markers.
+        # error bars, then the scatter -- pyqtgraph paints items in add
+        # order, and the error bar's vertical line runs straight through
+        # each point's centre, so adding it before the scatter (rather
+        # than after) keeps it from painting over and hiding the point.
+        # Fit curve LAST -- it traces nearly the same path as the scatter
+        # points, so drawing it underneath them (the original order) left
+        # it almost entirely hidden behind the denser, larger scatter
+        # markers.
         self._image_item = pg.ImageItem()
         self._image_item.setColorMap(pg.colormap.get("viridis"))
         self._main_plot.addItem(self._image_item)
+
+        self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
+        self._main_plot.addItem(self._error_bars)
 
         self._scatter = pg.ScatterPlotItem(
             size=7, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 200)
         )
         self._main_plot.addItem(self._scatter)
-
-        self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
-        self._main_plot.addItem(self._error_bars)
 
         self._fit_curve = pg.PlotDataItem(
             pen=pg.mkPen(color=FIT_CURVE_COLOR, width=FIT_CURVE_WIDTH)
