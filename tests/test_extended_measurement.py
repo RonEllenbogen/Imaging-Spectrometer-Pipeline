@@ -40,18 +40,22 @@ pytest.importorskip("pytestqt", reason="pytest-qt is a local-only GUI dependency
 # one lazily the first time a test requests the qtbot fixture.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QThreadPool  # noqa: E402
 from PySide6.QtWidgets import QDoubleSpinBox, QGroupBox, QSpinBox  # noqa: E402
 
 from pipeline.acquisition import (  # noqa: E402
     CameraConnectionError, CameraStream, SyntheticBackend, CANONICAL_SHAPE,
 )
-from pipeline.analysis import InsufficientDataError, SensorNoiseModel  # noqa: E402
+from pipeline.analysis import (  # noqa: E402
+    CombinedSpatialDispersionResult, InsufficientDataError, SensorNoiseModel,
+)
 from pipeline.calibration.shared import CalibrationRecord, GAIN_MATCH_TOLERANCE_ABS  # noqa: E402
 from pipeline.calibration.spatial import ScaleFactorPositionCalibration  # noqa: E402
 from pipeline.cli.calibration import DEFAULT_ARTIFACT_DIR  # noqa: E402
 from pipeline.preprocessing import CalibrationSet  # noqa: E402
 from pipeline.gui.extended_measurement import (  # noqa: E402
     DEFAULT_N_SHOTS,
+    EVALUATED_AT_DEBOUNCE_MS,
     FIT_CURVE_N_POINTS,
     ExtendedMeasurementScreen,
     compute_combined_polynomial_for_degree,
@@ -808,6 +812,241 @@ class TestExtendedMeasurementRealMeasurement:
             assert stream.exposure_us == pytest.approx(new_exposure_us)
             assert stream.is_running is True
             assert widget._shot_results is not None
+        finally:
+            stream.stop()
+
+
+# ---------------------------------------------------------------------------
+# extended_measurement.py -- "Evaluate At" debounce + stale-result guard
+# (pytest-qt, offscreen)
+# ---------------------------------------------------------------------------
+
+class TestExtendedMeasurementEvaluatedAtDebounce:
+
+    '''
+    Covers _on_evaluated_at_changed()'s debounce timer and
+    _on_evaluated_at_recompute_finished()'s staleness guard (see
+    extended_measurement.py's EVALUATED_AT_DEBOUNCE_MS/
+    _EvaluatedAtRecomputeRunnable/_invalidate_pending_evaluated_at_recompute()
+    docstrings) without relying on real wall-clock waits: the debounce
+    timer's own firing is driven directly (start()/stop()/isActive(),
+    or invoking its timeout handler straight away) rather than sleeping
+    past EVALUATED_AT_DEBOUNCE_MS, and the staleness guard is exercised by
+    calling _on_evaluated_at_recompute_finished() directly with
+    hand-picked request_id values rather than racing real background
+    threads against each other.
+    '''
+
+    def _dummy_combined_result(self, zeta_combined: float) -> CombinedSpatialDispersionResult:
+        return CombinedSpatialDispersionResult(
+            zeta_combined=zeta_combined, sigma_internal=1e-4, sigma_external=1e-4,
+            sigma_zeta_combined=1e-4, n_shots=3, block_length=2, first_crossing_lag=1,
+            lag1_autocorrelation=0.0,
+        )
+
+    def test_degree_one_does_not_arm_debounce_timer(self, qtbot, monkeypatch):
+        # Degree 1's spatial dispersion doesn't depend on the reference
+        # point at all (see module docstring) -- moving the spinner must
+        # not schedule any recompute, background or otherwise.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            assert widget._current_degree == 1
+
+            widget._evaluated_at_spin.setValue(300.0)
+
+            assert widget._evaluated_at_debounce_timer.isActive() is False
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is False
+        finally:
+            stream.stop()
+
+    def test_degree_gt_one_arms_debounce_timer_without_immediate_recompute(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            recompute_calls = []
+            monkeypatch.setattr(
+                widget, "_start_evaluated_at_recompute", lambda: recompute_calls.append(1)
+            )
+
+            widget._evaluated_at_spin.setValue(300.0)
+
+            # The timer is armed, but a recompute must not fire synchronously
+            # -- only once the debounce interval actually elapses (its
+            # timeout is connected straight to _start_evaluated_at_recompute(),
+            # which we've stubbed out above specifically to prove it wasn't
+            # invoked yet).
+            assert widget._evaluated_at_debounce_timer.isActive() is True
+            assert widget._evaluated_at_debounce_timer.interval() == EVALUATED_AT_DEBOUNCE_MS
+            assert recompute_calls == []
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is True
+        finally:
+            stream.stop()
+
+    def test_rapid_ticks_restart_timer_instead_of_firing_each_one(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            recompute_calls = []
+            monkeypatch.setattr(
+                widget, "_start_evaluated_at_recompute", lambda: recompute_calls.append(1)
+            )
+
+            # A burst of ticks, as a user dragging the spinner or typing a
+            # multi-digit value would produce -- each one should restart
+            # the timer, not queue up a recompute of its own.
+            for column in (250.0, 260.0, 270.0, 280.0):
+                widget._evaluated_at_spin.setValue(column)
+
+            assert recompute_calls == []
+            assert widget._evaluated_at_debounce_timer.isActive() is True
+        finally:
+            stream.stop()
+
+    def test_debounced_recompute_updates_labels_off_main_thread(self, qtbot, monkeypatch):
+        # Bypasses the real timer interval by invoking its timeout
+        # handler directly (equivalent to letting EVALUATED_AT_DEBOUNCE_MS
+        # elapse, without an actual wall-clock wait), then blocks on the
+        # real QThreadPool worker finishing and drains the Qt event loop
+        # so the queued cross-thread finished signal is delivered.
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            widget._evaluated_at_spin.setValue(300.0)
+            generation_before = widget._evaluated_at_generation
+
+            widget._evaluated_at_debounce_timer.stop()
+            widget._start_evaluated_at_recompute()
+
+            assert widget._evaluated_at_generation == generation_before + 1
+            assert QThreadPool.globalInstance().waitForDone(5000) is True
+            qtbot.wait(50)  # drains the event loop so the queued signal is delivered
+
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is False
+            assert widget._spatial_dispersion_label.text() != "--"
+            assert "Error" not in widget._spatial_dispersion_label.text()
+        finally:
+            stream.stop()
+
+    def test_stale_result_is_discarded(self, qtbot, monkeypatch):
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            widget._set_recomputing_indicator(True)
+            text_before = widget._spatial_dispersion_label.text()
+            current_generation = widget._evaluated_at_generation
+
+            # A result tagged with an older generation than the one
+            # currently in effect -- simulates a background request that
+            # was superseded by a newer tick/degree switch/run before it
+            # reported back. Must be silently discarded: neither the
+            # label nor the "recomputing" indicator should change.
+            stale_request_id = current_generation  # about to be superseded below
+            widget._evaluated_at_generation += 1  # a newer request has since been issued
+            widget._on_evaluated_at_recompute_finished(
+                stale_request_id, self._dummy_combined_result(zeta_combined=999.0)
+            )
+
+            assert widget._spatial_dispersion_label.text() == text_before
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is True
+
+            # The current (non-stale) generation's result must still be
+            # applied normally.
+            current_request_id = widget._evaluated_at_generation
+            widget._on_evaluated_at_recompute_finished(
+                current_request_id, self._dummy_combined_result(zeta_combined=999.0)
+            )
+
+            assert widget._spatial_dispersion_label.text() != text_before
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is False
+        finally:
+            stream.stop()
+
+    def test_synchronous_recompute_invalidates_pending_background_request(self, qtbot, monkeypatch):
+        # A degree switch (or a fresh Run Measurement) is always a fully
+        # synchronous, immediately-authoritative recompute -- any
+        # background request armed/in-flight before it must become stale,
+        # so it can never later clobber the freshly-synchronous result
+        # (see _invalidate_pending_evaluated_at_recompute()).
+        monkeypatch.setattr(
+            "pipeline.gui.extended_measurement.QMessageBox.warning", lambda *a, **k: None
+        )
+        bundle = build_realistic_calibration_bundle()
+        stream = _realistic_running_camera_stream()
+        try:
+            widget = _make_widget_from_bundle(qtbot, bundle, stream)
+            widget._n_shots_spin.setValue(3)
+            widget._run_button.click()
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(2))
+
+            widget._evaluated_at_spin.setValue(300.0)
+            # Bypasses the real timer interval (equivalent to it having
+            # elapsed) so a real request_id is actually assigned -- see
+            # _start_evaluated_at_recompute()'s own generation bump.
+            widget._evaluated_at_debounce_timer.stop()
+            widget._start_evaluated_at_recompute()
+            pending_request_id = widget._evaluated_at_generation
+
+            # Switching degrees is a synchronous recompute that must
+            # invalidate the still-pending (degree-2) background request
+            # above, even though its real worker thread may not have
+            # reported back yet.
+            widget._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(3))
+
+            assert widget._evaluated_at_generation != pending_request_id
+            assert widget._evaluated_at_debounce_timer.isActive() is False
+            assert widget._combined_result_form.isRowVisible(widget._recomputing_label) is False
+
+            text_after_degree_switch = widget._spatial_dispersion_label.text()
+            widget._on_evaluated_at_recompute_finished(
+                pending_request_id, self._dummy_combined_result(zeta_combined=999.0)
+            )
+            # The stale (degree-2) request must not overwrite the degree-3
+            # result that's now on screen.
+            assert widget._spatial_dispersion_label.text() == text_after_degree_switch
+
+            # Drains the real background worker (if still in flight) so it
+            # doesn't leak into a later test.
+            QThreadPool.globalInstance().waitForDone(5000)
+            qtbot.wait(20)
         finally:
             stream.stop()
 

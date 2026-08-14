@@ -108,7 +108,7 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -219,6 +219,28 @@ DEGREE_GT_ONE_NOTE = (
     "reference point."
 )
 
+# self._evaluated_at_spin's valueChanged fires on every keystroke/spin-box
+# tick, not just when the user settles on a final value -- at degree > 1,
+# each recompute now involves combine_shots()'s moving-block bootstrap
+# (analysis/block_bootstrap.py), so recombining synchronously on every
+# tick would both stall the UI thread and throw away almost all of that
+# work the instant the next tick arrives. This is the idle time (ms) the
+# spinner must go untouched before a recompute actually starts -- restarted
+# on every new tick (see _on_evaluated_at_changed()), not fired once per
+# tick.
+EVALUATED_AT_DEBOUNCE_MS = 250
+
+# Bootstrap resample counts for the two paths that call combine_shots()
+# through compute_combined_result_for_degree(): the live "Evaluate At"
+# preview (debounced above, then run off the Qt main thread -- see
+# _EvaluatedAtRecomputeSignals/_start_evaluated_at_recompute()) uses a
+# smaller count to stay responsive shortly after the debounce interval
+# elapses; every other call site in this module (a fresh Run Measurement,
+# a degree-selector change -- both already-discrete, already-blocking user
+# actions, not a continuous stream of ticks) uses combine_shots()'s own
+# richer default instead, since accuracy is free there.
+LIVE_PREVIEW_N_RESAMPLES = 400
+
 
 # Classes
 
@@ -240,6 +262,72 @@ class _PixelColumnWavelengthAxis:
 
     def sigma_wavelength_nm(self, pixel: np.ndarray) -> np.ndarray:
         return np.full(pixel.shape, PIXEL_COLUMN_SIGMA, dtype=np.float64)
+
+
+class _EvaluatedAtRecomputeSignals(QObject):
+
+    '''
+    QRunnable itself cannot own a Signal (it isn't a QObject) -- this is
+    the standard PySide6 pattern for a QThreadPool worker that needs to
+    report back to the Qt main thread: a small QObject the QRunnable holds
+    an instance of purely to emit through. finished carries
+    (request_id, result_or_exception) back to
+    ExtendedMeasurementScreen._on_evaluated_at_recompute_finished(), which
+    runs on the main thread (Signal/Slot delivery across threads is
+    queued by Qt automatically here, since the receiver lives on the main
+    thread's event loop) -- nothing in _EvaluatedAtRecomputeRunnable.run()
+    (running on a worker thread) touches a Qt widget directly.
+    '''
+
+    finished = Signal(int, object)
+
+
+class _EvaluatedAtRecomputeRunnable(QRunnable):
+
+    '''
+    Runs compute_combined_result_for_degree() (degree > 1's combine_shots()
+    call, including its moving-block bootstrap) off the Qt main thread, for
+    ExtendedMeasurementScreen's debounced "Evaluate At" live preview -- see
+    EVALUATED_AT_DEBOUNCE_MS's docstring for why this needs to be both
+    debounced and threaded. request_id is this screen's monotonically
+    increasing generation counter at submission time (see
+    _start_evaluated_at_recompute()'s docstring for the staleness-guard
+    this enables).
+
+    Exceptions from compute_combined_result_for_degree() are caught and
+    forwarded through the same finished signal (as the exception object
+    itself, in place of a CombinedSpatialDispersionResult) rather than
+    left to propagate on the worker thread, where Qt would have nowhere
+    useful to deliver them -- the main-thread slot decides what, if
+    anything, to show the user.
+    '''
+
+    def __init__(
+        self,
+        request_id: int,
+        shot_results: list[ShotAnalysisResult],
+        degree: int,
+        wavelength_ref_nm: float,
+    ) -> None:
+
+        super().__init__()
+        self.signals = _EvaluatedAtRecomputeSignals()
+        self._request_id = request_id
+        self._shot_results = shot_results
+        self._degree = degree
+        self._wavelength_ref_nm = wavelength_ref_nm
+
+    def run(self) -> None:
+
+        try:
+            result = compute_combined_result_for_degree(
+                self._shot_results, self._degree, self._wavelength_ref_nm,
+                n_resamples=LIVE_PREVIEW_N_RESAMPLES,
+            )
+        except Exception as error:  # noqa: BLE001 -- forwarded to the main thread, not swallowed
+            self.signals.finished.emit(self._request_id, error)
+        else:
+            self.signals.finished.emit(self._request_id, result)
 
 
 class ExtendedMeasurementScreen(QWidget):
@@ -336,6 +424,24 @@ class ExtendedMeasurementScreen(QWidget):
         self._measurement_representative_frames: dict[str, ProcessedFrame] | None = None
         self._measurement_roi_bounds_px: tuple[int, int] | None = None
         self._measurement_column_bounds: tuple[int, int] | None = None
+
+        # Debounce + staleness-guard state for the degree > 1 "Evaluate
+        # At" live preview (see EVALUATED_AT_DEBOUNCE_MS's docstring and
+        # _on_evaluated_at_changed()). self._evaluated_at_generation is
+        # bumped both by every synchronous recompute
+        # (_refresh_measurement_display(), which always reflects the
+        # latest state immediately -- a fresh Run Measurement or a degree
+        # switch) and by every new debounced background request
+        # (_start_evaluated_at_recompute()); a background result is only
+        # applied if its captured request_id still matches this counter
+        # when it arrives, so an in-flight request that's been superseded
+        # by either kind of newer request is silently discarded rather
+        # than clobbering a more current on-screen value.
+        self._evaluated_at_generation = 0
+        self._evaluated_at_debounce_timer = QTimer(self)
+        self._evaluated_at_debounce_timer.setSingleShot(True)
+        self._evaluated_at_debounce_timer.setInterval(EVALUATED_AT_DEBOUNCE_MS)
+        self._evaluated_at_debounce_timer.timeout.connect(self._start_evaluated_at_recompute)
 
         self._apply_pyqtgraph_theme()
         self._build_ui()
@@ -659,6 +765,13 @@ class ExtendedMeasurementScreen(QWidget):
             False when no conversion-gain record was supplied).
         '''
 
+        # Discards/guards against any degree > 1 live-preview bootstrap
+        # still in flight -- without this, a result that started before
+        # drift was detected could arrive after this method has already
+        # set "N/A" and silently overwrite it with a stale number (see
+        # _invalidate_pending_evaluated_at_recompute()'s own docstring).
+        self._invalidate_pending_evaluated_at_recompute()
+
         self._n_shots_label.setText("N/A")
         self._spatial_dispersion_label.setText("N/A")
         self._reduced_chi_squared_label.setText("N/A")
@@ -780,6 +893,16 @@ class ExtendedMeasurementScreen(QWidget):
         self._evaluated_at_label = QLabel("")
         self._evaluated_at_label.setWordWrap(True)
 
+        # Shown only while a degree > 1 background recompute triggered by
+        # _on_evaluated_at_changed() is in flight (see
+        # _set_recomputing_indicator()) -- Spatial Dispersion/Reduced
+        # Chi-Squared above still show the *previous* reference point's
+        # values at that moment (recomputing, not yet cleared), so this
+        # exists purely to make that momentary staleness visible rather
+        # than silently confusing.
+        self._recomputing_label = QLabel("Recomputing...")
+        self._recomputing_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-style: italic;")
+
         self._degree_note_label = QLabel("")
         self._degree_note_label.setWordWrap(True)
         self._degree_note_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-style: italic;")
@@ -787,7 +910,7 @@ class ExtendedMeasurementScreen(QWidget):
         for widget in (
             self._n_shots_label, self._coefficients_label, self._spatial_dispersion_label,
             self._reduced_chi_squared_label, self._evaluated_at_spin,
-            self._evaluated_at_label, self._degree_note_label,
+            self._evaluated_at_label, self._recomputing_label, self._degree_note_label,
         ):
             widget.setFont(label_font)
 
@@ -797,7 +920,9 @@ class ExtendedMeasurementScreen(QWidget):
         form.addRow("Reduced Chi-Squared:", self._reduced_chi_squared_label)
         form.addRow("Evaluate At:", self._evaluated_at_spin)
         form.addRow("Evaluated At:", self._evaluated_at_label)
+        form.addRow("", self._recomputing_label)
         form.addRow("", self._degree_note_label)
+        self._combined_result_form.setRowVisible(self._recomputing_label, False)
 
         return group
 
@@ -1006,12 +1131,101 @@ class ExtendedMeasurementScreen(QWidget):
         Only affects degree > 1 (see _compute_combined_result()) -- for
         degree 1 this still updates the "Evaluated At" readout text (kept
         in sync for whenever the user switches to a degree > 1) but has no
-        effect on the reported number. Re-evaluates each cached shot's
-        zeta(wavelength_ref)/sigma_zeta(wavelength_ref) at the new
-        reference point and recombines -- no new acquisition needed.
+        effect on the reported number, so no recompute is scheduled at
+        degree 1 at all.
+
+        At degree > 1, this fires on every keystroke/spin-box tick, not
+        just when the user settles on a final value -- recombining
+        synchronously on every tick would both stall the UI thread (each
+        recombination now runs a moving-block bootstrap, see
+        combine_shots()) and throw away almost all of that work the
+        instant the next tick arrives. So this only updates the cheap
+        "Evaluated At" text immediately, then (re)starts a debounced timer
+        (EVALUATED_AT_DEBOUNCE_MS) -- restarted, not fired, on every call,
+        so only the last tick in a burst actually triggers a recompute,
+        which then runs off the Qt main thread (see
+        _start_evaluated_at_recompute()).
         '''
 
-        self._refresh_measurement_display()
+        has_reference_point = self._current_degree > 1
+        self._evaluated_at_label.setText(
+            evaluated_at_text(column, self._wavelength_axis) if has_reference_point else ""
+        )
+
+        if self._shot_results is None or not has_reference_point:
+            return
+
+        self._set_recomputing_indicator(True)
+        self._evaluated_at_debounce_timer.start()
+
+    def _start_evaluated_at_recompute(self) -> None:
+
+        '''
+        Debounce timer's timeout handler: submits a
+        _EvaluatedAtRecomputeRunnable to the global QThreadPool for the
+        currently-selected degree/reference point, tagged with a freshly
+        bumped self._evaluated_at_generation as its request_id. Guarded
+        the same way _refresh_measurement_display() calling this widget
+        again in the meantime would be -- if the degree or shot data
+        changed since the timer was armed (e.g. the user switched degrees
+        during the debounce window), there is nothing stale to protect
+        against here since the request is built fresh from current state
+        at submission time; the staleness guard in
+        _on_evaluated_at_recompute_finished() instead protects against a
+        *result* arriving after an even newer request has since been
+        submitted.
+        '''
+
+        if self._shot_results is None or self._current_degree <= 1:
+            return
+
+        self._evaluated_at_generation += 1
+        request_id = self._evaluated_at_generation
+
+        runnable = _EvaluatedAtRecomputeRunnable(
+            request_id, self._shot_results, self._current_degree, self._evaluated_at_wavelength_nm(),
+        )
+        runnable.signals.finished.connect(self._on_evaluated_at_recompute_finished)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_evaluated_at_recompute_finished(self, request_id: int, result) -> None:
+
+        '''
+        Main-thread slot receiving _EvaluatedAtRecomputeRunnable's result
+        (or, if compute_combined_result_for_degree() raised, the
+        exception itself -- see that runnable's docstring). Discards
+        anything whose request_id no longer matches
+        self._evaluated_at_generation: the user may have moved the
+        spinner again (bumping the generation via a newer
+        _start_evaluated_at_recompute() call) or triggered a synchronous
+        recompute (a degree switch or fresh Run Measurement, which also
+        bumps it -- see _refresh_measurement_display()) while this request
+        was in flight, in which case a *newer* result already reflects the
+        current state and this older one must not overwrite it.
+        '''
+
+        if request_id != self._evaluated_at_generation:
+            return
+
+        self._set_recomputing_indicator(False)
+
+        if isinstance(result, Exception):
+            # compute_combined_result_for_degree() failing here would mean
+            # something is wrong with already-validated in-memory
+            # shot_results (not a fresh acquisition that could sensibly
+            # fail) -- surfaced defensively rather than silently dropped,
+            # but without interrupting the user with a modal dialog for
+            # what is, in practice, an unreachable path in normal use.
+            self._spatial_dispersion_label.setText(f"Error: {result}")
+            return
+
+        self._update_combined_result_labels(result)
+
+    def _set_recomputing_indicator(self, recomputing: bool) -> None:
+
+        '''Toggles the "Recomputing..." row -- see self._recomputing_label's own docstring.'''
+
+        self._combined_result_form.setRowVisible(self._recomputing_label, recomputing)
 
     # -- measurement data + display ---------------------------------------
 
@@ -1114,6 +1328,53 @@ class ExtendedMeasurementScreen(QWidget):
         column = np.array([self._evaluated_at_spin.value()])
         return float(self._axis_for_fit.wavelength_nm(column)[0])
 
+    def _update_combined_result_labels(self, combined: CombinedSpatialDispersionResult) -> None:
+
+        '''
+        Updates N Shots/Spatial Dispersion/Reduced Chi-Squared from an
+        already-computed CombinedSpatialDispersionResult -- shared by
+        _refresh_measurement_display() (a full synchronous recompute) and
+        _on_evaluated_at_recompute_finished() (the degree > 1 live-preview
+        background result). The background path only ever needs these
+        three: the coefficients/fit-curve/residuals don't depend on the
+        "Evaluate At" reference point at all (see DEGREE_GT_ONE_NOTE), so
+        _refresh_measurement_display() is the only caller that goes on to
+        touch them.
+        '''
+
+        self._n_shots_label.setText(str(combined.n_shots))
+        zeta_nm, zeta_sigma_nm = self._zeta_to_nm(combined.zeta_combined, combined.sigma_zeta_combined)
+        self._spatial_dispersion_label.setText(format_value_with_uncertainty(zeta_nm, zeta_sigma_nm))
+        # combine_shots() doesn't expose reduced chi-squared as its own
+        # field (see combination.py) -- but it's recoverable exactly from
+        # the two sigmas it does return, since weighted_scatter/(n_shots-1)
+        # (the standard reduced-chi-squared definition) equals
+        # (sigma_external/sigma_internal)**2 by construction:
+        # weighted_scatter = sigma_external**2 * (n_shots-1) * sum(weights),
+        # and sum(weights) = 1/sigma_internal**2.
+        reduced_chi_squared = (combined.sigma_external / combined.sigma_internal) ** 2
+        self._reduced_chi_squared_label.setText(f"{reduced_chi_squared:.3f}")
+
+    def _invalidate_pending_evaluated_at_recompute(self) -> None:
+
+        '''
+        Bumps self._evaluated_at_generation and stops the debounce timer
+        -- called at the top of _refresh_measurement_display(), which is
+        always a fully synchronous, immediately-authoritative recompute
+        (a fresh Run Measurement or a degree switch). Ensures any
+        already-in-flight background bootstrap (see
+        _start_evaluated_at_recompute()) is recognized as stale and
+        discarded when it eventually reports back
+        (_on_evaluated_at_recompute_finished()), and that a debounce timer
+        armed just before this call doesn't also fire moments later and
+        redundantly recompute against what could now even be a different
+        degree or a freshly re-run measurement.
+        '''
+
+        self._evaluated_at_generation += 1
+        self._evaluated_at_debounce_timer.stop()
+        self._set_recomputing_indicator(False)
+
     def _refresh_measurement_display(self) -> None:
 
         '''
@@ -1127,6 +1388,8 @@ class ExtendedMeasurementScreen(QWidget):
         while the numeric labels and plots stay at their "--"/empty
         initial state.
         '''
+
+        self._invalidate_pending_evaluated_at_recompute()
 
         degree = self._current_degree
 
@@ -1149,19 +1412,7 @@ class ExtendedMeasurementScreen(QWidget):
             return
 
         combined = self._compute_combined_result(degree)
-
-        self._n_shots_label.setText(str(combined.n_shots))
-        zeta_nm, zeta_sigma_nm = self._zeta_to_nm(combined.zeta_combined, combined.sigma_zeta_combined)
-        self._spatial_dispersion_label.setText(format_value_with_uncertainty(zeta_nm, zeta_sigma_nm))
-        # combine_shots() doesn't expose reduced chi-squared as its own
-        # field (see combination.py) -- but it's recoverable exactly from
-        # the two sigmas it does return, since weighted_scatter/(n_shots-1)
-        # (the standard reduced-chi-squared definition) equals
-        # (sigma_external/sigma_internal)**2 by construction:
-        # weighted_scatter = sigma_external**2 * (n_shots-1) * sum(weights),
-        # and sum(weights) = 1/sigma_internal**2.
-        reduced_chi_squared = (combined.sigma_external / combined.sigma_internal) ** 2
-        self._reduced_chi_squared_label.setText(f"{reduced_chi_squared:.3f}")
+        self._update_combined_result_labels(combined)
 
         if degree == 1:
             self._recompute_fit_and_residuals(combined.zeta_combined)
@@ -1445,7 +1696,12 @@ def _representative_shot_indices(n_shots: int) -> dict[str, int]:
 
 
 def compute_combined_result_for_degree(
-    shot_results: list[ShotAnalysisResult], degree: int, wavelength_ref_nm: float,
+    shot_results: list[ShotAnalysisResult],
+    degree: int,
+    wavelength_ref_nm: float,
+    *,
+    n_resamples: int | None = None,
+    rng: np.random.Generator | None = None,
 ) -> CombinedSpatialDispersionResult:
 
     '''
@@ -1456,6 +1712,16 @@ def compute_combined_result_for_degree(
     combined result for every degree, not just whichever one is currently
     selected on screen, using the exact same code path rather than
     independently re-derived logic that could silently drift from it.
+
+    shot_results must be in acquisition order -- combine_shots()'s
+    sigma_external now depends on shot order (see its own module
+    docstring): a moving-block bootstrap over the shot series, which needs
+    real temporal order preserved to detect/resample whatever shot-to-shot
+    correlation actually exists. Every caller in this codebase already
+    passes shot_results straight from ExtendedMeasurementScreen._shot_results
+    (built by appending each collect_n_frames() shot in acquisition order,
+    never reordered), so this is automatically satisfied, not something
+    callers need to arrange themselves.
 
     Degree 1: combine_shots() directly on each shot's fitted linear zeta
     (coefficients[1]) and its uncertainty (coefficient_sigma[1]) --
@@ -1472,6 +1738,15 @@ def compute_combined_result_for_degree(
     (value, sigma) pairs, not specific to raw fit coefficients.
     wavelength_ref_nm is ignored at degree 1 (accepted unconditionally
     anyway, so callers don't need a degree-dependent call shape).
+
+    n_resamples/rng are forwarded to combine_shots()'s own moving-block
+    bootstrap -- None for either lets combine_shots() use its own default
+    (accurate, not time-budgeted); ExtendedMeasurementScreen's debounced
+    live "Evaluate At" preview passes a smaller n_resamples explicitly
+    (see LIVE_PREVIEW_N_RESAMPLES) since it's on an interactive time
+    budget. rng is exposed mainly for tests that need a deterministic,
+    caller-supplied generator rather than combine_shots()'s own seeded
+    default.
     '''
 
     if degree == 1:
@@ -1492,7 +1767,13 @@ def compute_combined_result_for_degree(
             for result in shot_results
         ])
 
-    return combine_shots(zeta_values, sigma_zeta_values)
+    bootstrap_kwargs = {}
+    if n_resamples is not None:
+        bootstrap_kwargs["n_resamples"] = n_resamples
+    if rng is not None:
+        bootstrap_kwargs["rng"] = rng
+
+    return combine_shots(zeta_values, sigma_zeta_values, **bootstrap_kwargs)
 
 
 def compute_combined_polynomial_for_degree(

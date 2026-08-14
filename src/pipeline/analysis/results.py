@@ -225,6 +225,24 @@ class CombinedSpatialDispersionResult:
         quadrature.
     n_shots
         Number of shots combined.
+    block_length
+        The moving-block-bootstrap block length combine_shots() selected
+        from the shot series' own measured autocorrelation (see
+        analysis/block_bootstrap.py's select_block_length()) to compute
+        sigma_external -- 0 when n_shots == 1 (no scatter/correlation
+        information exists at n_shots == 1, so no bootstrap runs; see
+        combine_shots()).
+    first_crossing_lag
+        The first lag (>= 1) at which the shot series' sample
+        autocorrelation drops below the ~95% white-noise significance
+        bound -- block_length is 2x this, clipped (see
+        select_block_length()). 0 when n_shots == 1.
+    lag1_autocorrelation
+        The shot series' own lag-1 sample autocorrelation -- the single
+        most interpretable diagnostic number for whether shots behave as
+        independent draws (near 0) or exhibit real shot-to-shot
+        correlation (see combine_shots()'s module docstring for why this
+        matters to sigma_external). 0.0 when n_shots == 1.
     '''
 
     zeta_combined: float
@@ -232,10 +250,15 @@ class CombinedSpatialDispersionResult:
     sigma_external: float
     sigma_zeta_combined: float
     n_shots: int
+    block_length: int = 0
+    first_crossing_lag: int = 0
+    lag1_autocorrelation: float = 0.0
 
     def __post_init__(self) -> None:
         if self.n_shots < 1:
             raise ValueError(f"n_shots must be at least 1, got {self.n_shots}")
+        if self.block_length < 0:
+            raise ValueError(f"block_length must be non-negative, got {self.block_length}")
 
 
 # Functions
