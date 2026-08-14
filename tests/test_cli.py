@@ -148,10 +148,14 @@ class TestArgumentParsing:
     def test_spatial_no_required_args(self):
         args = self.parser.parse_args(["spatial"])
         assert args.scale_factor is None
+        assert args.sigma_scale_factor is None
 
-    def test_spatial_set_scale_factor(self):
-        args = self.parser.parse_args(["spatial", "--scale-factor", "1.62"])
+    def test_spatial_set_scale_factor_and_sigma(self):
+        args = self.parser.parse_args(
+            ["spatial", "--scale-factor", "1.62", "--sigma-scale-factor", "0.02"]
+        )
         assert args.scale_factor == 1.62
+        assert args.sigma_scale_factor == 0.02
 
     # --- conversion-gain ---
 
@@ -208,6 +212,51 @@ class TestArgumentParsing:
     def test_unknown_command_exits(self):
         with pytest.raises(SystemExit):
             self.parser.parse_args(["not-a-real-command"])
+
+
+# ---------------------------------------------------------------------------
+# spatial subcommand -- real wiring
+# ---------------------------------------------------------------------------
+#
+# Touches no camera at all (same reasoning as spectral-manual below), so
+# it's exercised for real: build args via the CLI's own parser, run the
+# resulting func(args), and confirm real spatial/io.py behavior.
+
+
+class TestCmdSpatialEndToEnd:
+
+    def test_scale_factor_without_sigma_rejected(self, tmp_path):
+        with pytest.raises(SystemExit):
+            cli.main(["spatial", "--scale-factor", "1.62", "--output-dir", str(tmp_path)])
+
+    def test_sigma_without_scale_factor_rejected(self, tmp_path):
+        with pytest.raises(SystemExit):
+            cli.main(["spatial", "--sigma-scale-factor", "0.02", "--output-dir", str(tmp_path)])
+
+    def test_scale_factor_and_sigma_given_together_saved(self, tmp_path, capsys):
+        cli.main([
+            "spatial",
+            "--scale-factor", "1.62",
+            "--sigma-scale-factor", "0.02",
+            "--output-dir", str(tmp_path),
+        ])
+
+        path = tmp_path / cli.DEFAULT_SCALE_FACTOR_FILENAME
+        assert path.exists()
+        calibration, record = cli.load_scale_factor(path)
+        assert np.isclose(calibration.scale_factor, 1.62)
+        assert np.isclose(calibration.sigma_scale_factor, 0.02)
+        assert record.source == "manual"
+        out = capsys.readouterr().out
+        assert "1.62" in out
+        assert "0.02" in out
+
+    def test_report_with_no_args_prints_sigma(self, tmp_path, capsys):
+        cli.main(["spatial", "--output-dir", str(tmp_path)])
+
+        out = capsys.readouterr().out
+        assert "scale_factor=" in out
+        assert "+/-" in out
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,7 @@ from pipeline.calibration.shared import (  # noqa: E402
 )
 from pipeline.calibration.spatial import (  # noqa: E402
     DEFAULT_SCALE_FACTOR,
+    DEFAULT_SIGMA_SCALE_FACTOR,
     ScaleFactorPositionCalibration,
     load_scale_factor,
 )
@@ -725,9 +726,10 @@ def test_conversion_gain_dialog_has_all_required_fields(qtbot):
 
 
 def test_spatial_dialog_defaults_to_given_scale_factor(qtbot):
-    dialog = SpatialCalibrationDialog(1.5)
+    dialog = SpatialCalibrationDialog(1.5, 0.01)
     qtbot.addWidget(dialog)
     assert dialog.scale_factor_spin.value() == pytest.approx(1.5)
+    assert dialog.sigma_scale_factor_spin.value() == pytest.approx(0.01)
 
 
 def test_spectral_dialog_defaults_to_capture_mode(qtbot):
@@ -1141,9 +1143,10 @@ class TestSpatialCalibrationDialogWiring:
 
     def test_save_button_persists_scale_factor_and_accepts(self, qtbot, monkeypatch, tmp_path):
         monkeypatch.setattr(calibration_dialogs_module, "DEFAULT_ARTIFACT_DIR", tmp_path)
-        dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR)
+        dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR, DEFAULT_SIGMA_SCALE_FACTOR)
         qtbot.addWidget(dialog)
         dialog.scale_factor_spin.setValue(1.75)
+        dialog.sigma_scale_factor_spin.setValue(0.03)
 
         dialog.save_button.click()
 
@@ -1152,6 +1155,7 @@ class TestSpatialCalibrationDialogWiring:
         assert path.exists()
         loaded_calibration, loaded_record = load_scale_factor(path)
         assert loaded_calibration.scale_factor == pytest.approx(1.75)
+        assert loaded_calibration.sigma_scale_factor == pytest.approx(0.03)
         assert loaded_record.source == "manual"
 
 

@@ -47,7 +47,7 @@ from pipeline.calibration.sensor import (
     run_conversion_gain_calibration,
 )
 from pipeline.calibration.spatial import (
-    ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR, PIXEL_PITCH_UM,
+    ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR, DEFAULT_SIGMA_SCALE_FACTOR, PIXEL_PITCH_UM,
     ScaleFactorRecord, save_scale_factor, load_scale_factor,
 )
 import pipeline.calibration.spectral.geometric_tilt as geometric_tilt_module
@@ -775,12 +775,15 @@ class TestScaleFactorPositionCalibration:
     def test_default_scale_factor(self):
         calibration = ScaleFactorPositionCalibration()
         assert calibration.scale_factor == DEFAULT_SCALE_FACTOR
+        assert calibration.sigma_scale_factor == DEFAULT_SIGMA_SCALE_FACTOR
 
-    def test_convert_scales_position_and_sigma(self):
+    def test_convert_scales_position_and_sigma_at_zero_sigma_scale_factor(self):
         # convert() applies PIXEL_PITCH_UM (pixel -> detector-plane distance)
         # AND scale_factor (detector-plane -> slit-plane distance) -- not
-        # scale_factor alone, see calibrate.py's module docstring.
-        calibration = ScaleFactorPositionCalibration(scale_factor=2.0)
+        # scale_factor alone, see calibrate.py's module docstring. With
+        # sigma_scale_factor=0 this collapses exactly to the pre-measurement
+        # single-term behavior (no scale-factor-uncertainty contribution).
+        calibration = ScaleFactorPositionCalibration(scale_factor=2.0, sigma_scale_factor=0.0)
         x0 = np.array([1.0, 2.0, 3.0])
         sigma_x0 = np.array([0.1, 0.2, 0.3])
 
@@ -789,6 +792,34 @@ class TestScaleFactorPositionCalibration:
         combined_factor = PIXEL_PITCH_UM * 2.0
         assert np.array_equal(converted_x0, x0 * combined_factor)
         assert np.array_equal(converted_sigma, sigma_x0 * combined_factor)
+
+    def test_convert_propagates_scale_factor_uncertainty(self):
+        # Two independent error sources: x0's own sigma_x0, scaled by the
+        # combined factor same as before, PLUS a second term proportional to
+        # x0 itself carrying scale_factor's own uncertainty -- hand-computed
+        # against the formula in calibrate.py's convert() docstring:
+        # sigma_y**2 = (k*sigma_x0)**2 + (x0*PIXEL_PITCH_UM*sigma_scale_factor)**2
+        scale_factor = 2.0
+        sigma_scale_factor = 0.1
+        calibration = ScaleFactorPositionCalibration(
+            scale_factor=scale_factor, sigma_scale_factor=sigma_scale_factor
+        )
+        x0 = np.array([10.0, 20.0])
+        sigma_x0 = np.array([0.5, 0.5])
+
+        converted_x0, converted_sigma = calibration.convert(x0, sigma_x0)
+
+        combined_factor = PIXEL_PITCH_UM * scale_factor
+        expected_x0 = x0 * combined_factor
+        expected_sigma = np.sqrt(
+            (combined_factor * sigma_x0) ** 2
+            + (x0 * PIXEL_PITCH_UM * sigma_scale_factor) ** 2
+        )
+        np.testing.assert_allclose(converted_x0, expected_x0)
+        np.testing.assert_allclose(converted_sigma, expected_sigma)
+        # A nonzero sigma_scale_factor must strictly increase the returned
+        # uncertainty relative to the old single-term behavior.
+        assert np.all(converted_sigma > combined_factor * sigma_x0)
 
     def test_to_pixels_is_inverse_of_convert(self):
         # Non-default scale_factor so this isn't accidentally only
@@ -806,22 +837,42 @@ class TestScaleFactorPositionCalibration:
         with pytest.raises(ValueError):
             ScaleFactorPositionCalibration(scale_factor=0.0)
 
+    def test_rejects_negative_sigma_scale_factor(self):
+        with pytest.raises(ValueError):
+            ScaleFactorPositionCalibration(sigma_scale_factor=-0.01)
+
 
 class TestScaleFactorPersistence:
 
     def test_load_missing_file_returns_default(self, tmp_path):
         calibration, record = load_scale_factor(tmp_path / "does_not_exist.npz")
         assert calibration.scale_factor == DEFAULT_SCALE_FACTOR
+        assert calibration.sigma_scale_factor == DEFAULT_SIGMA_SCALE_FACTOR
         assert record.source == "default"
 
     def test_save_load_round_trips_manual_override(self, tmp_path):
         path = tmp_path / "scale_factor.npz"
-        calibration = ScaleFactorPositionCalibration(scale_factor=1.62)
+        calibration = ScaleFactorPositionCalibration(scale_factor=1.62, sigma_scale_factor=0.02)
         save_scale_factor(path, calibration, source="manual")
 
         loaded_calibration, loaded_record = load_scale_factor(path)
 
         assert np.isclose(loaded_calibration.scale_factor, 1.62)
+        assert np.isclose(loaded_calibration.sigma_scale_factor, 0.02)
+        assert loaded_record.source == "manual"
+
+    def test_load_old_format_file_without_sigma_falls_back_to_default(self, tmp_path):
+        # Simulates a scale_factor.npz saved before sigma_scale_factor was
+        # tracked -- save_artifact() directly, bypassing save_scale_factor()
+        # so no "sigma_scale_factor" array key ends up in the file.
+        path = tmp_path / "scale_factor.npz"
+        record = ScaleFactorRecord(source="manual", timestamp=time.time())
+        save_artifact(path, {"scale_factor": np.array(1.55)}, record)
+
+        loaded_calibration, loaded_record = load_scale_factor(path)
+
+        assert np.isclose(loaded_calibration.scale_factor, 1.55)
+        assert loaded_calibration.sigma_scale_factor == DEFAULT_SIGMA_SCALE_FACTOR
         assert loaded_record.source == "manual"
 
     def test_rejects_invalid_source(self):

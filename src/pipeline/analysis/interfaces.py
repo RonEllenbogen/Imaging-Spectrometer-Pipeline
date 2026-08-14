@@ -59,7 +59,13 @@ class PositionCalibration(Protocol):
         self, x0: np.ndarray, sigma_x0: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
 
-        '''Converts pixel-unit (x0, sigma_x0) arrays to physical units.'''
+        '''
+        Converts pixel-unit (x0, sigma_x0) arrays to physical units. The
+        returned uncertainty reflects both x0's own input uncertainty and
+        the position calibration's own uncertainty (e.g. a measured
+        scale factor's sigma) -- not x0's uncertainty alone -- so it may
+        be larger than a naive rescaling of sigma_x0 would suggest.
+        '''
 
         ...
 

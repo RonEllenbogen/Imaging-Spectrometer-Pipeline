@@ -729,10 +729,21 @@ class SpatialCalibrationDialog(QDialog):
     it has no acquisition step at all.
 
     Saves a ScaleFactorPositionCalibration built from the entered value
-    via save_scale_factor() -- mirrors cli/calibration.py's _cmd_spatial.
+    and its uncertainty via save_scale_factor() -- mirrors
+    cli/calibration.py's _cmd_spatial, which requires both a
+    --scale-factor and a --sigma-scale-factor together for the same
+    reason this dialog always saves both spinboxes' values together: a
+    manually-entered override's precision may differ substantially from
+    DEFAULT_SIGMA_SCALE_FACTOR, so it must never silently fall back to
+    the default sigma for a user-supplied scale factor.
     '''
 
-    def __init__(self, current_scale_factor: float, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        current_scale_factor: float,
+        current_sigma_scale_factor: float,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Spatial Calibration -- Scale Factor")
         self.setStyleSheet(
@@ -781,6 +792,12 @@ class SpatialCalibrationDialog(QDialog):
         self.scale_factor_spin.setDecimals(4)
         self.scale_factor_spin.setValue(current_scale_factor)
         form.addRow("Scale factor:", self.scale_factor_spin)
+
+        self.sigma_scale_factor_spin = QDoubleSpinBox()
+        self.sigma_scale_factor_spin.setRange(0.0, 1000.0)
+        self.sigma_scale_factor_spin.setDecimals(4)
+        self.sigma_scale_factor_spin.setValue(current_sigma_scale_factor)
+        form.addRow("Scale factor uncertainty (+/-):", self.sigma_scale_factor_spin)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
@@ -794,9 +811,14 @@ class SpatialCalibrationDialog(QDialog):
 
     def _on_save_clicked(self) -> None:
         '''Builds a ScaleFactorPositionCalibration from the entered value
-        and persists it with source="manual" -- no camera/build_*() step,
-        so nothing here can raise a CameraError or CalibrationError.'''
-        calibration = ScaleFactorPositionCalibration(scale_factor=self.scale_factor_spin.value())
+        and its entered uncertainty (both spinboxes save together -- see
+        class docstring) and persists it with source="manual" -- no
+        camera/build_*() step, so nothing here can raise a CameraError or
+        CalibrationError.'''
+        calibration = ScaleFactorPositionCalibration(
+            scale_factor=self.scale_factor_spin.value(),
+            sigma_scale_factor=self.sigma_scale_factor_spin.value(),
+        )
         save_scale_factor(
             DEFAULT_ARTIFACT_DIR / DEFAULT_SCALE_FACTOR_FILENAME, calibration, source="manual"
         )

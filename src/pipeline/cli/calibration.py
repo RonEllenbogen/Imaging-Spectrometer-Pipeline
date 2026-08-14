@@ -281,18 +281,35 @@ def _cmd_spatial(args: argparse.Namespace) -> None:
     path = resolve_artifact_path(
         args.output_dir, args.path, DEFAULT_SCALE_FACTOR_FILENAME
     )
+    # --scale-factor and --sigma-scale-factor must be given together or
+    # not at all -- a manually-entered override's precision may differ
+    # substantially from DEFAULT_SIGMA_SCALE_FACTOR, so a user-supplied
+    # scale factor must never silently fall back to the default sigma.
+    if (args.scale_factor is None) != (args.sigma_scale_factor is None):
+        raise SystemExit(
+            "--scale-factor and --sigma-scale-factor must be given together, or not at all"
+        )
+
     if args.scale_factor is not None:
-        calibration = ScaleFactorPositionCalibration(scale_factor=args.scale_factor)
+        calibration = ScaleFactorPositionCalibration(
+            scale_factor=args.scale_factor, sigma_scale_factor=args.sigma_scale_factor
+        )
         save_scale_factor(path, calibration, source="manual")
-        print(f"saved scale_factor={calibration.scale_factor} to {path}")
+        print(
+            f"saved scale_factor={calibration.scale_factor} "
+            f"+/- {calibration.sigma_scale_factor} to {path}"
+        )
         return
 
     # No --scale-factor given -- report whatever's currently active (a
-    # saved override, or DEFAULT_SCALE_FACTOR if none exists yet), same
-    # read-only behavior as `noise-model`. No camera involved either way,
-    # matching build_bad_pixel_map()'s reasoning (see _cmd_bad_pixel_map).
+    # saved override, or the defaults if none exists yet), same read-only
+    # behavior as `noise-model`. No camera involved either way, matching
+    # build_bad_pixel_map()'s reasoning (see _cmd_bad_pixel_map).
     calibration, record = load_scale_factor(path)
-    print(f"scale_factor={calibration.scale_factor} (source={record.source})")
+    print(
+        f"scale_factor={calibration.scale_factor} "
+        f"+/- {calibration.sigma_scale_factor} (source={record.source})"
+    )
 
 
 def _cmd_conversion_gain(args: argparse.Namespace) -> None:
@@ -497,8 +514,20 @@ def build_parser() -> argparse.ArgumentParser:
         dest="scale_factor",
         help=(
             "Manually-measured relay-optics scale factor to save (source=manual). "
-            "Omit to report the currently active value instead (a saved override, "
-            "or DEFAULT_SCALE_FACTOR if none exists yet)."
+            "Must be given together with --sigma-scale-factor. Omit both to report "
+            "the currently active value instead (a saved override, or the defaults "
+            "if none exists yet)."
+        ),
+    )
+    spatial_parser.add_argument(
+        "--sigma-scale-factor",
+        type=float,
+        default=None,
+        dest="sigma_scale_factor",
+        help=(
+            "1-sigma uncertainty on --scale-factor. Required alongside "
+            "--scale-factor -- a manual override's precision may differ from "
+            "DEFAULT_SIGMA_SCALE_FACTOR, so it is never assumed silently."
         ),
     )
     spatial_parser.set_defaults(func=_cmd_spatial)

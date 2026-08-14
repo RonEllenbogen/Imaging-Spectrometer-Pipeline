@@ -464,23 +464,42 @@ about whatever camera is connected, not a per-session measurement) converts a pi
 to distance AT THE DETECTOR; `scale_factor` (the ratio of the imaging spectrometer's two relay-lens
 focal lengths, f1/f2, measuring the relay optics' magnification) then converts that detector-plane
 distance to the slit-plane distance where the physically meaningful spatial chirp actually lives.
-`DEFAULT_SCALE_FACTOR = 1.5` in `calibrate.py`. No uncertainty is tracked on either factor: the pixel
-pitch is a fixed datasheet spec, the lenses' focal lengths are known precisely, and the only real error
-source (misalignment, incorrect component spacing) manifests as blur/aberration in the image, not a
-quantifiable uncertainty on either quantity. `ScaleFactorPositionCalibration.convert()` implements
-`analysis.interfaces.PositionCalibration` directly, scaling both `x0` and `sigma_x0` by
-`PIXEL_PITCH_UM * scale_factor`, and returns the result in **microns** (matching `PIXEL_PITCH_UM`'s own
-unit -- a deliberate choice so the unit is self-evident from the code rather than an implicit mm
-conversion buried in the calibration math; converting to mm for a human-readable display is the
-caller's/GUI's job). The GUI can enter a manually better-measured `scale_factor`, which `io.py` persists
-(tagged `source="manual"` vs. `"default"` via `ScaleFactorRecord`) and reuses in future sessions --
-`PIXEL_PITCH_UM` has no equivalent manual-override path, since remeasuring a camera's own pixel pitch
-isn't a realistic user action the way remeasuring relay-lens magnification is.
+`DEFAULT_SCALE_FACTOR = 1.5` in `calibrate.py`. `PIXEL_PITCH_UM` still carries no uncertainty (a fixed
+datasheet spec), but `scale_factor` now does: it was originally treated as a theoretical design value
+("known to high precision," with misalignment expected to show up as blur/aberration rather than a
+quantifiable uncertainty) with no tracked sigma at all. **Superseded 14.8.26** -- the ratio has now
+actually been measured (raw data: `data/diagnostic/spatial_calibration_14.8.26/`, a 3x3 grid of `.bmp`
+captures), giving 1.504 +/- 0.008. The rounded default encodes both: `DEFAULT_SCALE_FACTOR = 1.5`
+(unchanged) and a new `DEFAULT_SIGMA_SCALE_FACTOR = 0.01`. `ScaleFactorPositionCalibration` gained a
+`sigma_scale_factor` field (default `DEFAULT_SIGMA_SCALE_FACTOR`, validated non-negative in
+`__post_init__`), and `convert()` now does real two-variable error propagation instead of a pure
+rescale: for `y = k*x0` with both `k = PIXEL_PITCH_UM * scale_factor` and `x0` uncertain and
+independent, `sigma_y**2 = (k*sigma_x0)**2 + (x0*PIXEL_PITCH_UM*sigma_scale_factor)**2` -- the second
+term needs `x0` itself (not just `sigma_x0`), since it scales with how far from zero the converted point
+is; at `sigma_scale_factor=0` this collapses exactly to the old single-term behavior.
+`sigma_scale_factor` is a single, session-wide, fully-correlated systematic uncertainty (the same
+measured ratio applied to every point), so -- like `analyze_shot()` never being given a
+`PositionCalibration` in practice (see §2's flagged-decisions list) -- it must only ever be applied via
+`convert()` on an already-final, already pixel-domain-combined quantity, never injected earlier into a
+per-column/per-shot value that then gets averaged (that would incorrectly let it shrink under
+`sqrt(N)`-style averaging).
+
+`ScaleFactorPositionCalibration.convert()` implements `analysis.interfaces.PositionCalibration` directly,
+and returns the result in **microns** (matching `PIXEL_PITCH_UM`'s own unit -- a deliberate choice so the
+unit is self-evident from the code rather than an implicit mm conversion buried in the calibration math;
+converting to mm for a human-readable display is the caller's/GUI's job). The GUI/CLI can enter a
+manually better-measured `scale_factor` together with its own `sigma_scale_factor` -- entering one
+without the other is rejected, since a manual override's precision may differ substantially from
+`DEFAULT_SIGMA_SCALE_FACTOR` and must never silently inherit it -- which `io.py` persists (tagged
+`source="manual"` vs. `"default"` via `ScaleFactorRecord`) and reuses in future sessions. `PIXEL_PITCH_UM`
+has no equivalent manual-override path, since remeasuring a camera's own pixel pitch isn't a realistic
+user action the way remeasuring relay-lens magnification is.
 `load_scale_factor()` is the one `load_*()` in this package that does NOT raise `FileNotFoundError` on
-a missing file -- it falls back to `DEFAULT_SCALE_FACTOR`, since (unlike a baseline or flat field) the
-scale factor always has a physically valid default; a fresh instrument with no saved override is the
-expected common case, not an error. `spatial/session.py`, from the original design, was deleted as no
-longer needed.
+a missing file -- it falls back to `DEFAULT_SCALE_FACTOR`/`DEFAULT_SIGMA_SCALE_FACTOR`, since (unlike a
+baseline or flat field) the scale factor always has a physically valid default; a fresh instrument with
+no saved override is the expected common case, not an error. It also tolerates an older-format saved
+file that predates `sigma_scale_factor` (falls back to `DEFAULT_SIGMA_SCALE_FACTOR` for just that field
+rather than raising). `spatial/session.py`, from the original design, was deleted as no longer needed.
 
 **Bug fixed during GUI review**: `convert()` originally applied `scale_factor` alone directly to the raw
 pixel index, skipping the `PIXEL_PITCH_UM` step entirely -- present in this file's own design rationale

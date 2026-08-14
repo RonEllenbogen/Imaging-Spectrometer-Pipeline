@@ -13,7 +13,11 @@ from pathlib import Path
 import numpy as np
 
 from ..shared.io import save_artifact, load_artifact
-from .calibrate import ScaleFactorPositionCalibration, DEFAULT_SCALE_FACTOR
+from .calibrate import (
+    ScaleFactorPositionCalibration,
+    DEFAULT_SCALE_FACTOR,
+    DEFAULT_SIGMA_SCALE_FACTOR,
+)
 
 # Constants
 
@@ -82,7 +86,14 @@ def save_scale_factor(path: str | Path, calibration: ScaleFactorPositionCalibrat
     '''
 
     record = ScaleFactorRecord(source=source, timestamp=time.time())
-    save_artifact(path, {"scale_factor": np.array(calibration.scale_factor)}, record)
+    save_artifact(
+        path,
+        {
+            "scale_factor": np.array(calibration.scale_factor),
+            "sigma_scale_factor": np.array(calibration.sigma_scale_factor),
+        },
+        record,
+    )
 
 
 def load_scale_factor(path: str | Path) -> tuple[ScaleFactorPositionCalibration, ScaleFactorRecord]:
@@ -93,8 +104,13 @@ def load_scale_factor(path: str | Path) -> tuple[ScaleFactorPositionCalibration,
     error here -- a fresh instrument with no saved override yet is the
     expected common case (the scale factor always has a physically valid
     default, unlike a baseline or flat field, which have none), so this
-    falls back to DEFAULT_SCALE_FACTOR tagged "default" instead of
-    raising.
+    falls back to DEFAULT_SCALE_FACTOR/DEFAULT_SIGMA_SCALE_FACTOR tagged
+    "default" instead of raising.
+
+    Also tolerates an older-format file saved before sigma_scale_factor
+    was tracked (missing that array key): falls back to
+    DEFAULT_SIGMA_SCALE_FACTOR for just that field rather than raising,
+    so a pre-existing saved override doesn't suddenly break on load.
 
     Parameters
     ----------
@@ -111,13 +127,29 @@ def load_scale_factor(path: str | Path) -> tuple[ScaleFactorPositionCalibration,
         arrays, record = load_artifact(path, ScaleFactorRecord)
     except FileNotFoundError:
         record = ScaleFactorRecord(source="default", timestamp=time.time())
-        logger.info("no saved scale factor at %s -- using default (%.3f)", path, DEFAULT_SCALE_FACTOR)
+        logger.info(
+            "no saved scale factor at %s -- using default (%.3f +/- %.3f)",
+            path, DEFAULT_SCALE_FACTOR, DEFAULT_SIGMA_SCALE_FACTOR,
+        )
         return ScaleFactorPositionCalibration(), record
 
-    calibration = ScaleFactorPositionCalibration(scale_factor=float(arrays["scale_factor"]))
+    try:
+        sigma_scale_factor = float(arrays["sigma_scale_factor"])
+    except KeyError:
+        sigma_scale_factor = DEFAULT_SIGMA_SCALE_FACTOR
+        logger.info(
+            "scale factor at %s predates sigma_scale_factor tracking -- "
+            "using default sigma (%.3f)",
+            path, DEFAULT_SIGMA_SCALE_FACTOR,
+        )
+
+    calibration = ScaleFactorPositionCalibration(
+        scale_factor=float(arrays["scale_factor"]), sigma_scale_factor=sigma_scale_factor
+    )
     logger.info(
-        "loaded scale factor %.3f from %s (source=%s, age %.1fs)",
-        calibration.scale_factor, path, record.source, record.age_seconds,
+        "loaded scale factor %.3f +/- %.3f from %s (source=%s, age %.1fs)",
+        calibration.scale_factor, calibration.sigma_scale_factor,
+        path, record.source, record.age_seconds,
     )
     return calibration, record
 

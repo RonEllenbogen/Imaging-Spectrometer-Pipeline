@@ -65,6 +65,7 @@ from pipeline.calibration.sensor import (
 )
 from pipeline.calibration.spatial import (
     DEFAULT_SCALE_FACTOR,
+    DEFAULT_SIGMA_SCALE_FACTOR,
     ScaleFactorPositionCalibration,
     load_scale_factor,
 )
@@ -622,7 +623,7 @@ class CreatePage(QWidget):
     def _open_spatial_dialog(self) -> None:
         # Spatial is not part of the completion gate (see class docstring)
         # -- no bookkeeping needed on top of the dialog's own save.
-        dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR, self)
+        dialog = SpatialCalibrationDialog(DEFAULT_SCALE_FACTOR, DEFAULT_SIGMA_SCALE_FACTOR, self)
         dialog.exec()
 
     def _open_spectral_dialog(self) -> None:
