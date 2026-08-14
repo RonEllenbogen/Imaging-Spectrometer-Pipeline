@@ -32,8 +32,11 @@ convention every real caller in this codebase already follows, e.g.
 scripts/analyze_raw_shot.py/scripts/measure_spatial_dispersion.py).
 self._position_calibration/_convert_to_mm() only convert already-computed
 pixel-unit results to mm for display, the same duality live_view.py uses
--- every plotted graph axis (main plot, residual plot) stays in mm this
-way, regardless of the paragraph below. Every *quoted* spatial-dispersion/
+-- the main plot's axis stays in mm this way, regardless of the paragraph
+below. The residual subplot is normalized on top of that mm conversion
+(residual_mm / sigma_x0_mm -- see _cache_display_residuals()), so it
+reads in dimensionless sigma units rather than mm itself. Every *quoted*
+spatial-dispersion/
 coefficient value (never a graph axis) instead goes through the nm-based
 _convert_to_nm()/_zeta_to_nm() -- this codebase's convention for those
 numbers specifically (see formatting.coefficient_unit()'s docstring).
@@ -183,9 +186,8 @@ DEFAULT_N_SHOTS = 20
 MIN_N_SHOTS = 2
 MAX_N_SHOTS = 1000
 
-# Residual subplot color -- distinct from the main scatter's white/
-# COLOR_ACCENT so a glance at the two plots doesn't read as one repeated
-# dataset.
+# Residual subplot color -- distinct from the main scatter's COLOR_ACCENT
+# so a glance at the two plots doesn't read as one repeated dataset.
 RESIDUAL_SCATTER_COLOR = "#ff9d5c"
 
 # Number of points sampled along the drawn fit-curve line -- a display
@@ -540,12 +542,20 @@ class ExtendedMeasurementScreen(QWidget):
         # order, and the error bar's vertical line runs straight through
         # each point's centre, so adding it before the scatter (rather
         # than after) keeps it from painting over and hiding the point.
+        # setZValue() below pins that stacking order explicitly rather
+        # than relying on add order alone.
         self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
+        self._error_bars.setZValue(0)
         self._main_plot.addItem(self._error_bars)
 
+        # Fully opaque COLOR_ACCENT, not a near-white brush -- a
+        # semi-transparent white point over the (also near-white)
+        # FOREGROUND_COLOR error-bar lines blended into the same shade,
+        # making the two indistinguishable regardless of paint order.
         self._scatter = pg.ScatterPlotItem(
-            size=7, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 200)
+            size=7, pen=pg.mkPen(None), brush=pg.mkBrush(ACCENT_COLOR)
         )
+        self._scatter.setZValue(10)
         self._main_plot.addItem(self._scatter)
 
         self._fit_curve = pg.PlotDataItem(
@@ -560,16 +570,15 @@ class ExtendedMeasurementScreen(QWidget):
 
         plot_widget = pg.PlotWidget()
         self._residual_plot = plot_widget.getPlotItem()
-        self._residual_plot.setLabel("left", "Residual (mm)")
+        self._residual_plot.setLabel("left", "Normalized Residual")
         self._residual_plot.setLabel("bottom", self._x_axis_label())
         self._residual_plot.showGrid(x=True, y=True, alpha=0.3)
         self._style_plot_axes(self._residual_plot)
         self._residual_plot.setXLink(self._main_plot)
-        # Residual values are already a small, readable mm figure --
-        # pyqtgraph's default autoSIPrefix scale annotation ("Residual
-        # (mm) x0.001"-style) clips against this plot's top edge (same
-        # issue live_view.py's strip chart solved with a dedicated
-        # _PowerOfTenAxisItem); simplest fix here is to just not scale.
+        # Normalized residuals are dimensionless order-1 values --
+        # pyqtgraph's default autoSIPrefix scale annotation isn't needed
+        # here, but disabling it is still harmless (see
+        # _display_residual_normalized).
         self._residual_plot.getAxis("left").enableAutoSIPrefix(False)
 
         self._residual_scatter = pg.ScatterPlotItem(
@@ -1489,17 +1498,35 @@ class ExtendedMeasurementScreen(QWidget):
         '''
         Aggregates residual_px (raw, one entry per (shot, column) point)
         down to one value per spectral column -- see
-        aggregate_centroids_by_column() -- and stores it as
-        self._display_residual_mm for _apply_roi_bounds() to draw. Shared
-        by both _recompute_fit_and_residuals() (degree 1) and
+        aggregate_centroids_by_column() -- then divides by
+        self._display_y_sigma_mm (that same column's centroid vertical
+        error bar) and stores the result as
+        self._display_residual_normalized for _apply_roi_bounds() to
+        draw. Both aggregations run over the same self._measurement_columns,
+        and aggregate_centroids_by_column() always returns columns in
+        ascending unique order, so the two arrays line up index-for-index
+        without needing to re-match on column value.
+
+        A column whose centroid has zero measured spread (a single-shot
+        column -- see aggregate_centroids_by_column()'s own docstring)
+        has no error bar to normalize against; that entry is left as NaN
+        here and dropped at draw time (_apply_roi_bounds()) rather than
+        plotted as a spurious 0 or +-inf.
+
+        Shared by both _recompute_fit_and_residuals() (degree 1) and
         _recompute_combined_polynomial_fit_and_residuals() (degree > 1),
         which differ only in how residual_px itself is computed.
         '''
 
         _, display_residual_px, _ = aggregate_centroids_by_column(self._measurement_columns, residual_px)
-        self._display_residual_mm, _ = self._convert_to_mm(
+        display_residual_mm, _ = self._convert_to_mm(
             display_residual_px, np.zeros_like(display_residual_px)
         )
+        sigma_mm = self._display_y_sigma_mm
+        with np.errstate(invalid="ignore", divide="ignore"):
+            self._display_residual_normalized = np.where(
+                sigma_mm > 0, display_residual_mm / sigma_mm, np.nan
+            )
 
     def _recompute_combined_polynomial_fit_and_residuals(self, degree: int) -> None:
 
@@ -1597,8 +1624,12 @@ class ExtendedMeasurementScreen(QWidget):
             x=self._measurement_fit_x[keep_fit], y=fit_y_full[keep_fit]
         )
 
+        # NaN-out columns with no error bar to normalize against (see
+        # _cache_display_residuals()) rather than let pyqtgraph paint
+        # them at an undefined position.
+        residual_keep = keep & np.isfinite(self._display_residual_normalized)
         self._residual_scatter.setData(
-            x=x_values[keep], y=self._display_residual_mm[keep]
+            x=x_values[residual_keep], y=self._display_residual_normalized[residual_keep]
         )
 
         self._main_plot.setRange(
