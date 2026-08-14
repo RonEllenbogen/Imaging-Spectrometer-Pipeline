@@ -426,6 +426,20 @@ def _write_combined_results(
             f"  reduced chi-squared (of the spatial-dispersion combination across shots) = "
             f"{_reduced_chi_squared(result.spatial_dispersion):.4g}"
         )
+        # Bootstrap diagnostics behind sigma_external above -- see
+        # analysis/block_bootstrap.py's module docstring for why
+        # sigma_external is no longer a naive weighted-scatter figure.
+        # Surfaced explicitly (not just consumed internally) the same way
+        # reduced_chi_squared already is, so a reader can judge for
+        # themselves whether this run's shots showed real shot-to-shot
+        # correlation.
+        lines.append(
+            f"  shot-to-shot lag-1 autocorrelation = "
+            f"{result.spatial_dispersion.lag1_autocorrelation:.4g}"
+        )
+        lines.append(
+            f"  moving-block bootstrap block length (shots) = {result.spatial_dispersion.block_length}"
+        )
         lines.append("")
 
     path.write_text("\n".join(lines))

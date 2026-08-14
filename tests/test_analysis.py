@@ -17,6 +17,8 @@ Kept as a single file, mirroring test_preprocessing.py's convention.
 
 # Imports
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -25,6 +27,7 @@ from pipeline.preprocessing import ProcessedFrame
 
 from pipeline.analysis import (
     analyze_shot, DEFAULT_DEGREES, combine_shots,
+    moving_block_bootstrap_sigma_external, sample_acf, select_block_length,
     CentroidEstimator, IntensityWeightedMoment, extract_centroids,
     SpatialDispersionFitter, TotalLeastSquaresFit,
     SensorNoiseModel,
@@ -40,8 +43,36 @@ FIXTURE_GAIN_DB = 0.0
 FIXTURE_FRAME_ID = 0
 FIXTURE_TIMESTAMP = 0.0
 
+# A real recorded 200-shot extended-measurement run, used only as a
+# sanity check that the block-bootstrap machinery lands in the same
+# ballpark against real data as the independent analytic AR(1) check it
+# was validated against (see TestCombineShotsRealDataset below). Skipped,
+# not failed, if this data isn't present in a given checkout.
+REAL_MEASUREMENT_FITS_PATH = Path(
+    "data/measurements/extended_measurement_20260813_171209/fits.npz"
+)
+
 
 # Functions
+
+def _ar1_series(rho: float, n: int, innovation_sigma: float = 1.0, seed: int = 0) -> np.ndarray:
+    '''
+    Generates a length-n AR(1) series x[t] = rho*x[t-1] + eps[t], eps ~
+    N(0, innovation_sigma) -- a known, controllable correlation structure
+    (autocorrelation at lag k is exactly rho**k in the population) to
+    check select_block_length()/moving_block_bootstrap_sigma_external()
+    respond correctly to real shot-to-shot correlation, mirroring the
+    lag-1 ~0.89 autocorrelation actually measured in a real recorded
+    extended-measurement run (see module docstring's
+    REAL_MEASUREMENT_FITS_PATH).
+    '''
+    rng = np.random.default_rng(seed)
+    innovations = rng.normal(0.0, innovation_sigma, size=n)
+    series = np.empty(n)
+    series[0] = innovations[0]
+    for t in range(1, n):
+        series[t] = rho * series[t - 1] + innovations[t]
+    return series
 
 def _synthetic_frame(
     centroid0_px=600.0, slope_px_per_col=0.0, beam_sigma_px=15.0,
@@ -463,6 +494,132 @@ class TestTotalLeastSquaresFit:
 
 
 # ---------------------------------------------------------------------------
+# block_bootstrap.py
+# ---------------------------------------------------------------------------
+
+class TestSelectBlockLength:
+
+    def test_short_block_length_for_iid_data(self):
+        rng = np.random.default_rng(11)
+        series = rng.normal(0.0, 1.0, size=200)
+
+        block_length, first_crossing_lag, lag1_autocorrelation = select_block_length(series)
+
+        # I.i.d. noise has no real correlation to preserve -- the ACF
+        # should cross the white-noise bound essentially immediately
+        # (lag 1), collapsing the block length to its minimum.
+        assert first_crossing_lag == 1
+        assert block_length == 2
+        assert abs(lag1_autocorrelation) < 0.3
+
+    def test_longer_block_length_for_correlated_ar1_data(self):
+        series = _ar1_series(rho=0.85, n=200, seed=3)
+
+        block_length, first_crossing_lag, lag1_autocorrelation = select_block_length(series)
+
+        # A strongly autocorrelated series must select a meaningfully
+        # longer block than the i.i.d. case above -- this is the same
+        # correlation regime as the real 200-shot dataset this bootstrap
+        # was validated against (lag-1 ~0.89, see
+        # TestCombineShotsRealDataset).
+        assert first_crossing_lag > 1
+        assert block_length > 2
+        assert lag1_autocorrelation == pytest.approx(0.85, abs=0.1)
+
+    def test_block_length_never_exceeds_series_length(self):
+        # A short, strongly-correlated series (e.g. n=3) is a degenerate
+        # edge case -- the clip must never let block_length exceed n,
+        # regardless of what the correlation structure alone would imply.
+        series = np.array([1.0, 1.01, 1.02])
+        block_length, _, _ = select_block_length(series)
+        assert block_length <= series.shape[0]
+
+    def test_constant_series_has_zero_autocorrelation(self):
+        # sample_acf()'s documented zero-variance fallback -- a constant
+        # series must not raise (divide by zero) and must read as
+        # "no detectable correlation".
+        series = np.full(50, 3.0)
+        block_length, first_crossing_lag, lag1_autocorrelation = select_block_length(series)
+        assert lag1_autocorrelation == 0.0
+        assert block_length == 2
+
+
+class TestMovingBlockBootstrapSigmaExternal:
+
+    def test_close_to_naive_scatter_for_independent_data(self):
+        rng = np.random.default_rng(21)
+        true_zeta = 0.02
+        sigma = 0.001
+        n = 100
+        zeta_values = rng.normal(true_zeta, sigma, size=n)
+        sigma_values = np.full(n, sigma)
+
+        weights = 1.0 / sigma_values ** 2
+        zeta_combined = np.sum(weights * zeta_values) / np.sum(weights)
+        weighted_scatter = np.sum(weights * (zeta_values - zeta_combined) ** 2)
+        naive_sigma_external = np.sqrt(weighted_scatter / ((n - 1) * np.sum(weights)))
+
+        block_length, _, _ = select_block_length(zeta_values)
+        bootstrap_sigma_external = moving_block_bootstrap_sigma_external(
+            zeta_values, sigma_values, block_length,
+            n_resamples=3000, rng=np.random.default_rng(0),
+        )
+
+        # Independent data -> the block bootstrap and the naive weighted
+        # scatter should be in the same ballpark (bootstraps are
+        # stochastic, so this is a ratio check, not an exact match).
+        assert bootstrap_sigma_external == pytest.approx(naive_sigma_external, rel=0.5)
+
+    def test_larger_than_naive_scatter_for_correlated_data(self):
+        # Same construction as the real dataset's sanity check
+        # (TestCombineShotsRealDataset): a genuinely autocorrelated shot
+        # series makes the naive weighted-scatter sigma_external an
+        # underestimate, which the block bootstrap should correct upward.
+        rho = 0.85
+        n = 200
+        sigma_value = 0.05
+        zeta_values = _ar1_series(rho=rho, n=n, innovation_sigma=1.0, seed=5) * 0.01 + 0.02
+        sigma_values = np.full(n, sigma_value)
+
+        weights = 1.0 / sigma_values ** 2
+        zeta_combined = np.sum(weights * zeta_values) / np.sum(weights)
+        weighted_scatter = np.sum(weights * (zeta_values - zeta_combined) ** 2)
+        naive_sigma_external = np.sqrt(weighted_scatter / ((n - 1) * np.sum(weights)))
+
+        block_length, _, _ = select_block_length(zeta_values)
+        bootstrap_sigma_external = moving_block_bootstrap_sigma_external(
+            zeta_values, sigma_values, block_length,
+            n_resamples=3000, rng=np.random.default_rng(0),
+        )
+
+        assert bootstrap_sigma_external > 1.3 * naive_sigma_external
+
+    def test_reproducible_with_same_seed(self):
+        rng_data = np.random.default_rng(7)
+        zeta_values = rng_data.normal(0.02, 0.001, size=30)
+        sigma_values = np.full(30, 0.001)
+
+        first = moving_block_bootstrap_sigma_external(
+            zeta_values, sigma_values, block_length=4, n_resamples=500, rng=np.random.default_rng(42)
+        )
+        second = moving_block_bootstrap_sigma_external(
+            zeta_values, sigma_values, block_length=4, n_resamples=500, rng=np.random.default_rng(42)
+        )
+        assert first == second
+
+
+class TestSampleAcf:
+
+    def test_lag1_matches_known_ar1_correlation(self):
+        series = _ar1_series(rho=0.7, n=500, seed=9)
+        acf = sample_acf(series, max_lag=5)
+        assert acf[0] == pytest.approx(0.7, abs=0.1)
+        # Autocorrelation must decay with increasing lag for a
+        # mean-reverting AR(1) process.
+        assert acf[0] > acf[1] > acf[2]
+
+
+# ---------------------------------------------------------------------------
 # combination.py
 # ---------------------------------------------------------------------------
 
@@ -500,10 +657,99 @@ class TestCombineShots:
         assert result.sigma_external == pytest.approx(result.sigma_internal)
         assert result.sigma_zeta_combined == pytest.approx(result.sigma_internal)
         assert result.n_shots == 1
+        # No scatter/correlation information exists at n_shots == 1 -- no
+        # bootstrap runs, and the diagnostics read as "not applicable".
+        assert result.block_length == 0
+        assert result.first_crossing_lag == 0
+        assert result.lag1_autocorrelation == 0.0
 
     def test_mismatched_shapes_raise(self):
         with pytest.raises(ValueError):
             combine_shots(np.zeros(3), np.zeros(4))
+
+    def test_diagnostics_populated_for_multiple_shots(self):
+        series = _ar1_series(rho=0.8, n=60, seed=13) * 0.001 + 0.02
+        result = combine_shots(series, np.full(60, 0.0005))
+
+        assert result.block_length >= 2
+        assert result.first_crossing_lag >= 1
+        assert result.lag1_autocorrelation == pytest.approx(0.8, abs=0.15)
+
+    def test_reproducible_without_explicit_rng(self):
+        # Scientific measurement record -- repeated calls against the same
+        # input must reproduce the same sigma_external by default (see
+        # block_bootstrap.DEFAULT_BOOTSTRAP_SEED), not draw fresh
+        # randomness each time.
+        zeta_values = _ar1_series(rho=0.7, n=40, seed=17) * 0.001 + 0.02
+        sigma_values = np.full(40, 0.0005)
+
+        first = combine_shots(zeta_values, sigma_values)
+        second = combine_shots(zeta_values, sigma_values)
+        assert first.sigma_external == second.sigma_external
+
+    def test_n_resamples_override_is_honored(self):
+        # A smaller n_resamples (as extended_measurement.py's live preview
+        # path uses) must still return a valid, finite result -- just
+        # exercising the parameter is enough here, the statistical
+        # validity of the bootstrap itself is covered by
+        # TestMovingBlockBootstrapSigmaExternal above.
+        zeta_values = _ar1_series(rho=0.6, n=50, seed=23) * 0.001 + 0.02
+        sigma_values = np.full(50, 0.0005)
+
+        result = combine_shots(zeta_values, sigma_values, n_resamples=50)
+        assert np.isfinite(result.sigma_external)
+        assert result.sigma_external > 0
+
+
+class TestCombineShotsRealDataset:
+
+    '''
+    Sanity check against a real recorded 200-shot extended-measurement
+    run (data/measurements/extended_measurement_20260813_171209/): a
+    naive weighted-scatter sigma_external on this dataset's degree-1
+    per-shot zeta series measures ~9.15 nm/nm (in the codebase's final
+    reporting units, after ScaleFactorPositionCalibration's px -> nm/nm
+    conversion), while an independent analytic AR(1) correction
+    (sigma x sqrt((1+rho)/(1-rho)), rho ~ 0.7815 from an ARIMA(1,0,2) fit)
+    gives ~26.1 nm/nm and a hand-tuned moving-block bootstrap (block
+    length 8) gives ~21.1 nm/nm -- both ~2.3-2.9x the naive value. This
+    confirms combine_shots()'s own automatic block-length selection lands
+    in the same ballpark, not just that the machinery runs without error.
+    '''
+
+    def test_bootstrap_sigma_in_validated_ballpark(self):
+        if not REAL_MEASUREMENT_FITS_PATH.is_file():
+            pytest.skip(f"real measurement data not present: {REAL_MEASUREMENT_FITS_PATH}")
+
+        # Same px -> nm/nm conversion factor
+        # gui/calibration_spatial.py's ScaleFactorPositionCalibration
+        # applies (PIXEL_PITCH_UM=3.45 x DEFAULT_SCALE_FACTOR=1.5 x 1000
+        # nm/um) -- reproduced here as a bare constant rather than
+        # importing gui/ into analysis/'s own test suite, which would
+        # invert this codebase's layering (gui/ depends on analysis/,
+        # never the reverse).
+        px_to_nm_per_nm = 3.45 * 1.5 * 1000.0
+
+        with np.load(REAL_MEASUREMENT_FITS_PATH) as data:
+            n_shots = 0
+            while f"shot{n_shots}_degree1_coefficients" in data.files:
+                n_shots += 1
+            zeta_values = np.array(
+                [data[f"shot{i}_degree1_coefficients"][1] for i in range(n_shots)]
+            )
+            sigma_zeta_values = np.array(
+                [data[f"shot{i}_degree1_coefficient_sigma"][1] for i in range(n_shots)]
+            )
+
+        result = combine_shots(zeta_values, sigma_zeta_values)
+        sigma_external_nm = result.sigma_external * px_to_nm_per_nm
+
+        assert result.n_shots == 200
+        # Real shot-to-shot correlation genuinely exists in this dataset.
+        assert result.lag1_autocorrelation == pytest.approx(0.89, abs=0.05)
+        # Validated range from the independent analytic AR(1)/hand-tuned
+        # bootstrap checks above: roughly 20-26 nm/nm.
+        assert 18.0 < sigma_external_nm < 28.0
 
 
 # ---------------------------------------------------------------------------
