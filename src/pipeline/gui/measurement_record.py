@@ -165,6 +165,17 @@ JOURNAL_RC_PARAMS = {
 DEGREE_PLOT_COLORS = {1: "#1b7837", 2: "#2166ac", 3: "#b2182b"}
 DEGREE_PLOT_LINESTYLES = {1: "-", 2: "--", 3: ":"}
 
+# Top-row centroid marker/error-bar colors -- split so a marker is never
+# blended into an overlapping error-bar line of the same shade the way a
+# single color="black" errorbar() call used to render both in one color
+# at the same alpha. Markers stay a fixed neutral black across all three
+# degree panels (the underlying centroid data doesn't depend on degree,
+# only the fit curve does) at full opacity; error bars stay a lighter
+# gray so overlapping bars still read as density rather than a solid
+# smear, without competing with the now fully-opaque markers on top.
+CENTROID_MARKER_COLOR = "#000000"
+CENTROID_ERROR_BAR_COLOR = "#999999"
+
 # Every calibration artifact type this record copies, keyed by the label
 # used in manifest.txt/the calibrations/ subdirectory -- values are the
 # same DEFAULT_*_FILENAME constants cli/calibration.py and
@@ -535,13 +546,22 @@ def _plot_journal_figure(
         for ax, residual_ax, degree in zip(fit_axes, residual_axes, DEGREE_CHOICES):
             result = per_degree[degree]
 
+            # Error bars and centroid markers are two separate layers,
+            # not one errorbar(fmt="o", color=...) call -- a single color
+            # at one alpha for both used to let overlapping bars and
+            # markers blend into an indistinguishable smear. Error-bar
             # alpha kept modest even at this (post-aggregation) point
             # count -- adjacent columns' error bars still overlap along
             # the fit curve, and a lighter fill keeps that overlap's
-            # density visible rather than a filled band.
+            # density visible rather than a filled band. Markers are
+            # fully opaque and drawn on top (higher zorder) so a point is
+            # never lost against the error-bar layer beneath it.
             ax.errorbar(
                 wavelength_nm, y_values_mm, xerr=x_sigma_nm, yerr=y_sigma_mm,
-                fmt="o", color="black", markersize=3, elinewidth=0.6, capsize=0, alpha=0.5, zorder=1,
+                fmt="none", ecolor=CENTROID_ERROR_BAR_COLOR, elinewidth=0.6, capsize=0, alpha=0.5, zorder=1,
+            )
+            ax.plot(
+                wavelength_nm, y_values_mm, "o", color=CENTROID_MARKER_COLOR, markersize=3, zorder=1.5,
             )
 
             fit_y_mm, _ = _convert_to_mm(result.fit_y_px, np.zeros_like(result.fit_y_px), position_calibration)
@@ -558,9 +578,9 @@ def _plot_journal_figure(
                 result.fit_x, fit_y_mm, color=DEGREE_PLOT_COLORS[degree],
                 linestyle=DEGREE_PLOT_LINESTYLES[degree], linewidth=1.5, zorder=3,
             )
-            # Rasterizes the errorbar layer (zorder=1) only -- the fit
-            # line (zorder=3) and the annotation/text below (default
-            # zorder, well above 2) stay vector.
+            # Rasterizes the error-bar (zorder=1) and marker (zorder=1.5)
+            # layers only -- the fit line (zorder=3) and the annotation/
+            # text below (default zorder, well above 2) stay vector.
             ax.set_rasterization_zorder(2)
 
             # No x-label/tick-labels here -- shares an x-axis with

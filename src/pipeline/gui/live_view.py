@@ -202,6 +202,15 @@ EVALUATED_AT_COLUMN = 960.0
 FIT_CURVE_COLOR = "#000000"
 FIT_CURVE_WIDTH = 3
 
+# Centroid scatter color -- deliberately neither FOREGROUND_COLOR (the
+# error bars' color, so a semi-transparent near-white marker used to
+# blend into the near-white error-bar lines through it) nor
+# FIT_CURVE_COLOR (black would blend the markers into the fit curve
+# drawn on top of them instead). A warm orange reads clearly against
+# viridis's cool blue/green/purple range the same way FIT_CURVE_COLOR's
+# black does, without competing with either neighboring layer.
+CENTROID_SCATTER_COLOR = "#ff9d5c"
+
 # Unicode superscript digits/minus sign, for rendering an axis's
 # power-of-ten scale annotation (e.g. "x10^-3") properly instead of
 # pyqtgraph's default "%g" text (e.g. "x0.001") -- see
@@ -438,22 +447,30 @@ class LiveViewWidget(QWidget):
         # Fit curve LAST -- it traces nearly the same path as the scatter
         # points, so drawing it underneath them (the original order) left
         # it almost entirely hidden behind the denser, larger scatter
-        # markers.
+        # markers. setZValue() below pins this same stacking order
+        # explicitly rather than relying on add order alone.
         self._image_item = pg.ImageItem()
         self._image_item.setColorMap(pg.colormap.get("viridis"))
         self._main_plot.addItem(self._image_item)
 
         self._error_bars = pg.ErrorBarItem(pen=pg.mkPen(color=FOREGROUND_COLOR, width=1))
+        self._error_bars.setZValue(0)
         self._main_plot.addItem(self._error_bars)
 
+        # Fully opaque CENTROID_SCATTER_COLOR, not a near-white brush --
+        # a semi-transparent white point over the (also near-white)
+        # FOREGROUND_COLOR error-bar lines blended into the same shade,
+        # making the two indistinguishable regardless of paint order.
         self._scatter = pg.ScatterPlotItem(
-            size=7, pen=pg.mkPen(None), brush=pg.mkBrush(255, 255, 255, 200)
+            size=7, pen=pg.mkPen(None), brush=pg.mkBrush(CENTROID_SCATTER_COLOR)
         )
+        self._scatter.setZValue(10)
         self._main_plot.addItem(self._scatter)
 
         self._fit_curve = pg.PlotDataItem(
             pen=pg.mkPen(color=FIT_CURVE_COLOR, width=FIT_CURVE_WIDTH)
         )
+        self._fit_curve.setZValue(20)
         self._main_plot.addItem(self._fit_curve)
 
         plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
