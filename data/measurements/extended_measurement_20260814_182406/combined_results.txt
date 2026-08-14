@@ -1,0 +1,34 @@
+spatial dispersion below is evaluated at the spectral ROI's center, 799.986 nm
+
+degree 1 (Linear (degree 1)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (nm) = 1454000 ± 8000
+    c1 (nm/nm) = 2790 ± 20
+  spatial dispersion at ROI center (nm/nm) = 2790 ± 20
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 3.26
+  shot-to-shot lag-1 autocorrelation = 0.3653
+  moving-block bootstrap block length (shots) = 10
+
+degree 2 (Quadratic (degree 2)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (nm) = -117300000 ± 900000
+    c1 (nm/nm) = 300000 ± 2000
+    c2 (nm/nm^2) = -185.9 ± 1.5
+  spatial dispersion at ROI center (nm/nm) = 2499 ± 20
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 3.515
+  shot-to-shot lag-1 autocorrelation = 0.3101
+  moving-block bootstrap block length (shots) = 8
+
+degree 3 (Cubic (degree 3)):
+  n_shots = 200
+  combined polynomial coefficients (x0 = c0 + c1*wavelength_nm + c2*wavelength_nm^2 + ...):
+    c0 (nm) = -7340000000 ± 50000000
+    c1 (nm/nm) = 27440000 ± 170000
+    c2 (nm/nm^2) = -34100 ± 200
+    c3 (nm/nm^3) = 14.17 ± 0.09
+  spatial dispersion at ROI center (nm/nm) = -1050 ± 20
+  reduced chi-squared (of the spatial-dispersion combination across shots) = 3.303
+  shot-to-shot lag-1 autocorrelation = 0.3386
+  moving-block bootstrap block length (shots) = 8

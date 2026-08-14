@@ -1,0 +1,17 @@
+timestamp: 2026-08-14 18:29:49
+n_shots: 200
+exposure_us: 1000.0
+gain_db: 25.0
+
+spatial ROI (px): [0, 1200)
+spatial ROI (mm): [0.0000, 6.2266)
+spectral ROI (manual override, as used at run time): [442, 1495)
+
+calibration artifacts:
+  baseline: copied (baseline.npz)
+  flat_field: copied (flat_field.npz)
+  bad_pixel_map: copied (bad_pixel_map.npz)
+  conversion_gain: copied (conversion_gain.npz)
+  spectral: copied (spectral.npz)
+  geometric_tilt: copied (geometric_tilt.npz)
+  scale_factor: copied (scale_factor.npz)
