@@ -32,15 +32,20 @@
 \newlength{\mathslogowidth}
 \setlength{\mathslogowidth}{\dimexpr 3mm * 347 / 105 \relax}
 
+% Title-page-only logos (square crest lockups, so width = height)
+\newlength{\titlepagelogosize}
+\setlength{\titlepagelogosize}{12mm}
+\newlength{\titlepagelogogap}
+\setlength{\titlepagelogogap}{4mm}
+
 %% Title slide formatting %%
 \setbeamertemplate{title page}{
     \begin{picture}(0,0)
-        \put(-\textmargin, \dimexpr -\paperheight*6/10 \relax){%
-        \ifdim\paperwidth>400pt
-           \includegraphics[width=\paperwidth]{title-slide-background-wide.png}
-        \else
-           \includegraphics[width=\paperwidth]{title-slide-background.png}
-        \fi
+        \put(\dimexpr-3\paperwidth\relax, \dimexpr-3\paperheight\relax){%
+            \color{oxfordblue}\rule{\dimexpr6\paperwidth\relax}{\dimexpr6\paperheight\relax}%
+        }
+        \put(\dimexpr\textwidth+\textmargin-\titlehmargin-\titlepagelogosize\relax, \dimexpr21mm\relax){%
+            \includegraphics[width=\titlepagelogosize]{oxford-university-logo.png}%
         }
         \put(-\textmargin +7mm, -55pt){%
             \begin{minipage}[b][4.5cm][t]{0.7\textwidth}
