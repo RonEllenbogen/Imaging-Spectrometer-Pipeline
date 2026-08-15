@@ -1,0 +1,95 @@
+%Use one of the two documentclass lines depending on aspect ratio needed
+% for 4x3 aspect ratio slides
+%\documentclass{beamer}
+%for 16x9 (modern wide screen) aspect ratio slides
+\documentclass[aspectratio=169]{beamer}
+
+% Oxford Maths theming
+\usetheme{oxfordmaths}
+
+% Set author etc info
+\title[My Talk] %short version of title for slide footer
+{Title page title  goes here and it can be quite long in
+  which case it will wrap onto a 2nd  and 3rd line} %full title for titlepage
+\author{ S.  Peaker \& P. Resenter}
+\institute{Mathematical Institute\\University of Oxford}
+\date[1 May 2024]  %short date for slide footer
+{Really Great Conference, May 2024} %main date for title page,
+                        %can overload it to show say 'Conference X, Date Y'
+
+
+%% Now for the actual slides %%
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+\begin{frame}
+  \frametitle{This is the first slide}
+  \framesubtitle{A bit more information about this}
+  
+  Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do
+  eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim
+  ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut
+  aliquip ex ea commodo consequat.
+  
+  Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do
+  eiusmod tempor incididunt ut labore et dolore magna aliqua.
+  
+  Here is
+  \begin{enumerate}
+  \item some text;
+  \item inline maths: $\mathcal{R}_C(D)=\oplus_{n\geqslant0}\mathcal{L}(nD)$;
+  \item and display maths:
+    \[
+      \operatorname{Tor}_i(\operatorname{colim}_\alpha M_\alpha, N)
+      = \operatorname{colim}_\alpha\operatorname{Tor}_i(M_\alpha,N)
+    \]
+  \end{enumerate}
+  
+\end{frame}
+
+\begin{frame}{Make Titles Informative}
+  % - A title should summarize the slide in an understandable fashion
+  % for anyone how does not follow everything on the slide itself.
+  
+  \begin{itemize}
+  \item
+    Use \texttt{itemize} a lot.
+  \item
+    Use very short sentences or short phrases.
+  \end{itemize}
+
+  You can create overlays\dots
+  \begin{itemize}
+  \item using the \texttt{pause} command:
+    \begin{itemize}
+    \item
+      First item.
+      \pause
+    \item
+      Second item.
+    \end{itemize}
+  \item
+    using overlay specifications:
+    \begin{itemize}
+    \item<3->
+      First item.
+    \item<4->
+      Second item.
+    \end{itemize}
+  \item
+    using the general \texttt{uncover} command:
+    \begin{itemize}
+      \uncover<5->{\item
+        First item.}
+      \uncover<6->{\item
+        Second item.}
+    \end{itemize}
+  \end{itemize}
+
+
+\end{frame}
+
+\end{document}
