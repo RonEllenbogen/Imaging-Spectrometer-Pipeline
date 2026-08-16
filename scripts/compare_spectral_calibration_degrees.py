@@ -119,7 +119,10 @@ def plot_comparison(
     the visual sign a lower degree is inadequate.
     '''
 
-    fig, (ax_fit, ax_resid) = plt.subplots(2, 1, figsize=(11, 10), height_ratios=(3, 2))
+    fig, (ax_fit, ax_resid) = plt.subplots(
+        2, 1, figsize=(11, 10), height_ratios=(3, 2), sharex=True,
+        gridspec_kw={"hspace": 0},
+    )
 
     ax_fit.errorbar(
         pixel, wavelength_nm, xerr=sigma_pixel, yerr=sigma_wavelength_nm,
@@ -131,12 +134,12 @@ def plot_comparison(
         curve = results[degree].wavelength_nm(pixel_range)
         ax_fit.plot(
             pixel_range, curve, color=DEGREE_COLORS[degree], linewidth=1.5,
-            label=f"{DEGREE_LABELS[degree]} (degree {degree}), reduced chi2 = {fit.reduced_chi_squared:.3g}",
+            label=fr"{DEGREE_LABELS[degree]}, $\chi^2_\nu$ = {fit.reduced_chi_squared:.3g}",
         )
-    ax_fit.set_xlabel("Spectral pixel column")
     ax_fit.set_ylabel("Wavelength (nm)")
     ax_fit.set_title("Pixel -> wavelength calibration: linear/quadratic/cubic fits")
     ax_fit.legend(fontsize=9)
+    ax_fit.tick_params(axis="x", labelbottom=False)
 
     for degree in DEGREES:
         fit = results[degree].fit
@@ -147,10 +150,10 @@ def plot_comparison(
     ax_resid.axhline(0.0, color="gray", linestyle="--", linewidth=1)
     ax_resid.set_xlabel("Spectral pixel column")
     ax_resid.set_ylabel("Residual (nm)")
-    ax_resid.set_title("Fit residuals (observed - predicted wavelength)")
     ax_resid.legend(fontsize=9)
 
     plt.tight_layout()
+    fig.subplots_adjust(hspace=0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150)
     print(f"Saved comparison plot to {output_path}")
