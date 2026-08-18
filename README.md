@@ -117,7 +117,7 @@ Full hardware/environment setup (camera configuration, lab-PC specifics) is in
 ## Usage
 
 ```bash
-python -m pipeline.gui.app          # launch the GUI
+python -m pipeline.main             # launch the GUI
 python -m pipeline.cli.calibration  # headless calibration CLI
 ```
 

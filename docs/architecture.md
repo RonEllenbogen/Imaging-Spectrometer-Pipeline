@@ -191,7 +191,8 @@ residual degrees of freedom).
 
 ## GUI (`src/pipeline/gui/`)
 
-Entry point: `python3 -m pipeline.gui.app` — builds a `QApplication` and shows `MainWindow`, a
+Entry point: `python3 -m pipeline.main` — builds a `QApplication` and shows `MainWindow` (defined in
+`gui/app.py`, which keeps its own independently-launchable `__main__` block for ad hoc testing), a
 `QStackedWidget` wiring three screens in sequence:
 
 1. **`CalibrationScreen`** (shown first) — either loads existing artifacts from
