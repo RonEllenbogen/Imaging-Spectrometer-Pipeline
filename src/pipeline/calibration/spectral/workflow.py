@@ -2,7 +2,7 @@
 The "press start" entry point gluing acquisition + preprocessing +
 line_matching + calibrate for spectral calibration. Single-button, unlike
 flat-field's two-phase capture -- a lamp calibration frame needs only one
-physical setup (docs/project_handover.md §5's own classification).
+physical setup.
 
 Requires the caller to already have a built CalibrationSet (baseline,
 flat field, bad-pixel map from calibration/sensor/): the lamp frame(s)
