@@ -2,12 +2,9 @@
 
 Living tracker for current project status, active design decisions, and the
 running to-do list. This file is actively updated as work and discussion
-progress. `docs/project_handover.md` is a separate, frozen document seeded
-from earlier Claude Desktop discussions covering `acquisition/` and
-`preprocessing/` in depth (design rationale, bugs found and fixed,
-deliberate cuts) — it is not maintained going forward. Consult it for that
-historical detail; consult this file for where things currently stand and
-what's next.
+progress. §7 folds in the historical detail (design rationale, bugs found
+and fixed, deliberate cuts) that used to live in a separate, frozen
+`docs/project_handover.md`, since retired.
 
 ## 0. Current focus (as of 2026-08-13)
 
@@ -214,8 +211,8 @@ factor for the live TLW estimate if a systematic discrepancy shows up.
 
 **Wavelength convention**: wavelength λ, in nanometres, always — never
 angular frequency ω. ζ = dx0/dλ throughout (units: px/nm). (This
-supersedes an earlier ω-based convention; see the addendum note at the
-top of `docs/project_handover.md` for the historical design.)
+supersedes an earlier ω-based convention; see §7 for the historical
+design.)
 
 **Dispersion interface**: analysis accepts an injected `WavelengthAxis`
 object that exposes `wavelength_nm(pixel)` and `sigma_wavelength_nm(pixel)`
@@ -455,7 +452,7 @@ names are chosen freely by each artifact type's own `save_*()`/`load_*()`; the o
 may start with `"record__"` (reserved for record fields), enforced with a `ValueError`.
 
 **`spatial/` is a fixed scale factor, not a per-point calibration.** Superseding the original design
-sketched in `docs/project_handover.md` §5 (a `SpatialCalibrationSession` built from translation-stage
+sketched in §7 (a `SpatialCalibrationSession` built from translation-stage
 measurements) — decided out of scope for this project. Pixel→physical-position conversion at the
 spectrometer's slit needs TWO multiplicative steps, both required: `PIXEL_PITCH_UM` (a fixed sensor
 hardware spec, a2A1920-51gmBAS datasheet, 3.45 -- config-driven via `configs/default.yaml`'s
@@ -1633,3 +1630,88 @@ overhead becomes the practical bottleneck and Tkinter has no comparable live-plo
   noise is genuine shot noise or a `MAX_WINDOW_HALF_WIDTH` window-clipping artifact (test by widening it
   and re-running the comparison). Neither blocks the default-method switch above, but both affect how much
   to trust either method's row_shift curve at its extremes.
+
+---
+
+## 7. Historical background (folded in from the retired `docs/project_handover.md`)
+
+`docs/project_handover.md` was a frozen document written early in the project, covering
+`acquisition/`'s and `preprocessing/`'s original design in depth, before `calibration/`, `analysis/`,
+`gui/`, and `cli/` existed. It has been deleted now that everything durable in it is folded in below
+or superseded by the sections above; what wasn't carried forward (mostly a now-obsolete file-by-file
+description of `acquisition/`/`preprocessing/`, better read from the code and `docs/architecture.md`
+directly) was judged not worth preserving.
+
+**Project origin.** An 8-week Durham MPhys placement at OPAL/John Adams Institute. Goal: design,
+build, and characterise a 4f imaging spectrometer measuring spatial chirp (originally defined as
+ζ = ∂x0/∂ω, later redefined as ζ = ∂x0/∂λ — see §2) in a Ti:Sapphire laser system. Camera: Basler
+ace 2 `a2A1920-51gmBAS` (Sony IMX392 sensor, GigE Vision, 1920×1200px, 3.45µm pixel pitch, 8/10/12-bit
+selectable, run at `Mono8` for the full 51fps without needing jumbo frames). The optical design itself
+(Optiland ray-trace model, 600 l/mm VPH grating, folded 4f "Option C" geometry) was completed
+separately and isn't part of this codebase.
+
+**Bugs found and fixed during early `acquisition/`/`preprocessing/` development** (do not
+reintroduce):
+1. `CameraTimeoutError.__init__` was originally typo'd `__innit__` — silently became a dead method,
+   its `.timeout_ms` attribute never set.
+2. `SyntheticBackend.grab_one()`'s saturation clip originally used `np.iinfo(self._dtype).max` (the
+   container's ceiling) instead of the true per-pixel-format ceiling — silently let Mono10/Mono12
+   values exceed their real bit depth (`Mono10`/`Mono12` share `uint16`'s container but have true
+   ceilings of 1023/4095, not 65535 — always use the pixel-format-aware max, never
+   `np.iinfo(dtype).max`).
+3. `CameraStream.stop()` originally checked `self.is_running` before join/close — meant a thread that
+   had already died naturally from a fatal error never got its backend closed by a subsequent
+   `stop()` call, since `is_running` was already `False` by then. Fixed to check
+   `self._thread is None` instead.
+4. `PylonBackend.configure()`'s `self._configured = True` was mis-indented inside the `else:` branch
+   — meant the `auto_exposure=True` path never marked the backend configured, so `grab_one()` always
+   refused with "called before connect()/configure()" for that path specifically.
+5. `calibration/sensor/bad_pixel_map.py`'s bad-pixel detection originally used MAD (median absolute
+   deviation) rather than standard deviation to flag outliers — caught by a real test failure, not
+   just theoretically: MAD is structurally blind to sparse outliers, since the median of deviations
+   is exactly zero whenever fewer than half the population deviates, which is true by definition for
+   genuinely rare bad pixels. Switched to std.
+
+**Deliberately cut or deferred (preprocessing), with reasons — do not silently re-add without a new
+one:**
+- A full per-pixel `linearity.py` correction — only two EMVA summary bounds existed
+  (±0.376%/+0.598%), not a real correction curve; not enough data to build an actual correction.
+- Dark-frame-specific hot-pixel detection, separate from the flat-field-derived check — deferred
+  until real data showed the flat-field-derived check alone was inadequate (it hasn't, as far as this
+  file has been updated to reflect).
+- A `PRNU_FRACTION`/SNR-adequacy check gating whether a flat field is usable — the user explicitly
+  decided a flat field should be used regardless of its measured SNR.
+- Calibration-staleness thresholds that raise — the user explicitly chose log-the-age-only, no hard
+  failure, since the thresholds were unverified guesses with a real cost if wrong in either direction.
+- A standalone `config.py` for preprocessing thresholds — written, then almost entirely deleted after
+  discovering most of its constants had no real consumer; the few survivors are inline constants in
+  the one file that actually uses each one.
+
+**Early design rationale still worth knowing:**
+- `CameraStream`'s frame hand-off uses a lock + plain variable, not `queue.Queue` — `Queue.get()` is
+  destructive, which would require a redundant cache just to make repeated `get_latest_frame()` calls
+  return the same frame, defeating the point of using `Queue` at all.
+- `steps/roi.py`'s `apply_roi()` masks (zeroes) rather than crops, for two reasons: a true crop would
+  produce a smaller-than-`CANONICAL_SHAPE` array incompatible with `ProcessedFrame`'s validation, and
+  masking is mathematically exact for a weighted centroid anyway (a zeroed pixel contributes nothing
+  to either the numerator or denominator).
+- Whether ROI masking is actually necessary for this setup was, at the time, still an open,
+  unresolved question — the plan was to capture a real background frame and check its histogram for a
+  pile-up at zero (evidence of genuine ADC-level clipping bias) before deciding either way, rather
+  than trust the synthetic model's simplified noise assumptions.
+
+**Superseded designs** (kept only for context — see the cross-referenced section for what replaced
+each):
+- **Dispersion convention**: ζ was originally defined against angular frequency ω (`ζ = ∂x0/∂ω`,
+  requiring a `dω/dλ = 2πc/λ²` chain-rule uncertainty propagation at calibration-build time). Replaced
+  by a direct wavelength (λ) convention throughout — see §2.
+- **Spatial calibration**: originally designed as a full per-point calibration
+  (`SpatialCalibrationSession.add_point(known_position, centroid_px, uncertainty_px)`), built from a
+  laser on a translation stage measuring pixel displacement per known physical displacement at the
+  slit, agnostic to whether the stage was manual or motorized. Ruled out of scope for this project and
+  replaced by a fixed relay-lens scale factor — see §3.
+- Spectral calibration's "single-button" workflow design (`run_spectral_calibration()`, one physical
+  setup needed) was originally justified by contrast with the translation-stage spatial calibration
+  above (per-point, multi-setup) — that contrast no longer applies now that spatial calibration is
+  also a single fixed value, but the single-button design for spectral stands on its own merits
+  regardless (nothing about it depended on the comparison).

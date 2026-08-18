@@ -1,9 +1,9 @@
 # Architecture
 
 This document describes how the imaging-spectrometer software is put together: the packages under
-`src/pipeline/`, how data flows between them, and the contracts that keep them decoupled. For *why*
-particular design decisions were made (bugs found, alternatives rejected, deliberate cuts), see
-`project_handover.md`. For current status and open items, see `project_state.md`.
+`src/pipeline/`, how data flows between them, and the contracts that keep them decoupled. For current
+status, open items, and *why* particular design decisions were made (bugs found, alternatives
+rejected, deliberate cuts), see `project_state.md`.
 
 ## System overview
 

@@ -1,10 +1,9 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-Current status, active design decisions, and the project to-do list:
-@docs/project_state.md. Historical rationale for `acquisition/` and
-`preprocessing/` (design decisions, bugs found/fixed, deliberate cuts):
-@docs/project_handover.md.
+Current status, active design decisions, the project to-do list, and historical rationale for
+`acquisition/` and `preprocessing/` (design decisions, bugs found/fixed, deliberate cuts):
+@docs/project_state.md.
 
 ## Project
 
@@ -226,7 +225,7 @@ pipeline validates against.
 - Test files mirror `src/pipeline/<package>/` one-to-one (e.g. `tests/test_preprocessing.py`), and
   default to synthetic data/backends so the suite runs with no hardware attached.
 - No mention of Claude, AI, agents/agentic, Anthropic, Copilot, or similar AI-tooling keywords anywhere
-  in this repository except `CLAUDE.md` and `docs/project_handover.md` — not in source files,
+  in this repository except `CLAUDE.md` — not in source files,
   docstrings, comments, other docs, config, or anything else. This applies just as strictly to anything 
   that makes it to GitHub without living in the repo itself — commit messages, PR descriptions, issue 
   text, code review comments. In particular, never add a `Co-Authored-By: Claude` (or similar) trailer

@@ -6,8 +6,9 @@ sensor hardware spec, a2A1920-51gmBAS datasheet, loaded from
 configs/default.yaml); scale_factor -- the ratio of the imaging
 spectrometer's two relay-lens focal lengths (f1/f2) -- then converts that
 detector-plane distance to the slit-plane distance where the physically
-meaningful spatial chirp actually lives (see docs/project_handover.md
-§5). Pixel pitch alone is NOT sufficient on its own for this reason --
+meaningful spatial chirp actually lives (see docs/project_state.md §7 for
+why a full per-point translation-stage calibration was ruled out instead).
+Pixel pitch alone is NOT sufficient on its own for this reason --
 it only gets as far as the detector plane.
 
 Full per-point translation-stage calibration (matching detector pixel

@@ -17,8 +17,8 @@ which reference lines to find a self-consistent identification.
 
 The search deliberately does not assume a fixed sign for "does pixel
 column increase or decrease with wavelength" -- this project has hit
-sensor/optics orientation flips before (see docs/project_handover.md),
-so both orderings are tried and scored on equal footing.
+sensor/optics orientation flips before, so both orderings are tried and
+scored on equal footing.
 """
 
 # Imports
