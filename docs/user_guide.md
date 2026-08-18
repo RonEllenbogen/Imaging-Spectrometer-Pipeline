@@ -20,6 +20,25 @@ on the local network (see `notes.md` for the specific network settings used duri
 pylon/pypylon must be installed and able to see the camera (`pylon Viewer` is the easiest way to
 confirm connectivity first).
 
+## Running on the lab PC
+
+The instrument's dedicated lab PC already has a conda environment named `tango` with all dependencies
+installed and the camera network-configured, so day-to-day use doesn't need a fresh `pip install` —
+just activate the environment, pull the latest code, and launch the GUI:
+
+```bash
+conda activate tango
+cd Imaging-Spectrometer-Pipeline
+git fetch
+git pull
+python -m pipeline.gui.app
+```
+
+`git pull` only updates tracked source files; `calibration_artifacts/` is git-ignored, so any
+baseline/flat-field/spectral calibrations already saved on this machine are untouched by it. If
+`git pull` ever reports local changes in the way, check `git status` before discarding anything — it
+likely means an edit was made directly on this machine rather than through a worktree elsewhere.
+
 ## Running the test suite
 
 ```bash
