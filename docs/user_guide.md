@@ -14,9 +14,8 @@ pip install -e ".[gui]"     # + PySide6, pyqtgraph, for the GUI
 pip install -e ".[dev]"     # + pytest, pytest-qt, for the test suite
 ```
 
-`configs/default.yaml` holds the camera's serial number and default exposure/gain — check it matches
-your hardware before connecting. The camera is the Basler `a2A1920-51gmBAS`, expected at a static IP
-on the local network (see `notes.md` for the specific network settings used during development);
+`configs/default.yaml`'s `camera:` block holds the camera's identity (vendor, model, device user ID,
+serial number) and default exposure/gain — check it matches your hardware before connecting.
 pylon/pypylon must be installed and able to see the camera (`pylon Viewer` is the easiest way to
 confirm connectivity first).
 
