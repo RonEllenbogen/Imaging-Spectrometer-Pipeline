@@ -86,7 +86,7 @@ On first launch you have two options:
 
 ### 2. Live view
 
-Shows the camera at roughly 5 Hz: a live centroid-vs-wavelength scatter with the current fit overlaid,
+Shows the camera at roughly 2 Hz: a live centroid-vs-wavelength scatter with the current fit overlaid,
 the raw frame as a heatmap, and a rolling trend chart. If the live frame's exposure/gain drifts from
 what the baseline was built under, this is flagged on screen — rebuild the baseline (and flat field)
 rather than trusting a mismatched correction. Use the ROI controls
