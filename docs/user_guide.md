@@ -30,7 +30,7 @@ conda activate tango
 cd Imaging-Spectrometer-Pipeline
 git fetch
 git pull
-python -m pipeline.gui.app
+python -m pipeline.main
 ```
 
 `git pull` only updates tracked source files; `calibration_artifacts/` is git-ignored, so any
@@ -50,7 +50,7 @@ SPECTROMETER_HARDWARE_TESTS=1 python3 -m pytest # also runs hardware-dependent t
 Launch it with:
 
 ```bash
-python3 -m pipeline.gui.app
+python3 -m pipeline.main
 ```
 
 This opens a 1400×900 window that walks through three screens in sequence.

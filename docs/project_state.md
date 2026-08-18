@@ -110,7 +110,7 @@ matching every other default in the app. Higher degrees remain selectable in bot
 | `analysis/` | Built, tested (synthetic only) -- see §2 for design and file layout. |
 | `cli/` | Calibration subcommands complete, import/argparse-tested — now exercised end-to-end against real hardware too, see §4 |
 | `gui/` | Fully wired to real acquisition/calibration/analysis calls, tested offscreen (`SyntheticBackend`) — see §5 |
-| `main.py` | Not started |
+| `main.py` | Launches the GUI (`python -m pipeline.main`), tested offscreen — thin wrapper around `gui/app.py`'s `MainWindow` |
 
 ---
 
