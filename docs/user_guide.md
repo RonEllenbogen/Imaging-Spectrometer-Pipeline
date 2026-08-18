@@ -22,7 +22,7 @@ confirm connectivity first).
 
 ## Running on the lab PC
 
-The instrument's dedicated lab PC already has a conda environment named `tango` with all dependencies
+Lab PC  JAIWTDAQ02 already has a conda environment named `tango` with all dependencies
 installed and the camera network-configured, so day-to-day use doesn't need a fresh `pip install` —
 just activate the environment, pull the latest code, and launch the GUI:
 
@@ -73,8 +73,11 @@ On first launch you have two options:
   3. **Conversion gain** — a fixed-brightness, swept-exposure sequence.
   4. **Spatial** — enter a manual scale-factor override, or accept the default
      (relay-lens focal-length ratio).
-  5. **Spectral** — Argon lamp frames, fit into a pixel→wavelength calibration (also builds the
+  5. **Baseline** — recomputed using spectral calibration settings.
+  6. **Spectral** — Argon lamp frames, fit into a pixel→wavelength calibration (also builds the
      geometric-tilt correction from the same frames).
+  7. **Baseline** — recomputed for live measurement
+  
 
   Click **Continue to Main Window** once you're satisfied; this emits the same `calibration_ready`
   signal as the "load" path.

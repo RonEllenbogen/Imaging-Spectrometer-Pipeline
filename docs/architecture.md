@@ -229,9 +229,3 @@ incidence angle, relay-lens focal length). Loaded via `pipeline.utils.helpers.lo
 that `frame.py` reads this file at *import time* to derive `CANONICAL_*` — changing
 `camera.pixel_format` or `camera.canonical_shape` changes what every frame in the pipeline validates
 against.
-
-## Conventions
-
-See `CLAUDE.md` for the full list of repo-wide conventions (module section layout, frozen/slotted
-value objects, `Protocol`-based backends, NumPy-style docstrings, result-vs-exception policy, test
-layout). They apply uniformly across every package described above.
