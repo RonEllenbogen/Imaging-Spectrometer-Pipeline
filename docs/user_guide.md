@@ -106,6 +106,34 @@ python3 scripts/demo_app.py         # full MainWindow with a placeholder calibra
 python3 scripts/demo_live_view.py   # CalibrationScreen + LiveView as separate windows
 ```
 
+## Calibration consistency
+
+The calibration artifacts aren't interchangeable across arbitrary sessions — several of them are
+checked for consistency, either against the live camera or against each other, and a mismatch raises
+`SettingsMismatchError` rather than silently applying a wrong correction:
+
+- **Baseline vs. the live frame** — every frame run through `run_preprocessing()` has its exposure
+  and gain checked against the loaded baseline's `CalibrationRecord`, to within 1% (exposure) and
+  0.05 dB (gain). This is strict: **if you change exposure or gain on the camera, the baseline (and
+  therefore the whole loaded calibration set) is no longer valid and must be rebuilt** before you can
+  process another frame. The same check applies to lamp frames during spectral calibration.
+- **Flat field's dark vs. illuminated phases** — the two capture phases of a single flat-field session
+  must match each other's settings exactly, but the flat field itself is *not* re-checked against the
+  live frame's exposure/gain when applied (PRNU is treated as exposure/gain-independent within the
+  camera's linear regime).
+- **Conversion gain vs. baseline** — building a `SensorNoiseModel` (e.g. via the CLI's `noise-model`
+  command) requires the loaded conversion-gain and baseline artifacts to share the same `gain_db`
+  (same 0.05 dB tolerance as above); conversion-gain has no single exposure to compare, since exposure
+  is the swept variable in that measurement.
+- **Spatial and bad-pixel-map** are exempt from all of this — the scale factor isn't built from a
+  captured frame at any particular setting, and the bad-pixel map is derived from the flat field
+  rather than re-checked independently.
+
+Practically: changing **gain** on the camera means rebuilding baseline, flat field, and conversion
+gain together (gain feeds all three consistency checks above); changing only **exposure** means
+rebuilding just the baseline (and, if you also want the geometric-tilt/wavelength calibration to stay
+valid against the new setting, the spectral calibration too).
+
 ## Using the CLI
 
 `src/pipeline/cli/calibration.py` is a headless equivalent of the calibration dialogs — same
