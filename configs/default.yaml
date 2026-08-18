@@ -3,7 +3,7 @@
 # Camera details and settings
 camera:
   vendor: "Basler"
-  model_name: "acA1920-51gmBAS"
+  model_name: "a2A1920-51gmBAS"
   device_user_id: "ImagingSpecCam"
   serial_number: "41948281"
   auto_exposure: False
