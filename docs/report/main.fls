@@ -1,8 +1,8 @@
-PWD /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/.claude/worktrees/diagnose-blank-page/docs/report
+PWD /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/docs/report
 INPUT /usr/local/texlive/2026basic/texmf.cnf
 INPUT /usr/local/texlive/2026basic/texmf-dist/web2c/texmf.cnf
 INPUT /usr/local/texlive/2026basic/texmf-var/web2c/pdftex/pdflatex.fmt
-INPUT main.tex
+INPUT /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/docs/report/main.tex
 OUTPUT main.log
 INPUT ./ociamthesis.cls
 INPUT ociamthesis.cls
