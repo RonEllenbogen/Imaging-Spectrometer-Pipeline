@@ -2,6 +2,9 @@
 
 # Camera details and settings
 camera:
+  vendor: "Basler"
+  model_name: "acA1920-51gmBAS"
+  device_user_id: "ImagingSpecCam"
   serial_number: "41948281"
   auto_exposure: False
   auto_timeout: 100000 #ms. Time we give camera to acquire an image before raising an error. Set long enough to give auto_exposure time to converge.

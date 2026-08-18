@@ -214,9 +214,6 @@ not part of the normal operate-the-instrument flow:
 - `save_tilt_diagnostic_frames.py` — grabs live frames and saves raw/corrected variants for
   inspection.
 
-`scripts/run_app.py` and `scripts/capture_sample_data.py` are currently empty stubs — use
-`python3 -m pipeline.gui.app` to launch the GUI, not `run_app.py`.
-
 ## Troubleshooting
 
 - **"Settings mismatch" errors** — a science/lamp frame's exposure or gain no longer matches what a
