@@ -1,8 +1,8 @@
-PWD /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/docs/report
+PWD /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/.claude/worktrees/diagnose-blank-page/docs/report
 INPUT /usr/local/texlive/2026basic/texmf.cnf
 INPUT /usr/local/texlive/2026basic/texmf-dist/web2c/texmf.cnf
 INPUT /usr/local/texlive/2026basic/texmf-var/web2c/pdftex/pdflatex.fmt
-INPUT /Users/ronellenbogen/Imaging-Spectrometer-Pipeline/docs/report/main.tex
+INPUT main.tex
 OUTPUT main.log
 INPUT ./ociamthesis.cls
 INPUT ociamthesis.cls
@@ -37,9 +37,6 @@ INPUT /usr/local/texlive/2026basic/texmf-dist/tex/latex/l3backend/l3backend-pdft
 INPUT ./main.aux
 INPUT ./main.aux
 INPUT main.aux
-INPUT ./dedication.aux
-INPUT ./dedication.aux
-INPUT dedication.aux
 INPUT ./acknowlegements.aux
 INPUT ./acknowlegements.aux
 INPUT acknowlegements.aux
@@ -81,7 +78,6 @@ INPUT ./oxlogo.png
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/tfm/public/cm/cmr17.tfm
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/tfm/public/cm/cmti12.tfm
 INPUT /usr/local/texlive/2026basic/texmf-var/fonts/map/pdftex/updmap/pdftex.map
-OUTPUT dedication.aux
 OUTPUT acknowlegements.aux
 OUTPUT abstract.aux
 INPUT ./main.toc
@@ -98,9 +94,6 @@ OUTPUT conclusions.aux
 OUTPUT appendix1.aux
 OUTPUT appendix2.aux
 INPUT main.aux
-INPUT ./dedication.aux
-INPUT ./dedication.aux
-INPUT dedication.aux
 INPUT ./acknowlegements.aux
 INPUT ./acknowlegements.aux
 INPUT acknowlegements.aux
