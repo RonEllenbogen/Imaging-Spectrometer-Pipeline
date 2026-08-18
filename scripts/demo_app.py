@@ -10,8 +10,9 @@ exercises the real signal-based wiring between them, per gui/app.py's
 own module docstring.
 
 MainWindow is built normally (so its CalibrationScreen instance still exists at index 0 of the
-stack, and is what --screenshot captures first, navigated to CreatePage), then
-CalibrationScreen.calibration_ready is emitted directly with a synthetic CalibrationBundle, the same
+stack, and is what --screenshot captures first -- both its own Welcome page, then navigated to
+CreatePage), then CalibrationScreen.calibration_ready is emitted directly with a synthetic
+CalibrationBundle, the same
 hand-off MainWindow would receive from a real WelcomePage "Load Existing Calibrations" click (see
 calibration_screen.py's class docstring) -- MainWindow's _on_calibration_ready() handler runs for real
 from there, including starting the camera stream it builds. `pipeline.gui.app.build_camera_stream` is
@@ -125,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--screenshot", action="store_true",
-        help="Save a screenshot of the calibration, live-view, and "
+        help="Save a screenshot of the welcome, calibration, live-view, and "
         "extended-measurement screens instead of opening a real window (for use with "
         "QT_QPA_PLATFORM=offscreen).",
     )
@@ -158,7 +159,15 @@ def main() -> None:
     if args.screenshot:
         args.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Calibration screen, navigated to CreatePage (the per-type
+        # 1. Welcome page -- CalibrationScreen's own first page (index 0
+        # of its internal stack), already MainWindow's current widget at
+        # construction time, before any navigation at all.
+        app.processEvents()
+        _save_window_screenshot(
+            window, window._calibration_screen, args.output_dir / "welcome_screen_sample.png"
+        )
+
+        # 2. Calibration screen, navigated to CreatePage (the per-type
         # "create new calibration" cards) -- more informative for a
         # screenshot than the bare Welcome page, and it's still
         # MainWindow's current widget at this point (index 0), so no
@@ -169,7 +178,7 @@ def main() -> None:
             window, window._calibration_screen, args.output_dir / "calibration_screen_sample.png"
         )
 
-        # 2. Hand off to MainWindow exactly as a real "Continue to Main
+        # 3. Hand off to MainWindow exactly as a real "Continue to Main
         # Window"/"Load Existing Calibrations" click would, then let
         # live_view's real QTimer polling loop actually populate a frame
         # before capturing it -- it only fires while the Qt event loop is
@@ -183,7 +192,7 @@ def main() -> None:
             time.sleep(0.05)
         _save_window_screenshot(window, window._live_view, args.output_dir / "live_view_sample.png")
 
-        # 3. Extended measurement: actually run a (synthetic) measurement
+        # 4. Extended measurement: actually run a (synthetic) measurement
         # via the real _on_run_clicked() handler before capturing it, so
         # the screenshot shows real plotted centroids/fit rather than its
         # pre-run empty state. Synchronous -- see its own docstring --
