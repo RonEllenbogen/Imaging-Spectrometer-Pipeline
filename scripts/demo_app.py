@@ -9,25 +9,22 @@ as its own disconnected window for a quick visual check -- this script
 exercises the real signal-based wiring between them, per gui/app.py's
 own module docstring.
 
-CalibrationScreen itself is skipped, not shown: MainWindow is built
-normally (so its CalibrationScreen instance still exists at index 0 of
-the stack), then CalibrationScreen.calibration_ready is emitted directly
-with a synthetic CalibrationBundle, the same hand-off MainWindow would
-receive from a real WelcomePage "Load Existing Calibrations" click (see
-calibration_screen.py's class docstring) -- MainWindow's
-_on_calibration_ready() handler runs for real from there, including
-starting the camera stream it builds. `pipeline.gui.app.build_camera_stream`
-is monkeypatched to a SyntheticBackend-driven CameraStream before that
-handler runs, so this script needs no physical camera attached; without
-that override, MainWindow would build (and now, since it also starts it,
-actually try to connect) a real PylonBackend stream and hang/error with
-no hardware present.
+MainWindow is built normally (so its CalibrationScreen instance still exists at index 0 of the
+stack, and is what --screenshot captures first, navigated to CreatePage), then
+CalibrationScreen.calibration_ready is emitted directly with a synthetic CalibrationBundle, the same
+hand-off MainWindow would receive from a real WelcomePage "Load Existing Calibrations" click (see
+calibration_screen.py's class docstring) -- MainWindow's _on_calibration_ready() handler runs for real
+from there, including starting the camera stream it builds. `pipeline.gui.app.build_camera_stream` is
+monkeypatched to a SyntheticBackend-driven CameraStream before that handler runs, so this script needs
+no physical camera attached; without that override, MainWindow would build (and now, since it also
+starts it, actually try to connect) a real PylonBackend stream and hang/error with no hardware present.
 
 Usage (opens one real window, requires a display):
     python scripts/demo_app.py
 
-Usage (no display required -- saves a screenshot of each navigated-to
-screen instead):
+Usage (no display required -- saves a screenshot of each navigated-to screen instead, running a real
+20-shot measurement via SyntheticBackend so the extended-measurement screenshot shows actual plotted
+centroids/fit rather than its pre-run empty state):
     QT_QPA_PLATFORM=offscreen python scripts/demo_app.py --screenshot
     QT_QPA_PLATFORM=offscreen python scripts/demo_app.py --screenshot --output-dir out/
 """
@@ -107,13 +104,29 @@ def build_placeholder_calibration_bundle():
     )
 
 
+def _save_window_screenshot(window, screen_widget, output_path: Path) -> None:
+
+    '''Switches window's top-level stack to screen_widget, then grabs
+    screen_widget itself rather than window -- grabbing the enclosing
+    QMainWindow directly does not reliably composite an offscreen,
+    never-shown QStackedWidget page's own styled background (reproduced
+    against calibration_screen.py's CreatePage specifically: its palette
+    resolves correctly, but window.grab() still showed the QMainWindow's
+    unstyled default background behind it), while grabbing the page
+    widget directly renders correctly every time.'''
+
+    window._stack.setCurrentWidget(screen_widget)
+    screen_widget.grab().save(str(output_path))
+    print(f"Saved screenshot to {output_path.resolve()}")
+
+
 def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--screenshot", action="store_true",
-        help="Save a screenshot of the live-view and extended-measurement "
-        "screens instead of opening a real window (for use with "
+        help="Save a screenshot of the calibration, live-view, and "
+        "extended-measurement screens instead of opening a real window (for use with "
         "QT_QPA_PLATFORM=offscreen).",
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
@@ -142,35 +155,58 @@ def main() -> None:
     window.setWindowTitle("Imaging Spectrometer Pipeline (placeholder calibrations)")
     window.resize(args.width, args.height)
 
+    if args.screenshot:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Calibration screen, navigated to CreatePage (the per-type
+        # "create new calibration" cards) -- more informative for a
+        # screenshot than the bare Welcome page, and it's still
+        # MainWindow's current widget at this point (index 0), so no
+        # calibration_ready hand-off has happened yet.
+        window._calibration_screen.welcome_page.create_requested.emit()
+        app.processEvents()
+        _save_window_screenshot(
+            window, window._calibration_screen, args.output_dir / "calibration_screen_sample.png"
+        )
+
+        # 2. Hand off to MainWindow exactly as a real "Continue to Main
+        # Window"/"Load Existing Calibrations" click would, then let
+        # live_view's real QTimer polling loop actually populate a frame
+        # before capturing it -- it only fires while the Qt event loop is
+        # running, and app.exec() never runs in this branch, so without
+        # pumping events here the screenshot would still only show
+        # live_view's construction-time placeholder paint.
+        window._calibration_screen.calibration_ready.emit(build_placeholder_calibration_bundle())
+        window._live_view._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(args.degree))
+        for _ in range(10):
+            app.processEvents()
+            time.sleep(0.05)
+        _save_window_screenshot(window, window._live_view, args.output_dir / "live_view_sample.png")
+
+        # 3. Extended measurement: actually run a (synthetic) measurement
+        # via the real _on_run_clicked() handler before capturing it, so
+        # the screenshot shows real plotted centroids/fit rather than its
+        # pre-run empty state. Synchronous -- see its own docstring --
+        # but a few processEvents() calls afterward let pyqtgraph finish
+        # redrawing before the grab.
+        window._live_view.extended_measurement_requested.emit()
+        window._extended_measurement._degree_selector.setCurrentIndex(
+            DEGREE_CHOICES.index(args.degree)
+        )
+        window._extended_measurement._on_run_clicked()
+        for _ in range(5):
+            app.processEvents()
+        _save_window_screenshot(
+            window, window._extended_measurement, args.output_dir / "extended_measurement_sample.png"
+        )
+        return
+
     window._calibration_screen.calibration_ready.emit(build_placeholder_calibration_bundle())
     window._live_view._degree_selector.setCurrentIndex(DEGREE_CHOICES.index(args.degree))
-
     window._live_view.extended_measurement_requested.emit()
     window._extended_measurement._degree_selector.setCurrentIndex(
         DEGREE_CHOICES.index(args.degree)
     )
-
-    if args.screenshot:
-        # live_view's real QTimer polling loop only fires while the Qt
-        # event loop is running -- app.exec() never runs in this branch,
-        # so without pumping events here the screenshot would still only
-        # show live_view's construction-time placeholder paint, not a
-        # real polled-and-analyzed frame.
-        for _ in range(10):
-            app.processEvents()
-            time.sleep(0.05)
-
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        for name, screen in (
-            ("live_view", window._live_view),
-            ("extended_measurement", window._extended_measurement),
-        ):
-            window._stack.setCurrentWidget(screen)
-            output_path = args.output_dir / f"{name}_skeleton_sample.png"
-            window.grab().save(str(output_path))
-            print(f"Saved screenshot to {output_path.resolve()}")
-        return
-
     window._stack.setCurrentWidget(window._live_view)
     window.show()
     app.exec()

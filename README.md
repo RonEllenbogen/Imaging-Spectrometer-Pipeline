@@ -22,17 +22,24 @@ This repository contains the Python application developed for the instrument. Th
 ## Screenshots
 
 <p align="center">
-  <img src="assets/images/live_view_skeleton_sample.png" alt="Live view screen" width="80%">
+  <img src="assets/images/calibration_screen_sample.png" alt="Calibration screen" width="80%">
+  <br>
+  <em>Calibration screen: builds baseline, flat-field, conversion-gain, spatial, and spectral
+  calibration artifacts before a session starts.</em>
+</p>
+
+<p align="center">
+  <img src="assets/images/live_view_sample.png" alt="Live view screen" width="80%">
   <br>
   <em>Live view: real-time centroid/fit overlay, raw frame heatmap, and rolling spatial-dispersion trend
   (synthetic demo data — no wavelength calibration loaded).</em>
 </p>
 
 <p align="center">
-  <img src="assets/images/synthetic_frame_sample.png" alt="Synthetic frame validation" width="80%">
+  <img src="assets/images/extended_measurement_sample.png" alt="Extended measurement screen" width="80%">
   <br>
-  <em>Acquisition/analysis validated against a synthetic frame with a known injected chirp — recovered
-  slope matches the injected one.</em>
+  <em>Extended measurement: a real 20-shot run, combining per-shot centroids into one fit with
+  residuals and a combined-result summary.</em>
 </p>
 
 ---
