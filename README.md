@@ -51,12 +51,6 @@ This repository contains the Python application developed for the instrument. Th
 
 ---
 
-## Current Status
-
-Complete. The full pipeline — acquisition, preprocessing, calibration, and analysis — is built and
-tested, and the GUI and CLI are fully wired to it.
-
----
 
 ## Documentation
 
