@@ -89,8 +89,7 @@
        \if@twocolumn\@restonecoltrue\onecolumn
        \else\if@openright\cleardoublepage\else\clearpage\fi
        \fi}%
-       {\if@restonecol\twocolumn
-       \else\newpage\thispagestyle{empty}\fi}
+       {\if@restonecol\twocolumn\fi}
 
 %define title page layout
 \renewcommand{\maketitle}{%
