@@ -19,9 +19,38 @@ This repository contains the Python application developed for the instrument. Th
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/images/live_view_skeleton_sample.png" alt="Live view screen" width="80%">
+  <br>
+  <em>Live view: real-time centroid/fit overlay, raw frame heatmap, and rolling spatial-dispersion trend
+  (synthetic demo data — no wavelength calibration loaded).</em>
+</p>
+
+<p align="center">
+  <img src="assets/images/synthetic_frame_sample.png" alt="Synthetic frame validation" width="80%">
+  <br>
+  <em>Acquisition/analysis validated against a synthetic frame with a known injected chirp — recovered
+  slope matches the injected one.</em>
+</p>
+
+---
+
 ## Current Status
 
-Finished and verified image acquisition scripts
+Complete. The full pipeline — acquisition, preprocessing, calibration, and analysis — is built and
+tested, and the GUI and CLI are fully wired to it.
+
+---
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — how the software is put together: package layout,
+  data flow, the canonical frame contract.
+- [`docs/user_guide.md`](docs/user_guide.md) — how to install, calibrate, and run the instrument,
+  through the GUI or the CLI.
+- [`docs/presentation.pdf`](docs/presentation.pdf) — project presentation.
 
 ---
 
@@ -32,37 +61,34 @@ Imaging-Spectrometer-Pipeline/
 ├── README.md                 # Project overview and documentation
 ├── .gitignore                # Files and folders ignored by Git
 ├── LICENSE                   # Project license
-├── requirements.txt          # Python dependencies
-├── pyproject.toml            # Project metadata and build configuration
-├── .env.example              # Example environment configuration
+├── pyproject.toml            # Project metadata, dependencies, and build configuration
 │
 ├── docs/                     # Project documentation
-│   ├── architecture.md
-│   └── notes.md
+│   ├── architecture.md       # System design and package layout
+│   ├── user_guide.md         # Installation, calibration, and operating instructions
+│   └── presentation.pdf      # Project presentation
 │
 ├── configs/                  # Configuration files
-│   └── default.yaml
+│   └── default.yaml          # Camera settings, preprocessing defaults, spectrometer geometry
 │
-├── data/                     # Data used during development
-│   ├── raw/                  # Unprocessed camera images
-│   ├── interim/              # Intermediate processing outputs
-│   └── processed/            # Final processed data
+├── data/                     # Captured/processed data (raw frames, calibration artifacts, measurements)
 │
 ├── assets/                   # Images and other static resources
 │   └── images/
 │
 ├── src/                      # Source code
 │   └── pipeline/
-│       ├── acquisition/      # Camera interface and image acquisition
-│       ├── preprocessing/    # Image cleaning and preprocessing
-│       ├── analysis/        # Spatial chirp estimation and computations
+│       ├── acquisition/      # Camera interface and frame acquisition
+│       ├── preprocessing/    # Per-frame correction pipeline
+│       ├── calibration/      # Building calibration artifacts (sensor, spatial, spectral)
+│       ├── analysis/         # Centroiding and spatial-dispersion (ζ) estimation
 │       ├── gui/              # Graphical user interface
-│       ├── utils/            # Shared utility functions
-│       └── main.py           # Application entry point
+│       ├── cli/              # Headless calibration CLI
+│       └── utils/            # Shared utility functions
 │
-├── tests/                    # Unit and integration tests
+├── tests/                    # Unit and integration tests (synthetic backend, no hardware needed)
 │
-└── scripts/                  # Stand-alone utility scripts
+└── scripts/                  # Stand-alone calibration/diagnostic/demo scripts
 ```
 
 ---
@@ -78,28 +104,24 @@ git clone https://github.com/RonEllenbogen/Imaging-Spectrometer-Pipeline.git
 Install dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -e .            # core: numpy, scipy, pyyaml, pypylon
+pip install -e ".[gui]"     # + PySide6, pyqtgraph, for the GUI
+pip install -e ".[dev]"     # + pytest, pytest-qt, for the test suite
 ```
+
+Full hardware/environment setup (camera configuration, lab-PC specifics) is in
+[`docs/user_guide.md`](docs/user_guide.md).
 
 ---
 
 ## Usage
 
-Implementation in progress.
+```bash
+python -m pipeline.gui.app          # launch the GUI
+python -m pipeline.cli.calibration  # headless calibration CLI
+```
 
----
-
-## Roadmap
-
-- [x] **Hardware bring-up** — camera connectivity verified via pylon Viewer; minimal single-frame grab script
-- [x] **Acquisition** (`src/pipeline/acquisition/`) — threaded Basler/pypylon interface for live frame grabbing
-- [ ] **Preprocessing** (`src/pipeline/preprocessing/`) — dark-frame subtraction, ROI cropping, wavelength calibration
-- [ ] **Analysis** (`src/pipeline/analysis/`) — per-column centroid + uncertainty, weighted linear fit for spatial chirp ζ
-- [ ] **Validation** (`tests/`) — synthetic-data checks (injected-ζ recovery, null case) and validation against real calibration data (`data/raw` → `data/processed`)
-- [ ] **Headless integration** (`scripts/`) — capture-and-analyze CLI, no GUI
-- [ ] **GUI** (`src/pipeline/gui/`) — live camera display with threaded acquisition
-- [ ] **Full integration** (`src/pipeline/main.py`) — GUI wired to acquisition + analysis pipeline
-- [ ] **Documentation & polish** (`docs/`) — architecture write-up, edge-case handling, results export
+See [`docs/user_guide.md`](docs/user_guide.md) for the full calibration workflow and CLI reference.
 
 ---
 
