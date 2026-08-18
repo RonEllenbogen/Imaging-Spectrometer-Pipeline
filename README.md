@@ -22,6 +22,13 @@ This repository contains the Python application developed for the instrument. Th
 ## Screenshots
 
 <p align="center">
+  <img src="assets/images/welcome_screen_sample.png" alt="Welcome screen" width="80%">
+  <br>
+  <em>Welcome screen: the app's entry point, choosing between loading existing calibrations and
+  creating new ones.</em>
+</p>
+
+<p align="center">
   <img src="assets/images/calibration_screen_sample.png" alt="Calibration screen" width="80%">
   <br>
   <em>Calibration screen: builds baseline, flat-field, conversion-gain, spatial, and spectral
