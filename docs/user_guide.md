@@ -139,6 +139,19 @@ gain together (gain feeds all three consistency checks above); changing only **e
 rebuilding just the baseline (and, if you also want the geometric-tilt/wavelength calibration to stay
 valid against the new setting, the spectral calibration too).
 
+**Rebuild baseline every session, and spectral calibration after any physical adjustment to the
+spectrometer.** The checks above only catch an exposure/gain mismatch — they can't detect a change
+to the optical setup itself:
+
+- **Baseline** — rebuild it at the start of every session, even if exposure/gain are unchanged.
+  Background level can drift session to session (ambient light, thermal drift), and nothing enforces
+  a maximum calibration age, so this is on the operator, not the software.
+- **Spectral calibration** — the pixel→wavelength mapping is only valid for the spectrometer's
+  physical alignment at the time it was built. Rebuild it any time something inside the instrument is
+  adjusted — slit width changed, grating rotated, a mirror's orientation changed, and so on. None of
+  these change `exposure_us`/`gain_db`, so `SettingsMismatchError` won't fire and won't warn you —
+  it's on the operator to know to recapture.
+
 ## Using the CLI
 
 `src/pipeline/cli/calibration.py` is a headless equivalent of the calibration dialogs — same
