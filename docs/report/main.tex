@@ -4,6 +4,8 @@
 
 %load any additional packages
 \usepackage{amssymb}
+\usepackage{url}          % needed for \url{} in website citations
+\usepackage{subcaption}   % needed for side-by-side figures via subfigure
 
 %input macros (i.e. write your own macros file called mymacros.tex 
 %and uncomment the next line)
@@ -36,8 +38,6 @@
 
 
 \maketitle                  % create a title page from the preamble info
-\include{acknowlegements}   % include an acknowledgements.tex file
-\include{abstract}          % include the abstract
 
 \begin{romanpages}          % start roman page numbering
 \tableofcontents            % generate and include a table of contents
@@ -45,20 +45,20 @@
 \end{romanpages}            % end roman page numbering
 
 %now include the files of latex for each of the chapters etc
-\include{chapter1}
-\include{chapter2}
+\include{chapter1}   % Introduction
+\include{chapter2}   % Optical Design
+\include{chapter3}   % Calibration
+\include{chapter4}   % Analysis Pipeline
+\include{chapter5}   % Graphical User Interface
+\include{chapter6}   % Experimental Design
+\include{chapter7}   % Results
+\include{chapter8}   % Discussion
 \include{conclusions}
 
-%now enable appendix numbering format and include any appendices
-\appendix
-\include{appendix1}
-\include{appendix2}
-
 %next line adds the Bibliography to the contents page
-\addcontentsline{toc}{chapter}{Bibliography}
-%uncomment next line to change bibliography name to references
-%\renewcommand{\bibname}{References}
+\addcontentsline{toc}{chapter}{References}
+\renewcommand{\bibname}{References}
 \bibliography{refs}        %use a bibtex bibliography file refs.bib
-\bibliographystyle{plain}  %use the plain bibliography style
+\bibliographystyle{unsrt}  %number references in order of first citation
 
 \end{document}

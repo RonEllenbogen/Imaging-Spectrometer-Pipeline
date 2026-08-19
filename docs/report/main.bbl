@@ -1,0 +1,69 @@
+\begin{thebibliography}{10}
+
+\bibitem{esarey2009}
+Eric Esarey, Carl~B. Schroeder, and Wim~P. Leemans.
+\newblock Physics of laser-driven plasma-based electron accelerators.
+\newblock {\em Reviews of Modern Physics}, 81(3):1229--1285, 2009.
+
+\bibitem{geddes2017}
+Cameron Geddes, Bernhard Ludewigt, John Valentine, Brian Quiter, Marie-Anne Descalle, Glen Warren, Matt Kinlaw, Scott Thompson, David Chichester, Cameron Miller, et~al.
+\newblock Impact of monoenergetic photon sources on nonproliferation applications final report.
+\newblock Technical report, Idaho National Laboratory (INL), Idaho Falls, ID (United States), February 2017.
+
+\bibitem{los2025}
+E.~Los, M.~P{\"o}ttker, M.~Turner, H.~Ahmed, C.~Arran, C.~D. Baird, M.~Barclay, N.~Bourgeois, J.~Bunting, D.~Campbell, J.~Chappell, S.~Chen, C.~Coughlan, W.~Dallari, D.~Doria, M.~Duff, B.~Ersfeld, R.~J. Gray, P.~Hadjisolomou, G.~Hall, R.~Heathcote, A.~Higginson, J.~Huggard, M.~R. Islam, A.~Jeandet, O.~Kononenko, N.~Lemos, N.~C. Lopes, P.~McKenna, C.~D. Murphy, Z.~Najmudin, J.~Nees, C.~A.~J. Palmer, G.~Parry, K.~Poder, P.~P. Rajeev, C.~P. Ridgers, G.~G. Scott, M.~P. Selwood, R.~C. Shah, D.~Symes, A.~G.~R. Thomas, C.~Thornton, J.~Warwick, S.~M. Wiggins, L.~Willingale, M.~Zepf, and J.~M. Cole.
+\newblock Observation of quantum effects on radiation reaction in strong fields.
+\newblock {\em Nature Communications}, 16(1), 2025.
+
+\bibitem{mcanespie2024}
+C.~A. McAnespie, P.~Chaudhary, L.~Calvin, M.~J.~V. Streeter, G.~Nersysian, S.~J. McMahon, K.~M. Prise, and G.~Sarri.
+\newblock Laser-driven electron source suitable for single-shot {G}y-scale irradiation of biological cells at dose rates exceeding $10^{10}$ {G}y/s.
+\newblock {\em Phys. Rev. E}, 110:035204, September 2024.
+
+\bibitem{balcazar2025}
+Mario~D. Balcazar, Hai-En Tsai, Tobias~M. Ostermayr, Paul Campbell, Matthew~R. Trantham, F{\'e}licie Albert, Qiang Chen, Cary Colgan, Gilliss~M. Dyer, Zachary Eisentraut, Eric Esarey, Elizabeth~S. Grace, Benjamin Greenwood, Anthony~J. Gonsalves, Sahel Hakimi, Robert Jacob, Brendan Kettle, Paul King, Karl Krushelnick, Nuno Lemos, Eva~E. Los, Yong Ma, Stuart P.~D. Mangles, John Nees, Isabella~M. Pagano, Carl~B. Schroeder, Raspberry~A. Simpson, Anthony~V. Vazquez, Jeroen van Tilborg, Cameron G.~R. Geddes, Alexander G.~R. Thomas, and Carolyn~C. Kuranz.
+\newblock Multi-messenger dynamic imaging of laser-driven shocks in water using a plasma wakefield accelerator.
+\newblock {\em Nature Communications}, 2025.
+
+\bibitem{jakobsson2021}
+O.~Jakobsson, S.~M. Hooker, and R.~Walczak.
+\newblock {GeV}-scale accelerators driven by plasma-modulated pulses from kilohertz lasers.
+\newblock {\em Phys. Rev. Lett.}, 127:184801, October 2021.
+
+\bibitem{alejo2022}
+A.~Alejo, J.~Cowley, A.~Picksley, R.~Walczak, and S.~M. Hooker.
+\newblock Demonstration of kilohertz operation of hydrodynamic optical-field-ionized plasma channels.
+\newblock {\em Phys. Rev. Accel. Beams}, 25:011301, January 2022.
+
+\bibitem{vandewetering2023}
+J.~J. van~de Wetering, S.~M. Hooker, and R.~Walczak.
+\newblock Stability of the modulator in a plasma-modulated plasma accelerator.
+\newblock {\em Phys. Rev. E}, 108:015204, July 2023.
+
+\bibitem{vandewetering2024}
+J.~J. van~de Wetering, S.~M. Hooker, and R.~Walczak.
+\newblock Multi-{GeV} wakefield acceleration in a plasma-modulated plasma accelerator.
+\newblock {\em Phys. Rev. E}, 109:025206, February 2024.
+
+\bibitem{ross2024}
+A.~J. Ross, J.~Chappell, J.~J. van~de Wetering, J.~Cowley, E.~Archer, N.~Bourgeois, L.~Corner, D.~R. Emerson, L.~Feder, X.~J. Gu, O.~Jakobsson, H.~Jones, A.~Picksley, L.~Reid, W.~Wang, R.~Walczak, and S.~M. Hooker.
+\newblock Resonant excitation of plasma waves in a plasma channel.
+\newblock {\em Phys. Rev. Res.}, 6:L022001, April 2024.
+
+\bibitem{strickland1985}
+Donna Strickland and G{\'e}rard Mourou.
+\newblock Compression of amplified chirped optical pulses.
+\newblock {\em Optics Communications}, 56(3):219--221, 1985.
+
+\bibitem{cuos2026}
+{Center for Ultrafast Optical Science, University of Michigan}.
+\newblock Chirped pulse amplification.
+\newblock \url{https://cuos.engin.umich.edu/researchgroups/hfs/facilities/chirped-pulse-amplification/}.
+\newblock Accessed: 15 August 2026.
+
+\bibitem{gu2004}
+Xun Gu, Selcuk Akturk, and Rick Trebino.
+\newblock Spatial chirp in ultrafast optics.
+\newblock {\em Optics Communications}, 242(4-6):599--604, 2004.
+
+\end{thebibliography}

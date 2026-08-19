@@ -1,0 +1,32 @@
+\chapter{Analysis Pipeline}
+\label{chap:analysis-pipeline}
+
+\section{Preprocessing Pipeline}
+\label{sec:pipeline-preprocessing}
+
+% TODO: The fixed correction order and why it's fixed: frame sanity check
+% -> saturation check -> baseline subtraction -> flat-field division ->
+% bad-pixel masking -> optional ROI masking. Frame this as encoded in
+% run_preprocessing(), not just documented convention.
+
+\section{Noise Model and Uncertainty Propagation}
+\label{sec:pipeline-noise-model}
+
+% TODO: Thompson-Larson-Webb-style noise model combining background_sigma
+% (from baseline calibration) and conversion gain; how uncertainty
+% propagates through to the fitted dispersion coefficients.
+
+\section{Spatial Dispersion Fitting}
+\label{sec:pipeline-dispersion-fitting}
+
+% TODO: x0(lambda) = c0 + c1*lambda, zeta = dx0/dlambda = c1; total
+% least-squares fitting (why TLS over OLS -- both axes carry uncertainty).
+% See presentation slide 15 for the fit diagram/equations.
+
+\section{Multi-Shot Combination}
+\label{sec:pipeline-multi-shot}
+
+% TODO: How repeated shots are combined into one result (reduced
+% chi-squared as the diagnostic), and the design choice of averaging before
+% vs after centroiding -- flag this as something later re-examined as a
+% possible systematic in the Discussion chapter.

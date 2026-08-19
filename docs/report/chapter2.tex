@@ -1,0 +1,53 @@
+\chapter{Optical Design}
+\label{chap:optical-design}
+
+\section{Design Requirements}
+\label{sec:optical-requirements}
+
+% TODO: What the instrument needed to do (resolve spatial position along a
+% vertical entrance slit vs wavelength, fit in the available bench space,
+% work with the existing Ti:sapphire beam) and the constraints that shaped
+% the choices below.
+
+\section{4f All-Transmissive Layout vs Czerny-Turner}
+\label{sec:optical-layout-choice}
+
+% TODO: Why a 4f all-transmissive design (transmission grating, achromatic
+% doublets) was chosen over a Czerny-Turner (mirror-based) layout --
+% simpler geometry, less astigmatism-prone, less chromatic-aberration-prone.
+% See presentation slide 18 for the comparison figure.
+
+\section{Optical Layout}
+\label{sec:optical-layout}
+
+% TODO: Walk through the beam path: vertical entrance slit -> collimating
+% lens (achromatic doublet) -> transmission grating -> plane mirrors ->
+% focussing lens (achromatic doublet) -> plane mirrors -> 90-degree
+% periscope -> camera. See presentation slides 11-12 (schematic + bench
+% photo) and slide 17 (periscope geometry) -- the periscope may warrant its
+% own subsection if the geometry needs deriving in detail.
+
+\section{Camera and Acquisition Hardware}
+\label{sec:optical-camera}
+
+% TODO: Basler a2A1920-51gmBAS via pypylon -- sensor format, pixel format,
+% canonical frame shape/dtype (see src/pipeline/acquisition/frame.py and
+% configs/default.yaml), and how CameraStream's background-thread
+% acquisition model fits into the optical design (i.e. why this section
+% belongs here rather than in the Analysis Pipeline chapter).
+
+\section{Alignment Procedure}
+\label{sec:optical-alignment}
+
+\subsection{Grating-Camera Axis Alignment}
+\label{sec:optical-grating-camera-alignment}
+
+% TODO: What "grating-camera axis misalignment" looks like on a raw frame
+% and how it was corrected. See presentation slide 19 (misaligned vs
+% corrected spectral-line images).
+
+\subsection{Slit-Camera Axis Alignment}
+\label{sec:optical-slit-camera-alignment}
+
+% TODO: Same for slit-camera axis alignment. See presentation slides 20-22
+% (misaligned vs corrected images with fitted alignment lines).

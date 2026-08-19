@@ -1,0 +1,71 @@
+\chapter{Calibration}
+\label{chap:calibration}
+
+\section{Calibration Architecture}
+\label{sec:calib-architecture}
+
+% TODO: The build/apply split -- calibration/ builds artifacts,
+% preprocessing/ applies them -- and why that separation exists (a science
+% frame's settings are checked against the artifact's recorded
+% exposure/gain/timestamp via CalibrationRecord before it's applied). Frame
+% this as the organizing principle for the rest of the chapter.
+
+\section{Sensor Calibration}
+\label{sec:calib-sensor}
+
+\subsection{Baseline}
+\label{sec:calib-baseline}
+
+% TODO: Per-session background/dark average; background_sigma measured for
+% free from the same stacked frames, used later in the noise model
+% (chapter 4).
+
+\subsection{Flat Field}
+\label{sec:calib-flat-field}
+
+% TODO: PRNU correction from uniform-illumination frames, dark-subtracted
+% first; rejects a saturated source outright.
+
+\subsection{Bad Pixel Map}
+\label{sec:calib-bad-pixel}
+
+% TODO: Dead/hot pixels flagged from flat-field outliers; zeroed rather
+% than interpolated when applied (exact for a weighted centroid).
+
+\subsection{Conversion Gain}
+\label{sec:calib-conversion-gain}
+
+% TODO: Photon transfer curve -- uniform illumination at fixed brightness,
+% swept across exposure times; variance computed temporally (not
+% spatially) so PRNU doesn't bias the gain low.
+
+\section{Spatial Calibration}
+\label{sec:calib-spatial}
+
+% TODO: Fixed scale factor (ratio of the two relay-lens focal lengths)
+% rather than a translation-stage fit, and why that's precise enough for
+% this project's scope. Practical measured magnification M = 1.504 +/-
+% 0.008 -- see presentation slide 24.
+
+\section{Spectral Calibration}
+\label{sec:calib-spectral}
+
+\subsection{Grating Geometry and Predicted Line Spacing}
+\label{sec:calib-grating-geometry}
+
+% TODO: Transmission-grating equation predicting relative pixel spacing
+% between known Argon lines, used to search for/identify peaks.
+
+\subsection{Line Matching}
+\label{sec:calib-line-matching}
+
+% TODO: Peak detection (1D collapse + find_peaks + sub-pixel refinement)
+% and matching detected peaks to reference Argon lines.
+
+\subsection{Wavelength Fit and Non-Linear Dispersion}
+\label{sec:calib-wavelength-fit}
+
+% TODO: Linear/quadratic/cubic pixel-to-wavelength fits and the evidence
+% for non-linear spectral dispersion (reduced chi-squared comparison,
+% pixel-column/uncertainty correlation r = -0.96). See presentation
+% slide 23.
