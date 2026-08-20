@@ -138,19 +138,95 @@ due to its direct relationship with the diffraction angle of optical gratings.
 
 
 
-% TODO: Derive/explain how angular chirp d(theta)/d(lambda) upstream of a
-% focussing optic becomes spatial chirp dx/d(lambda) at focus. See
-% presentation slides 6-7 (lens vs axicon focus comparison).
-
-\subsection{Consequences for the Plasma Wave}
+\subsection{Consequences for P-MoPA}
 \label{sec:intro-consequences}
+A spatially chirped focal spot occupies a larger area than otherwise, reducing the focus' peak
+intensity. Furthermore, the spatial seperation of optical frequencies at the focus means
+the local bandwidth is reduced, which can lengthen the pulse's duration and also resulting in a reduced 
+peak intensity. For a channel-forming pulse used to ionise a plasma channel for the P-MoPA accelerator
+stage, a sufficient reduction in peak intensity may lead to incomplete ionisation or a lower ionisation
+state, modifying the electron-density profile of the plasma formed \cite{shalloo2018}. If this changes the effective plasma
+density experienced by the pulse train, then this is particularly detrimental to the P-MoPA scheme 
+because the modulation
+and acceleration plasma stages must share the same plasma frequency.
+This is precisely what allows the pulse train to have the appropriate spacing required to resonantly
+ drive
+a wakefield in the accelerator stage \cite{vandewetering2023}.
+Additionally, the initially ionised plasma column may have a smaller radius, as the radial distance
+ at which the pulse's
+transverse intensity distribution crosses the ionisation threshold moves inward. At sufficiently low
+intensity, the volume of gas ionised and the energy deposited into the plasma may become insufficient
+to form a guiding channel with the desired properties \cite{shalloo2018}.
 
-% TODO: Spatial chirp -> elongated focal spot / longer pulse duration /
-% reduced intensity; angular chirp -> pulse front tilt -> asymmetric drive
-% of the plasma wave. See presentation slide 8 ("Why Should You Care?").
+The wakefield is driven by the ponderomotive force associated with the pulse train, which
+is proportional to the gradient of the laser
+intensity \cite{esarey2009,jakobsson2021}.
+If the pulse train is focussed to a spatially chirped focal spot at the entrance to the accelerator
+stage's plasma channel, each pulse's peak intensity is reducd and its intensity distribution broadened,
+generally reducing the intensity gradients,
+leading to a wakefield with reduced field strength.
+ Electrons are therefore accelerated to lower energies, reducing the utility of the 
+project for its various applications \cite{vandewetering2024}. Furthermore, if a pulse's frequency
+components enter the plasma channel
+at varying transverse positions and angles due to spatial and angular chirp, they may not all couple
+equally into the desired guiding mode, reduced the fraction of energy coupled into this mode. 
+Higher order modes 
+may also be excited, causing asymmetric transverse field distributions, and producing interference that
+oscillates the intensity distribution longitudinally down the plasma channel \cite{vandewetering2024,wang2017}.
 
-\section{Measuring Angular Chirp}
+Aside from spatial chirp at the focus, angular chirp is also closely associated with pulse-front tilt,
+where different transverse positions reach peak intensity at different times \cite{akturk2004}. This spatio-temporal 
+coupling leads to a transversely asymmetric drive of the plasma wave, producing an asymmetric wakefield
+that may deflect accelerated electrons from the optical axis \cite{thevenet2019}. While this effect may be used to 
+steer the accelerated electron beam, it is not always desirable, and the ability to control it is
+essential.
+
+Within the modulator, angular chirp may also reduce the coupling of the seed and drive pulses to the
+plasma channel's guided mode as well as modifying their spatial overlap with eachother, distorting 
+the modulation of the drive pulse. These distortions may affect the pulse train and can
+cause further issues in the accelerator stage.
+
+
+
+\section{Measuring Spatial Chirp}
 \label{sec:intro-measuring}
+
+\begin{figure}[tbp]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/no_chirp_diagram.png}
+        \caption{$\zeta=0$}
+        \label{fig:zero-chirp}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chirp_diagram.png}
+        \caption{$\zeta\neq0$}
+        \label{fig:non-zero-chirp}
+    \end{subfigure}
+    \caption[Spatially and un-spatially chirped imaging spectrometer-camera images.]{
+        Illustration of imaging spectrometer-camera images of an un-spatially chirped
+    pulse (a) and a spatially chirped pulse with plotted $x_{0}(\lambda)$ and a line 
+    of best fit (b).}
+    \label{fig:camera_image_illustrations}
+\end{figure}
+
+One must be able to detect the existance of spatio-spectral couplings in a laser system before being
+ able to correct
+them. A common device used for such detection is called an imaging spectrometer \cite{gu2004}. It works by
+selecting a thin transverse slice of a pulse's spatial profile, before dispersing it in the
+orthogonal transverse direction. The result is a two-dimensional image with one axis corresponding
+to wavelength $\lambda$, and the other corresponding to position $x$ along a transverse axis across 
+the pulse's 
+spatial profile (see Figure \ref{fig:zero-chirp}). One can then observe the variation of a given wavelength's 
+intensity across the beam's spatial profile, and identify the centroid position $x_{0}$, representing
+the center of that wavelength's intensity distribution. Repeating this for a discretised set of 
+wavelengths
+results in a dataset for $x_{0}(\lambda)$, to which various models can be fit to characterise the
+spatio-spectral coupling (see Figure \ref{fig:non-zero-chirp}). Differentiating these fitted models allows for computing the pulse's
+spatial dispersion $\zeta$.
 
 % TODO: Motivate the imaging-spectrometer approach as the measurement
 % technique chosen (transition from "how do we measure this" to "here is

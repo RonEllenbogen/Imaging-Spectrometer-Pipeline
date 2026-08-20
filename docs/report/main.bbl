@@ -66,4 +66,24 @@ Xun Gu, Selcuk Akturk, and Rick Trebino.
 \newblock Spatial chirp in ultrafast optics.
 \newblock {\em Optics Communications}, 242(4-6):599--604, 2004.
 
+\bibitem{shalloo2018}
+R.~J. Shalloo, C.~Arran, L.~Corner, L.~Videau, J.~Jonnerby, G.~Vieux, M.~J.~V. Streeter, R.~Walczak, and S.~M. Hooker.
+\newblock Hydrodynamic optical-field-ionized plasma channels.
+\newblock {\em Phys. Rev. E}, 97:053203, May 2018.
+
+\bibitem{wang2017}
+J.~W. Wang, C.~B. Schroeder, R.~Li, M.~Zepf, and S.~G. Rykovanov.
+\newblock Plasma channel undulator excited by high-order laser modes.
+\newblock {\em Scientific Reports}, 7:16884, December 2017.
+
+\bibitem{akturk2004}
+Selcuk Akturk, Xun Gu, Erik Zeek, and Rick Trebino.
+\newblock Pulse-front tilt caused by spatial and temporal chirp.
+\newblock {\em Optics Express}, 12(19):4399--4410, 2004.
+
+\bibitem{thevenet2019}
+M.~Th{\'e}venet, D.~E. Mittelberger, K.~Nakamura, R.~Lehe, C.~B. Schroeder, J.-L. Vay, E.~Esarey, and W.~P. Leemans.
+\newblock Pulse front tilt steering in laser plasma accelerators.
+\newblock {\em Phys. Rev. Accel. Beams}, 22:071301, July 2019.
+
 \end{thebibliography}
