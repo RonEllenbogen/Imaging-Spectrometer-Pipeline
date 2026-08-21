@@ -175,6 +175,16 @@ OUTPUT chapter2.aux
 INPUT ./chapter2.tex
 INPUT ./chapter2.tex
 INPUT chapter2.tex
+INPUT ./figures/optical_layout.png
+INPUT ./figures/optical_layout.png
+INPUT ./figures/optical_layout.png
+INPUT ./figures/optical_layout.png
+INPUT ./figures/optical_layout.png
+INPUT ./figures/real_optical_layout.png
+INPUT ./figures/real_optical_layout.png
+INPUT ./figures/real_optical_layout.png
+INPUT ./figures/real_optical_layout.png
+INPUT ./figures/real_optical_layout.png
 INPUT ./chapter3.tex
 INPUT ./chapter3.tex
 OUTPUT chapter3.aux
@@ -231,6 +241,7 @@ INPUT ./main.bbl
 INPUT ./main.bbl
 INPUT main.bbl
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/tfm/public/cm/cmtt12.tfm
+INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/tfm/jknappen/ec/tcrm1200.tfm
 INPUT main.aux
 INPUT ./chapter1.aux
 INPUT ./chapter1.aux
@@ -259,6 +270,7 @@ INPUT chapter8.aux
 INPUT ./conclusions.aux
 INPUT ./conclusions.aux
 INPUT conclusions.aux
+INPUT /Users/ronellenbogen/Library/texlive/2026basic/texmf-var/fonts/pk/ljfour/jknappen/ec/tcrm1200.600pk
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi12.pfb
@@ -268,6 +280,7 @@ INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmr
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb
+INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmti12.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt12.pfb
 INPUT /usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb

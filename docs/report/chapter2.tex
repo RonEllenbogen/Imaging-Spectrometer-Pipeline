@@ -1,17 +1,6 @@
 \chapter{Optical Design}
 \label{chap:optical-design}
 
-\section{Design Requirements}
-\label{sec:optical-requirements}
-
-% TODO: What the instrument needed to do (resolve spatial position along a
-% vertical entrance slit vs wavelength, fit in the available bench space,
-% work with the existing Ti:sapphire beam) and the constraints that shaped
-% the choices below.
-
-\section{4f All-Transmissive Layout vs Czerny-Turner}
-\label{sec:optical-layout-choice}
-
 % TODO: Why a 4f all-transmissive design (transmission grating, achromatic
 % doublets) was chosen over a Czerny-Turner (mirror-based) layout --
 % simpler geometry, less astigmatism-prone, less chromatic-aberration-prone.
@@ -20,12 +9,66 @@
 \section{Optical Layout}
 \label{sec:optical-layout}
 
+\begin{figure}[tbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/optical_layout.png}
+    \caption[Imaging spectrometer schematic.]{Imaging spectrometer schematic from a top view.}
+    \label{fig:layout}
+\end{figure}
+
+\begin{figure}[tbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/real_optical_layout.png}
+    \caption[Photograph of the imaging spectrometer.]{Photograph of the imaging spectrometer from a top view.}
+    \label{fig:real_layout}
+\end{figure}
+
+The imaging spectrometer was designed to accommodate a bandwidth of 760–840
+nm as specified by the project supervisor, Dr Benjamin Greenwood, based on 
+the expected operating bandwidth of the laser system.
+The imaging spectrometer design consists of a 4f imaging system with a 
+diffraction grating inserted in the common Fourier plane (see Figures 
+\ref{fig:layout} and \ref{fig:real_layout}). The collimating and focussing
+optics were selected as lenses rather than spherical mirrors. This
+is because the use of a spherical mirror at a large angle of incidence
+produces off-axis astigmatism \cite{kingslake2010}. This can be mitigated by
+introducing tight-folds in the optical layout, but this is practically 
+challenging due to having to mount components extremely close to eachother.
+A drawback of using lenses is that they are prone to chromatic aberration 
+\cite{kingslake2010}. This is particularly detrimental as chromatic aberration
+is a spatio-spectral coupling and can systematically bias measurements 
+towards larger spatial dispersions. Achromatic doublet lenses were used
+in an attempt to minimise these effects. The focal lengths of the collimating
+and focussing lenses 
+were chosen to be 150 mm (Thorlabs AC254-150-B-ML) and 100 mm (Edmund 
+Optics \#9823) 
+respectively as a middle ground between
+maximising the accuracy, and maximising the precision of spatial dispersion
+measurements (see Section \ref{sec:pipeline-focal-length-tradeoff}). 
+
+A transmission grating was chosen over a reflection grating for the sake of
+avoiding an impractical tight fold in the optical layout. Specifically, a 
+volume phase holographic transmission grating was used because of its 
+low polarisation dependence and low stray light \cite{thorlabsvph2026}, 
+and $\approx 90-95\%$ first-order diffraction 
+efficiency at the $14.6^\circ$ design angle-of-incidence across the 760-840
+nm bandwidth \cite{thorlabsgp1006l2026}.
+
 % TODO: Walk through the beam path: vertical entrance slit -> collimating
 % lens (achromatic doublet) -> transmission grating -> plane mirrors ->
 % focussing lens (achromatic doublet) -> plane mirrors -> 90-degree
 % periscope -> camera. See presentation slides 11-12 (schematic + bench
 % photo) and slide 17 (periscope geometry) -- the periscope may warrant its
 % own subsection if the geometry needs deriving in detail.
+
+% TODO: State the chosen focal lengths (collimating/focussing doublet pair,
+% periscope relay lenses) as given values here -- descriptive only, no
+% derivation. These were chosen to minimise the propagated uncertainty in
+% the fitted spatial dispersion zeta; the quantitative trade study that
+% justifies the specific values is deferred to Section~\ref{sec:pipeline-dispersion-fitting}
+% once the noise model and TLS fit machinery exist to support it. One
+% sentence here pointing there is enough -- do not re-derive the error
+% propagation in this chapter.
 
 \section{Camera and Acquisition Hardware}
 \label{sec:optical-camera}
